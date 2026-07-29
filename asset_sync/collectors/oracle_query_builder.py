@@ -12,9 +12,13 @@ selected as NULL and reported back so the operator can map them by hand.
 from __future__ import annotations
 
 import datetime as dt
+import re
 from typing import Any, Iterable, Mapping
 
 from ..utils.validation import validate_oracle_identifier
+
+MAX_FILTER_VALUES = 50
+MAX_FILTER_VALUE_LENGTH = 128
 
 # Logical columns the pipeline reads, in output order. cpu/memory/eos entries are
 # filled from the ITSM settings because they are configurable per site.
@@ -112,26 +116,68 @@ def _auto_match(logical: str, available: Mapping[str, str]) -> str | None:
     return None
 
 
+def normalize_filter_values(raw: Any) -> list[str]:
+    """Accept a list or a comma/newline separated string of filter code values."""
+    if raw is None:
+        return []
+    items: list[str] = []
+    if isinstance(raw, str):
+        items = re.split(r"[,\n\r;]+", raw)
+    elif isinstance(raw, (list, tuple, set)):
+        items = [str(value) for value in raw]
+    else:
+        items = [str(raw)]
+    values: list[str] = []
+    for item in items:
+        value = str(item).strip()
+        if not value or value in values:
+            continue
+        values.append(value)
+    return values
+
+
+def _filter_literal(value: str) -> str:
+    """Quote one code value as an Oracle string literal."""
+    if len(value) > MAX_FILTER_VALUE_LENGTH:
+        raise ValueError(f"필터 코드값이 너무 깁니다({MAX_FILTER_VALUE_LENGTH}자 이내): {value[:40]}…")
+    if any(character in value for character in ("\n", "\r", "\x00")):
+        raise ValueError("필터 코드값에 줄바꿈이나 제어문자를 넣을 수 없습니다.")
+    return "'" + value.replace("'", "''") + "'"
+
+
 def build_asset_query(
     *,
     source_columns: Iterable[str],
     itsm_cfg: Mapping[str, Any],
     asset_source: str = "",
-    overrides: Mapping[str, str] | None = None,
+    overrides: Mapping[str, Any] | None = None,
+    filter_column: str = "",
+    filter_values: Any = None,
     generated_at: dt.datetime | None = None,
 ) -> dict[str, Any]:
-    """Return the generated SQL plus the mapping report for the admin screen."""
+    """Return the generated SQL plus the mapping report for the admin screen.
+
+    ``overrides`` maps a logical column to the source column chosen by the
+    operator; an empty value forces that column to be selected as NULL. When
+    ``filter_column`` is given, its code values become a WHERE ... IN clause.
+    """
     available_list = [str(name).strip().upper() for name in source_columns if str(name).strip()]
     available: dict[str, str] = {}
     for name in available_list:
         available.setdefault(_normalize(name), name)
         available.setdefault(f"~{_without_cm_prefix(name)}", name)
 
-    override_map: dict[str, str] = {}
+    override_map: dict[str, str | None] = {}
     for logical, actual in (overrides or {}).items():
         logical_name = str(logical).strip().upper()
-        actual_name = str(actual).strip().upper()
-        if not logical_name or not actual_name:
+        if not logical_name:
+            continue
+        actual_name = str(actual or "").strip().upper()
+        if not actual_name:
+            # An explicit blank means "do not map this column"; it is a real choice,
+            # not a missing value, so it must survive as NULL instead of falling back
+            # to the automatic match.
+            override_map[logical_name] = None
             continue
         if actual_name not in available_list:
             raise ValueError(f"{logical_name}에 지정한 컬럼이 테이블에 없습니다: {actual_name}")
@@ -145,25 +191,42 @@ def build_asset_query(
     select_lines: list[str] = []
     for logical in logical_columns(itsm_cfg):
         validate_oracle_identifier(logical, "logical_column")
-        source = override_map.get(logical) or _auto_match(logical, available)
+        forced = logical in override_map
+        source = override_map[logical] if forced else _auto_match(logical, available)
         alias = alias_tokens.get(logical, logical)
         if source is None:
             select_lines.append(f"    NULL AS {alias}")
             match_type = "MISSING"
         elif source == logical:
             select_lines.append(f"    {alias}" if alias == logical else f"    {source} AS {alias}")
-            match_type = "EXACT"
+            match_type = "OVERRIDE" if forced else "EXACT"
         else:
             select_lines.append(f"    {source} AS {alias}")
-            match_type = "OVERRIDE" if logical in override_map else "MAPPED"
+            match_type = "OVERRIDE" if forced else "MAPPED"
         mapping.append(
             {
                 "logical_column": logical,
                 "source_column": source,
                 "match_type": match_type,
+                "forced": forced,
                 "required": logical in REQUIRED_LOGICAL_COLUMNS or logical in alias_tokens,
             }
         )
+
+    selected_filter = str(filter_column or "").strip().upper()
+    values = normalize_filter_values(filter_values)
+    where_line = ""
+    if selected_filter:
+        if selected_filter not in available_list:
+            raise ValueError(f"조회 조건 컬럼이 테이블에 없습니다: {selected_filter}")
+        selected_filter = validate_oracle_identifier(selected_filter, "filter_column")
+        if not values:
+            raise ValueError("조회 조건 컬럼을 선택하면 코드값을 1개 이상 입력해야 합니다.")
+        if len(values) > MAX_FILTER_VALUES:
+            raise ValueError(f"조회 조건 코드값은 최대 {MAX_FILTER_VALUES}개까지 지정할 수 있습니다.")
+        where_line = f"WHERE {selected_filter} IN ({', '.join(_filter_literal(value) for value in values)})"
+    elif values:
+        raise ValueError("조회 조건 코드값을 사용하려면 조건 컬럼을 함께 선택해야 합니다.")
 
     stamp = (generated_at or dt.datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
     header = [
@@ -171,15 +234,20 @@ def build_asset_query(
         f"-- 생성 시각: {stamp}",
         f"-- 대상 테이블: {asset_source or '${ASSET_SOURCE}'}",
         "-- 원본 테이블에 없는 컬럼은 NULL로 조회하여 필수 컬럼 검증을 통과시킵니다.",
-        "-- 실제 컬럼으로 교체하거나 WHERE 조건을 추가하려면 이 파일을 직접 수정하세요.",
+        "-- 컬럼 매핑과 조회 조건은 화면에서 다시 지정할 수 있으며 이 파일을 직접 수정해도 됩니다.",
     ]
     missing = [item["logical_column"] for item in mapping if item["match_type"] == "MISSING"]
     if missing:
         header.append(f"-- 매핑되지 않은 컬럼: {', '.join(missing)}")
-    filter_column = available.get(_normalize("CM_CAT_CD")) or available.get("~CATCD")
     body = ["SELECT", ",\n".join(select_lines), "FROM ${ASSET_SOURCE}"]
-    if filter_column:
-        body.append(f"-- WHERE {filter_column} IN ('HW0101', 'HW0102', 'HW0104')")
+    if where_line:
+        body.append(where_line)
+    else:
+        suggested = available.get(_normalize("CM_CAT_CD")) or available.get("~CATCD")
+        header.append(
+            f"-- 조회 조건 없음: 대상 테이블 전체 행을 수집합니다."
+            + (f" 자산 구분 컬럼 후보: {suggested}" if suggested else "")
+        )
     sql = "\n".join(header) + "\n" + "\n".join(body) + "\n"
 
     return {
@@ -193,4 +261,8 @@ def build_asset_query(
         ],
         "matched_count": sum(1 for item in mapping if item["match_type"] != "MISSING"),
         "total_count": len(mapping),
+        "source_columns": available_list,
+        "filter_column": selected_filter,
+        "filter_values": values,
+        "where_clause": where_line,
     }

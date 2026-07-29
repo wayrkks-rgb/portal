@@ -2039,6 +2039,42 @@ function buildOraclePayload(scope='ASSET_QUERY'){
 
 let oracleCatalogTables=[];
 let oracleCatalogSelection=null;
+let oracleCatalogColumns=[];
+let oracleCatalogOverrides={};
+let oracleCatalogAutoMapping={};
+
+function setOracleMappingOverride(logical,value){
+  // 사용자가 건드린 컬럼은 값이 자동매핑 결과와 같더라도 지정으로 유지합니다.
+  // 그래야 '(NULL로 조회)' 선택이 자동매핑으로 되돌아가지 않습니다.
+  oracleCatalogOverrides[logical]=value||'';
+  updateOracleMappingDirtyState();
+}
+
+function updateOracleMappingDirtyState(){
+  const count=Object.keys(oracleCatalogOverrides).length;
+  const badge=document.getElementById('oracle-mapping-dirty');
+  if(badge){
+    badge.style.display=count?'':'none';
+    badge.textContent=`직접 지정 ${count}개 · 미리보기 또는 적용을 눌러 반영`;
+  }
+  const resetButton=document.getElementById('btn-oracle-map-reset');
+  if(resetButton)resetButton.disabled=!count;
+}
+
+function resetOracleMappingOverrides(){
+  oracleCatalogOverrides={};
+  updateOracleMappingDirtyState();
+  applyOracleAssetSource(false);
+}
+
+function currentOracleFilter(){
+  const columnEl=document.getElementById('oracle-filter-column');
+  const valuesEl=document.getElementById('oracle-filter-values');
+  return {
+    filter_column:columnEl?columnEl.value:'',
+    filter_values:valuesEl?valuesEl.value:''
+  };
+}
 
 function renderOracleAssetSourceState(){
   const el=document.getElementById('oracle-current-asset-source');
@@ -2106,6 +2142,9 @@ async function inspectOracleTable(index){
   const target=oracleCatalogTables[index];
   if(!target)return;
   oracleCatalogSelection=target;
+  oracleCatalogColumns=[];
+  oracleCatalogOverrides={};
+  oracleCatalogAutoMapping={};
   const detail=document.getElementById('oracle-table-detail');
   detail.innerHTML='<div class="text-sm text-muted"><span class="loading"></span> 컬럼 정보를 불러오는 중...</div>';
   const payload=buildOracleCatalogPayload({owner:target.owner,table_name:target.table_name});
@@ -2117,11 +2156,14 @@ async function inspectOracleTable(index){
     detail.innerHTML=`<div class="alert alert-error">❌ 컬럼 조회 실패: ${escapeHtml(columns.error||'')}</div>`;
     return;
   }
+  oracleCatalogColumns=(columns.columns||[]).map(c=>c.column_name);
   const columnRows=(columns.columns||[]).map(c=>`<tr>
     <td class="mono">${escapeHtml(c.column_name)}</td>
     <td>${escapeHtml(c.data_type)}${c.data_precision!=null?`(${c.data_precision}${c.data_scale?','+c.data_scale:''})`:(c.data_length?`(${c.data_length})`:'')}</td>
     <td>${c.nullable?'Y':'N'}</td>
     <td>${escapeHtml(c.comments||'-')}</td></tr>`).join('');
+  const filterOptions=['<option value="">조건 없음 · 전체 행 수집</option>']
+    .concat(oracleCatalogColumns.map(name=>`<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`)).join('');
   const previewBlock=preview.status==='SUCCESS'
     ? `<div class="table-wrap" style="max-height:260px;overflow:auto"><table>
          <thead><tr>${(preview.columns||[]).map(c=>`<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>
@@ -2141,6 +2183,16 @@ async function inspectOracleTable(index){
         </div>
       </div>
       <div id="oracle-mapping-result" class="action-result" aria-live="polite"></div>
+      <div class="alert alert-info" style="margin-top:12px;margin-bottom:0">
+        조회 조건을 지정하지 않으면 <strong>대상 테이블의 전체 행</strong>을 수집합니다.
+        서버 자산만 수집하려면 구분 컬럼과 실제 코드값을 지정하세요. 코드값이 실제와 다르면 0건 조회로 수집이 중단됩니다.
+      </div>
+      <div class="grid-2" style="margin-top:12px">
+        <div class="form-group" style="margin:0"><label class="form-label">조회 조건 컬럼</label>
+          <select class="form-select" id="oracle-filter-column">${filterOptions}</select></div>
+        <div class="form-group" style="margin:0"><label class="form-label">코드값 · 쉼표로 구분</label>
+          <input class="form-input" id="oracle-filter-values" placeholder="예: HW0101, HW0102, HW0104"></div>
+      </div>
       <div class="grid-2" style="margin-top:12px">
         <div>
           <div class="text-sm" style="font-weight:700;margin-bottom:6px">컬럼 정의</div>
@@ -2165,7 +2217,9 @@ async function applyOracleAssetSource(apply){
   const res=await integrationFetch('/api/asset-sync/admin/oracle/asset-source',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildOracleCatalogPayload({
     owner:oracleCatalogSelection.owner,
     table_name:oracleCatalogSelection.table_name,
-    apply:Boolean(apply)
+    apply:Boolean(apply),
+    mapping:oracleCatalogOverrides,
+    ...currentOracleFilter()
   }))});
   setButtonBusy(buttonId,false,'',buttonText);
   if(res.status!=='SUCCESS'){
@@ -2177,36 +2231,60 @@ async function applyOracleAssetSource(apply){
   const details=[];
   if(res.missing_required_columns&&res.missing_required_columns.length)details.push(`필수 컬럼 미매핑: ${res.missing_required_columns.join(', ')} · NULL로 조회됩니다.`);
   if(res.missing_columns&&res.missing_columns.length)details.push(`전체 미매핑 컬럼 ${res.missing_columns.length}개`);
+  details.push(res.where_clause?`조회 조건: ${res.where_clause}`:'조회 조건 없음 · 대상 테이블 전체 행을 수집합니다.');
   if(verification&&verification.status==='SUCCESS')details.push(`자산 조회 검증 성공 · 샘플 ${verification.sample_count}건`);
   if(failedVerification)details.push(`자산 조회 검증 실패(${verification.stage}): ${verification.error}`);
   setActionResult('oracle-mapping-result',{
     state:failedVerification?'error':(res.applied?'success':'info'),
     title:res.applied?'자산 원본 적용 완료':'매핑 미리보기 완료',
     summary:res.message,
-    meta:[`${res.matched_count}/${res.total_count} 컬럼 매핑`,res.asset_source],
+    meta:[`${res.matched_count}/${res.total_count} 컬럼 매핑`,res.asset_source,res.filter_column?`조건 ${res.filter_column}`:'조건 없음'],
     details
   });
+  oracleCatalogAutoMapping={};
+  (res.mapping||[]).forEach(m=>{if(!m.forced)oracleCatalogAutoMapping[m.logical_column]=m.source_column||'';});
+  // 서버가 정규화한 조회 조건을 화면에 되돌려 실제 적용된 값과 일치시킵니다.
+  const filterColumnEl=document.getElementById('oracle-filter-column');
+  if(filterColumnEl)filterColumnEl.value=res.filter_column||'';
+  const filterValuesEl=document.getElementById('oracle-filter-values');
+  if(filterValuesEl)filterValuesEl.value=(res.filter_values||[]).join(', ');
   if(res.applied){
     integrationOracleInternal.asset_source=res.asset_source;
     integrationOracleInternal.query_file_exists=true;
     renderOracleAssetSourceState();
     integrationToast(failedVerification?'자산 원본은 저장했지만 조회 검증에 실패했습니다.':'자산 원본을 적용했습니다.',failedVerification?'error':'success');
   }
-  const mappingRows=(res.mapping||[]).map(m=>`<tr>
-    <td class="mono">${escapeHtml(m.logical_column)}</td>
-    <td class="mono">${escapeHtml(m.source_column||'NULL')}</td>
-    <td>${m.match_type==='MISSING'?'❌ 없음':(m.match_type==='EXACT'?'✅ 동일':'🔁 자동매핑')}</td>
-    <td>${m.required?'필수':'선택'}</td></tr>`).join('');
+  const columnOptions=(res.source_columns||oracleCatalogColumns||[]);
+  const mappingRows=(res.mapping||[]).map(m=>{
+    const selected=m.source_column||'';
+    const options=[`<option value=""${selected?'':' selected'}>(NULL로 조회)</option>`]
+      .concat(columnOptions.map(name=>`<option value="${escapeHtml(name)}"${name===selected?' selected':''}>${escapeHtml(name)}</option>`)).join('');
+    const label=m.match_type==='OVERRIDE'?'✏️ 직접 지정'
+      :m.match_type==='MISSING'?'❌ 없음'
+      :m.match_type==='EXACT'?'✅ 동일':'🔁 자동매핑';
+    const warn=m.required&&!m.source_column;
+    return `<tr${warn?' style="background:rgba(220,38,38,0.06)"':''}>
+      <td class="mono">${escapeHtml(m.logical_column)}</td>
+      <td><select class="form-select" style="min-width:180px" onchange="setOracleMappingOverride('${escapeHtml(m.logical_column)}',this.value)">${options}</select></td>
+      <td>${label}</td>
+      <td>${m.required?'필수':'선택'}</td></tr>`;
+  }).join('');
   document.getElementById('oracle-mapping-detail').innerHTML=`
     <details open>
       <summary class="text-sm" style="cursor:pointer;font-weight:700">컬럼 매핑 결과 · ${res.matched_count}/${res.total_count}</summary>
-      <div class="table-wrap" style="max-height:260px;overflow:auto;margin-top:8px"><table>
+      <div class="text-xs text-muted" style="margin-top:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <span>자동매핑이 틀렸거나 비어 있으면 원본 컬럼을 직접 선택한 뒤 다시 미리보기 또는 적용을 누르세요.</span>
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-oracle-map-reset" onclick="resetOracleMappingOverrides()">자동매핑으로 초기화</button>
+        <span class="badge badge-blue" id="oracle-mapping-dirty" style="display:none"></span>
+      </div>
+      <div class="table-wrap" style="max-height:320px;overflow:auto;margin-top:8px"><table>
         <thead><tr><th>수집 컬럼</th><th>원본 컬럼</th><th>매핑</th><th>구분</th></tr></thead><tbody>${mappingRows}</tbody></table></div>
     </details>
     <details style="margin-top:10px">
       <summary class="text-sm" style="cursor:pointer;font-weight:700">생성된 자산 조회 SQL</summary>
       <pre style="white-space:pre-wrap;margin-top:8px;font-size:12px">${escapeHtml(res.sql)}</pre>
     </details>`;
+  updateOracleMappingDirtyState();
 }
 
 function buildVCenterPayload(){

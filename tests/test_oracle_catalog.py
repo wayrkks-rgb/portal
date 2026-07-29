@@ -194,9 +194,83 @@ def test_build_asset_query_honours_manual_override() -> None:
     mapping = {item["logical_column"]: item for item in result["mapping"]}
     assert mapping["CM_IP"]["source_column"] == "MGMT_IP"
     assert mapping["CM_IP"]["match_type"] == "OVERRIDE"
+    assert mapping["CM_IP"]["forced"] is True
+    assert "MGMT_IP AS CM_IP" in result["sql"]
 
     with pytest.raises(ValueError):
         build_asset_query(source_columns=["CM_ID"], itsm_cfg=ITSM_CFG, overrides={"CM_IP": "NOT_THERE"})
+
+
+def test_blank_override_forces_null_instead_of_auto_match() -> None:
+    """Auto-mapping can pick a wrong lookalike column; the operator must be able to unmap it."""
+    auto = build_asset_query(source_columns=["CM_ID", "STATUS", "OPER_STATUS"], itsm_cfg=ITSM_CFG)
+    auto_mapping = {item["logical_column"]: item["source_column"] for item in auto["mapping"]}
+    assert auto_mapping["CM_STA_CD"] == "STATUS"
+
+    corrected = build_asset_query(
+        source_columns=["CM_ID", "STATUS", "OPER_STATUS"],
+        itsm_cfg=ITSM_CFG,
+        overrides={"CM_STA_CD": "OPER_STATUS"},
+    )
+    assert "OPER_STATUS AS CM_STA_CD" in corrected["sql"]
+
+    unmapped = build_asset_query(
+        source_columns=["CM_ID", "STATUS", "OPER_STATUS"],
+        itsm_cfg=ITSM_CFG,
+        overrides={"CM_STA_CD": ""},
+    )
+    item = next(row for row in unmapped["mapping"] if row["logical_column"] == "CM_STA_CD")
+    assert item["source_column"] is None
+    assert item["forced"] is True
+    assert "NULL AS CM_STA_CD" in unmapped["sql"]
+    assert "CM_STA_CD" in unmapped["missing_columns"]
+
+
+def test_filter_clause_is_generated_from_selected_column_and_values() -> None:
+    result = build_asset_query(
+        source_columns=["CM_ID", "CM_CAT_CD"],
+        itsm_cfg=ITSM_CFG,
+        filter_column="cm_cat_cd",
+        filter_values="HW0101, HW0102 , HW0104,,HW0101",
+    )
+    assert result["where_clause"] == "WHERE CM_CAT_CD IN ('HW0101', 'HW0102', 'HW0104')"
+    assert result["filter_values"] == ["HW0101", "HW0102", "HW0104"]
+    assert result["sql"].rstrip().endswith("WHERE CM_CAT_CD IN ('HW0101', 'HW0102', 'HW0104')")
+
+
+def test_filter_values_are_escaped_as_literals() -> None:
+    result = build_asset_query(
+        source_columns=["CM_ID", "CM_CAT_CD"],
+        itsm_cfg=ITSM_CFG,
+        filter_column="CM_CAT_CD",
+        filter_values=["HW' OR 1=1 --"],
+    )
+    assert result["where_clause"] == "WHERE CM_CAT_CD IN ('HW'' OR 1=1 --')"
+
+
+def test_filter_rejects_unknown_column_and_incomplete_input() -> None:
+    columns = ["CM_ID", "CM_CAT_CD"]
+    with pytest.raises(ValueError):
+        build_asset_query(source_columns=columns, itsm_cfg=ITSM_CFG, filter_column="NO_SUCH_COL", filter_values=["A"])
+    with pytest.raises(ValueError):
+        build_asset_query(source_columns=columns, itsm_cfg=ITSM_CFG, filter_column="CM_CAT_CD", filter_values=[])
+    with pytest.raises(ValueError):
+        build_asset_query(source_columns=columns, itsm_cfg=ITSM_CFG, filter_values=["HW0101"])
+    with pytest.raises(ValueError):
+        build_asset_query(
+            source_columns=columns,
+            itsm_cfg=ITSM_CFG,
+            filter_column="CM_CAT_CD",
+            filter_values=[f"CODE{index}" for index in range(60)],
+        )
+
+
+def test_no_filter_collects_every_row_and_says_so() -> None:
+    result = build_asset_query(source_columns=["CM_ID", "CM_CAT_CD"], itsm_cfg=ITSM_CFG)
+    assert result["where_clause"] == ""
+    assert "WHERE" not in result["sql"].replace("-- ", "")
+    assert "조회 조건 없음" in result["sql"]
+    assert "CM_CAT_CD" in result["sql"]
 
 
 def test_generated_query_passes_collector_placeholder_substitution() -> None:

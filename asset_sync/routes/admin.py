@@ -323,6 +323,8 @@ def create_admin_blueprint(cfg: AppConfig, manager: SQLiteManager) -> Blueprint:
                 itsm_cfg=test_cfg.itsm,
                 asset_source=target["full_name"],
                 overrides=overrides,
+                filter_column=str(payload.get("filter_column") or ""),
+                filter_values=payload.get("filter_values"),
             )
         except (OracleCatalogError, OracleConnectionError) as exc:
             return _catalog_failure(exc)
@@ -342,6 +344,10 @@ def create_admin_blueprint(cfg: AppConfig, manager: SQLiteManager) -> Blueprint:
             "missing_required_columns": generated["missing_required_columns"],
             "matched_count": generated["matched_count"],
             "total_count": generated["total_count"],
+            "source_columns": generated["source_columns"],
+            "filter_column": generated["filter_column"],
+            "filter_values": generated["filter_values"],
+            "where_clause": generated["where_clause"],
             "applied": False,
             "message": (
                 f"{target['full_name']} 기준으로 자산 조회 SQL을 생성했습니다. "
