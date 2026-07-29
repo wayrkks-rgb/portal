@@ -1,0 +1,119 @@
+app:
+  timezone: Asia/Seoul
+  sqlite_path: data/asset_history.db
+  log_level: INFO
+oracle:
+  enabled: true
+  mode: thin
+  asset_source: ''
+  query_file: config/oracle_query.local.sql
+  fetch_size: 1000
+  port: 1521
+itsm:
+  collection_mode: ORACLE
+  incoming_dir: data/incoming/itsm
+  sheet_name: Sheet1
+  header_row: 1
+  cpu_compare_field: CM_CPU_CORE_CNT
+  memory_field: CM_MEMORY
+  memory_unit: GB
+  os_eos_field: OS_EOS_DATE
+  os_eos_display_name: OS 밴더지원종료일
+  owner_field: CM_WOR_MNG_EMP_ID
+  department_field: CM_OWN_DPT_ID
+  tracked_fields:
+  - CM_NAME
+  - CM_HOSTNAME
+  - CM_IP
+  - CM_SUB_IP
+  - CM_OS
+  - CM_OS_VERSION
+  - CM_CPU_CORE_CNT
+  - CM_CPU_CNT
+  - CM_MEMORY
+  - CM_OWN_CAT_CD
+  - CM_SVR_CAT_CD
+  - CM_CAT_CD
+  - CM_STA_CD
+  - CM_NET_CD
+  - CM_DR_YN
+  - CM_MTN_YN
+  - CM_FMTN_YN
+  - CM_OWN_EMP_ID
+  - CM_OWN_DPT_ID
+  - CM_USER_EMP_ID
+  - CM_USER_DPT_ID
+  - CM_WOR_MNG_EMP_ID
+  - CM_PLACE
+  - CM_RACK_LOC
+  - CM_SERIAL_NO
+  - CM_MAKE_NAME
+  - CM_MODEL_NAME
+  - CM_TAKIN_DTTM
+  - CM_DESCR
+  - CM_DESCR2
+  ignore_fields:
+  - CM_MOD_DTTM
+  - CM_REG_DTTM
+vcenter:
+  collection_mode: POWERCLI
+  powershell_path: powershell.exe
+  script_path: scripts/collect_vcenter_inventory.ps1
+  incoming_dir: data/incoming/vcenter
+  snapshot_dir: data/archive/vcenter
+  temp_dir: data/temp/powercli
+  export_xlsx: true
+  power_on_value: poweredon
+  cpu_compare_field: CPUs
+  memory_compare_field: Memory
+  exclude_templates: true
+  exclude_srm_placeholders: true
+  hostname_suffixes:
+  - .korealife.dom
+  timeout_seconds: 1800
+  retry_count: 1
+  default_port: 443
+  default_auth_mode: CREDENTIAL
+  default_username: ''
+  default_password: ''
+  default_bypass_ssl_check: false
+  vcenters: []
+  resource_usage:
+    enabled: true
+    script_name: VM_ResourceUsageExport
+    script_path: scripts/collect_vcenter_resource_usage.ps1
+    temp_dir: data/temp/powercli_resource
+    interval_minutes: 120
+    timeout_seconds: 3600
+    output_dir: data/archive/vcenter_resource
+    source_format: JSON
+matching:
+  use_identity_map_first: true
+  auto_remember_exact_match: true
+  allow_vm_name_auto_match: false
+  memory_tolerance_mb: 1
+  sync_tolerance_days: 1
+quality:
+  minimum_itsm_records: 1
+  minimum_rvtools_records: 1
+  rvtools_count_warning_ratio: 0.7
+  rvtools_count_critical_ratio: 0.3
+  itsm_count_warning_ratio: 0.7
+  itsm_count_critical_ratio: 0.3
+  baseline_method: PREVIOUS_SUCCESS
+  eos_near_days: 180
+security:
+  mask_ip_in_logs: true
+  mask_hostname_in_logs: true
+  mask_user_id_in_logs: true
+  allow_sensitive_export: false
+  sensitive_export_role: ADMIN
+  display_vcenter_server_in_logs: false
+  allow_password_in_command: false
+scheduler:
+  daily_time: 07:00
+  task_name: AssetDailyCollection
+retention:
+  raw_snapshot_days: 365
+  change_event_days: 1095
+  source_excel_days: 365

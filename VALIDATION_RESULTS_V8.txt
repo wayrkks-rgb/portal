@@ -1,0 +1,21 @@
+V8 resource automation validation
+=================================
+- python compileall: PASS
+- Jinja render (admin/user): PASS
+- JavaScript node --check (admin/user): PASS
+- pytest: 22 passed
+- SQLite schema initialization: PASS
+- DEMO daily batch: PASS
+- resource_usage_run.daily_batch_id linkage: PASS
+- resource_usage_run.vcenter_snapshot_id linkage: PASS
+- Host/VM inventory enrichment: PASS
+- VM allocated CPU/Memory display data: PASS
+- VM CPU change detection: PASS
+- VM Memory change detection: PASS
+- VM ESXi Host move detection: PASS
+- Excel sheets HostResourceUsage/VMsResource/VMChangeHistory: PASS
+
+Not executed in build environment:
+- Actual internal vCenter/PowerCLI connection
+- Actual Get-Stat performance collection
+- Flask HTTP runtime smoke test (Flask package unavailable in build container)

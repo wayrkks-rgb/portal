@@ -1,0 +1,15 @@
+vcenters:
+  - id: vc_001
+    name: <VCENTER_DISPLAY_NAME_001>
+    server: <INTERNAL_VCENTER_ADDRESS_001>
+    port: 443
+    enabled: true
+    site: <SITE_CODE>
+    auth_profile: COMMON
+    auth_mode: CREDENTIAL
+    username: ""
+    password: ""
+    bypass_ssl_check: false
+    expected_baseline:
+      total_rows: null
+      powered_on_rows: null

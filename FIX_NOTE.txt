@@ -1,0 +1,9 @@
+vCenter CRUD legacy authentication migration fix
+
+- Normalizes legacy common authentication values to CREDENTIAL/PASS_THROUGH.
+- Normalizes legacy per-vCenter profile values to COMMON/CUSTOM.
+- vCenter create/update/delete is no longer blocked by hidden stale authentication labels.
+- Existing passwords remain preserved when the password input is blank.
+- On the first successful save/delete, normalized values are written back to local YAML.
+
+Validation: Python compile passed, pytest 24 passed.

@@ -1,0 +1,22 @@
+PowerCLI v6 validation
+======================
+PASS - Python compileall
+PASS - pytest: 18 passed
+PASS - JavaScript static syntax check (node --check)
+PASS - SQLite initialization
+PASS - DEMO daily batch: ITSM 3 / vCenter 3 / reconciliation success
+PASS - Oracle mock connection -> SQL -> snapshot -> daily diff
+PASS - two vCenter mock subprocess collections through PowerCLICollector
+PASS - JSON parsing and required field validation
+PASS - per-vCenter XLSX archive creation
+PASS - SQLite vCenter snapshots
+PASS - second-run VM added and CPU changed events
+PASS - daily comparison service
+PASS - common and custom credential resolution
+PASS - credentials absent from subprocess command arguments
+PASS - PowerCLI test artifacts cleaned after connection test
+NOT RUN - Flask runtime smoke test in build container
+Reason: Flask package is intentionally not installed in the build container; closed-network wheel installation is covered by install_offline.bat.
+NOT RUN - real internal Oracle connection
+NOT RUN - real internal vCenter PowerCLI connection
+Reason: internal addresses and credentials were intentionally not provided.

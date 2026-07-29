@@ -1,0 +1,22 @@
+{
+  "menus": [
+    {
+      "id": "vm_resource",
+      "name": "x86 통합 자원사용률 상세 현황",
+      "asis_col_vm": "A",
+      "asis_col_cpu_max": "B",
+      "asis_col_cpu_avg": "C",
+      "asis_col_mem_max": "D",
+      "asis_col_mem_avg": "E",
+      "asis_header_row": 1,
+      "tobe_col_vm": "B",
+      "tobe_col_cpu_max": "E",
+      "tobe_col_cpu_avg": "F",
+      "tobe_col_mem_max": "G",
+      "tobe_col_mem_avg": "H",
+      "tobe_data_start_row": 7,
+      "tobe_count_row": 3,
+      "sheet_vm_mappings": []
+    }
+  ]
+}

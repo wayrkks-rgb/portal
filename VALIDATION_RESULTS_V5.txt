@@ -1,0 +1,36 @@
+Performance Asset Auto v5 Validation
+Generated: 2026-07-24
+
+[1] Python
+Python 3.13.5
+
+[2] Compile
+PASS - all Python modules
+
+[3] Pytest
+.................                                                        [100%]
+17 passed
+
+[4] JavaScript syntax
+PASS - templates/main.html inline application script checked with node --check
+
+[5] Verified code paths
+PASS - Oracle direct collector: connect, SQL execution, schema validation, normalization, snapshot and diff
+PASS - Two vCenters: subprocess execution, actual XLSX generation, vInfo parsing, combined snapshot and diff
+PASS - vCenter common credential profile resolution and masked public settings
+PASS - ITSM daily comparison screen service
+PASS - RVTools daily comparison screen service
+PASS - previous-calendar-date snapshot selection even when multiple runs exist on the current date
+PASS - first-day same-date fallback is explicitly identified
+
+[6] Environment-bound verification
+NOT RUN - Real internal Oracle connection: internal host, service and credentials are intentionally absent
+NOT RUN - Real internal vCenter/RVTools connection: internal endpoints and credentials are intentionally absent
+NOT RUN - Flask runtime rendering in build container: Flask package unavailable; Python and JavaScript static validation passed
+
+[7] Closed-network acceptance criteria
+- Oracle screen test must pass TCP, login, SQL and required-column checks
+- Every enabled vCenter must pass TCP, RVTools subprocess, XLSX, vInfo and row checks
+- First successful run must show NO_BASELINE
+- Next calendar day must show PREVIOUS_DAY comparison for ITSM and RVTOOLS
+- A failed vCenter scope must produce PARTIAL_SUCCESS/COLLECTION_GAP, not mass deletion
