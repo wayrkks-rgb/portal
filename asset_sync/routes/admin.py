@@ -8,7 +8,17 @@ from typing import Any
 
 from flask import Blueprint, jsonify, render_template, request, session
 
-from ..collectors import OracleITSMCollector, PowerCLICollector, SyntheticRVToolsCollector, VCenterSnapshotFileCollector
+from ..collectors import (
+    OracleCatalogBrowser,
+    OracleCatalogError,
+    OracleConnectionError,
+    OracleITSMCollector,
+    PowerCLICollector,
+    SyntheticRVToolsCollector,
+    VCenterSnapshotFileCollector,
+    build_asset_query,
+    oracle_connection,
+)
 from ..config import AppConfig, load_config
 from ..db.sqlite_manager import SQLiteManager
 from ..repositories import AssetRepository
@@ -155,34 +165,7 @@ def create_admin_blueprint(cfg: AppConfig, manager: SQLiteManager) -> Blueprint:
 
         try:
             if scope == "CONNECTION":
-                try:
-                    import oracledb  # type: ignore
-                except ImportError as exc:
-                    raise RuntimeError("oracledb 패키지가 설치되지 않았습니다.") from exc
-
-                oracle_cfg = current_cfg.oracle
-                mode = str(oracle_cfg.get("mode") or "thin").lower()
-                if mode == "thick":
-                    client_dir = str(oracle_cfg.get("client_lib_dir") or "").strip()
-                    try:
-                        oracledb.init_oracle_client(lib_dir=client_dir)
-                    except Exception as exc:
-                        if "already" not in str(exc).lower():
-                            raise RuntimeError(f"Oracle Client 초기화 실패: {exc}") from exc
-
-                kwargs: dict[str, Any] = {
-                    "user": str(oracle_cfg.get("user") or "").strip(),
-                    "password": str(oracle_cfg.get("password") or ""),
-                }
-                if dsn:
-                    kwargs["dsn"] = dsn
-                else:
-                    kwargs.update({"host": host, "port": port})
-                    service_name = str(oracle_cfg.get("service_name") or "").strip()
-                    sid = str(oracle_cfg.get("sid") or "").strip()
-                    kwargs["service_name" if service_name else "sid"] = service_name or sid
-
-                with oracledb.connect(**kwargs) as connection:
+                with oracle_connection(current_cfg.oracle) as connection:
                     with connection.cursor() as cursor:
                         cursor.execute("SELECT 1 FROM DUAL")
                         row = cursor.fetchone()
@@ -204,16 +187,205 @@ def create_admin_blueprint(cfg: AppConfig, manager: SQLiteManager) -> Blueprint:
             stage = _oracle_error_stage(exc)
             LOGGER.exception("Oracle connection test failed at %s", stage)
             status_code = 401 if stage == "AUTHENTICATION" else 422 if stage in {"QUERY", "SCHEMA", "EMPTY_RESULT"} else 500
+            details = [
+                "Oracle 드라이버 접속 또는 조회 단계에서 실패했습니다.",
+                "화면의 접속정보와 서버 내부 자산조회 설정을 확인하세요.",
+            ]
+            if stage in {"QUERY", "SCHEMA"}:
+                details.append(
+                    "대상 테이블이나 컬럼이 없는 경우 [자산 테이블 찾기]에서 DB 내 테이블을 조회하고 "
+                    "자산 원본으로 적용하면 조회 SQL이 자동 생성됩니다."
+                )
             return jsonify({
                 "status": "FAILED",
                 "stage": stage,
                 "network": network,
                 "error": str(exc),
-                "details": [
-                    "Oracle 드라이버 접속 또는 조회 단계에서 실패했습니다.",
-                    "화면의 접속정보와 서버 내부 자산조회 설정을 확인하세요.",
-                ],
+                "details": details,
             }), status_code
+
+    def _catalog_from_payload(payload: dict[str, Any]) -> OracleCatalogBrowser:
+        """Browse with the values currently in the form, saved or not."""
+        return OracleCatalogBrowser(settings_store.oracle_test_config(payload, require_query=False))
+
+    def _catalog_failure(exc: Exception) -> Any:
+        stage = _oracle_error_stage(exc)
+        LOGGER.exception("Oracle catalog request failed at %s", stage)
+        status_code = 401 if stage == "AUTHENTICATION" else 404 if isinstance(exc, OracleCatalogError) else 500
+        return jsonify({
+            "status": "FAILED",
+            "stage": stage,
+            "error": str(exc),
+            "details": ["Oracle 데이터 딕셔너리 조회 단계에서 실패했습니다."],
+        }), status_code
+
+    @bp.route("/api/asset-sync/admin/oracle/tables", methods=["POST"])
+    @admin_required
+    def oracle_tables() -> Any:
+        payload = request.get_json(silent=True) or {}
+        try:
+            browser = _catalog_from_payload(payload)
+        except (SettingsValidationError, ValueError, TypeError) as exc:
+            return jsonify({"status": "FAILED", "stage": "VALIDATION", "error": str(exc)}), 400
+        try:
+            tables = browser.list_tables(
+                keyword=str(payload.get("keyword") or ""),
+                owner=str(payload.get("owner") or ""),
+                limit=payload.get("limit", 200),
+                include_system=bool(payload.get("include_system", False)),
+            )
+            return jsonify({
+                "status": "SUCCESS",
+                "count": len(tables),
+                "tables": tables,
+                "message": f"조회 계정이 접근할 수 있는 테이블/뷰 {len(tables)}건을 찾았습니다.",
+            })
+        except Exception as exc:
+            return _catalog_failure(exc)
+
+    @bp.route("/api/asset-sync/admin/oracle/columns", methods=["POST"])
+    @admin_required
+    def oracle_columns() -> Any:
+        payload = request.get_json(silent=True) or {}
+        try:
+            browser = _catalog_from_payload(payload)
+        except (SettingsValidationError, ValueError, TypeError) as exc:
+            return jsonify({"status": "FAILED", "stage": "VALIDATION", "error": str(exc)}), 400
+        try:
+            result = browser.list_columns(str(payload.get("owner") or ""), str(payload.get("table_name") or ""))
+            result["status"] = "SUCCESS"
+            result["column_count"] = len(result["columns"])
+            return jsonify(result)
+        except Exception as exc:
+            return _catalog_failure(exc)
+
+    @bp.route("/api/asset-sync/admin/oracle/preview", methods=["POST"])
+    @admin_required
+    def oracle_preview() -> Any:
+        payload = request.get_json(silent=True) or {}
+        try:
+            browser = _catalog_from_payload(payload)
+        except (SettingsValidationError, ValueError, TypeError) as exc:
+            return jsonify({"status": "FAILED", "stage": "VALIDATION", "error": str(exc)}), 400
+        try:
+            result = browser.preview_rows(
+                str(payload.get("owner") or ""),
+                str(payload.get("table_name") or ""),
+                limit=payload.get("limit", 10),
+            )
+            result["status"] = "SUCCESS"
+            return jsonify(result)
+        except Exception as exc:
+            return _catalog_failure(exc)
+
+    @bp.route("/api/asset-sync/admin/oracle/asset-source/suggest", methods=["POST"])
+    @admin_required
+    def oracle_suggest_asset_source() -> Any:
+        payload = request.get_json(silent=True) or {}
+        try:
+            browser = _catalog_from_payload(payload)
+        except (SettingsValidationError, ValueError, TypeError) as exc:
+            return jsonify({"status": "FAILED", "stage": "VALIDATION", "error": str(exc)}), 400
+        try:
+            candidates = browser.suggest_asset_sources(
+                limit=payload.get("limit", 20),
+                include_system=bool(payload.get("include_system", False)),
+            )
+            return jsonify({
+                "status": "SUCCESS",
+                "count": len(candidates),
+                "candidates": candidates,
+                "message": (
+                    f"자산 컬럼이 포함된 테이블 {len(candidates)}건을 찾았습니다."
+                    if candidates
+                    else "자산 컬럼이 포함된 테이블을 찾지 못했습니다. 테이블 목록에서 직접 선택하세요."
+                ),
+            })
+        except Exception as exc:
+            return _catalog_failure(exc)
+
+    @bp.route("/api/asset-sync/admin/oracle/asset-source", methods=["POST"])
+    @admin_required
+    def oracle_apply_asset_source() -> Any:
+        """Preview or install the asset query generated from the selected table."""
+        payload = request.get_json(silent=True) or {}
+        apply_changes = bool(payload.get("apply", False))
+        try:
+            test_cfg = settings_store.oracle_test_config(payload, require_query=False)
+        except (SettingsValidationError, ValueError, TypeError) as exc:
+            return jsonify({"status": "FAILED", "stage": "VALIDATION", "error": str(exc)}), 400
+        try:
+            browser = OracleCatalogBrowser(test_cfg)
+            target = browser.list_columns(str(payload.get("owner") or ""), str(payload.get("table_name") or ""))
+            overrides = payload.get("mapping") if isinstance(payload.get("mapping"), dict) else {}
+            generated = build_asset_query(
+                source_columns=[column["column_name"] for column in target["columns"]],
+                itsm_cfg=test_cfg.itsm,
+                asset_source=target["full_name"],
+                overrides=overrides,
+            )
+        except (OracleCatalogError, OracleConnectionError) as exc:
+            return _catalog_failure(exc)
+        except ValueError as exc:
+            return jsonify({"status": "FAILED", "stage": "VALIDATION", "error": str(exc)}), 400
+        except Exception as exc:
+            return _catalog_failure(exc)
+
+        response: dict[str, Any] = {
+            "status": "SUCCESS",
+            "stage": "PREVIEW",
+            "asset_source": target["full_name"],
+            "object_type": target["object_type"],
+            "sql": generated["sql"],
+            "mapping": generated["mapping"],
+            "missing_columns": generated["missing_columns"],
+            "missing_required_columns": generated["missing_required_columns"],
+            "matched_count": generated["matched_count"],
+            "total_count": generated["total_count"],
+            "applied": False,
+            "message": (
+                f"{target['full_name']} 기준으로 자산 조회 SQL을 생성했습니다. "
+                f"{generated['matched_count']}/{generated['total_count']} 컬럼이 매핑되었습니다."
+            ),
+        }
+        if not apply_changes:
+            return jsonify(response)
+
+        try:
+            saved = settings_store.save_asset_source(target["full_name"], query_sql=generated["sql"])
+        except (SettingsValidationError, ValueError, TypeError) as exc:
+            return jsonify({"status": "FAILED", "stage": "VALIDATION", "error": str(exc)}), 400
+        except OSError as exc:
+            LOGGER.exception("Asset source save failed")
+            return jsonify({"status": "FAILED", "stage": "SAVE", "error": f"자산 조회 SQL 저장 실패: {exc}"}), 500
+
+        response.update({"stage": "APPLIED", "applied": True, "settings": saved})
+        # Verify with the credentials currently on screen. load_config() would only
+        # see the saved password, which is not necessarily the one being tested.
+        verify_cfg = copy.deepcopy(test_cfg)
+        verify_cfg.oracle["asset_source"] = saved["oracle"]["asset_source"]
+        verify_cfg.oracle["query_file"] = saved["oracle"]["query_file"]
+        try:
+            verification = OracleITSMCollector(verify_cfg).test_connection()
+            response["verification"] = {
+                "status": "SUCCESS",
+                "sample_count": verification.get("sample_count", 0),
+                "columns": verification.get("columns", []),
+            }
+            response["message"] = (
+                f"{target['full_name']}을(를) 자산 원본으로 적용하고 "
+                f"샘플 {verification.get('sample_count', 0)}건 조회까지 확인했습니다."
+            )
+        except Exception as exc:
+            response["verification"] = {
+                "status": "FAILED",
+                "stage": _oracle_error_stage(exc),
+                "error": str(exc),
+            }
+            response["message"] = (
+                f"{target['full_name']}을(를) 자산 원본으로 저장했지만 자산 조회 검증에서 실패했습니다: {exc}"
+            )
+        return jsonify(response)
 
     def _merge_vcenter_test_config(payload: dict[str, Any], entries: list[dict[str, Any]]) -> tuple[AppConfig, list[dict[str, Any]]]:
         """Build an in-memory test config without forcing the operator to save first.

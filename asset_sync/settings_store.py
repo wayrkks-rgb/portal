@@ -8,6 +8,7 @@ from typing import Any
 import yaml
 
 from .config import load_config
+from .utils.validation import validate_oracle_identifier
 
 _ENV_KEYS = [
     "ORACLE_HOST", "ORACLE_PORT", "ORACLE_SERVICE_NAME", "ORACLE_SID",
@@ -203,6 +204,9 @@ class LocalSettingsStore:
                 "client_lib_dir": str(cfg.oracle.get("client_lib_dir", "")),
                 "asset_source": str(cfg.oracle.get("asset_source", "")),
                 "query_file": str(cfg.oracle.get("query_file", "config/oracle_query.local.sql")),
+                "query_file_exists": cfg.resolve(
+                    cfg.oracle.get("query_file", "config/oracle_query.local.sql")
+                ).exists(),
                 "password_configured": bool(cfg.oracle.get("password")),
             },
             "itsm": {
@@ -501,6 +505,48 @@ class LocalSettingsStore:
             "allow_sensitive_export": bool(security.get("allow_sensitive_export", False)),
             "display_vcenter_server_in_logs": bool(security.get("display_vcenter_server_in_logs", False)),
         }
+        _atomic_write(self.app_local_path, yaml.safe_dump(local_yaml, allow_unicode=True, sort_keys=False))
+        return self.public_settings()
+
+    def save_asset_source(
+        self,
+        asset_source: str,
+        *,
+        query_sql: str | None = None,
+        query_file: str | None = None,
+    ) -> dict[str, Any]:
+        """Register the Oracle asset table and optionally write its query file.
+
+        The connection editor deliberately never touches these two values, so this
+        is the only path that lets the table browser install a working asset query.
+        """
+        source = str(asset_source or "").strip().upper()
+        if not source:
+            raise SettingsValidationError("자산 조회 대상 테이블을 선택하세요.")
+        try:
+            source = validate_oracle_identifier(source, "asset_source")
+        except ValueError as exc:
+            raise SettingsValidationError(str(exc)) from exc
+
+        current_cfg = load_config()
+        target_file = str(
+            query_file or current_cfg.oracle.get("query_file") or "config/oracle_query.local.sql"
+        ).strip()
+        if Path(target_file).is_absolute():
+            raise SettingsValidationError("자산 조회 SQL 경로는 프로젝트 상대경로여야 합니다.")
+        resolved = (self.root / target_file).resolve()
+        if not resolved.is_relative_to(self.root):
+            raise SettingsValidationError("자산 조회 SQL 경로가 프로젝트 밖을 가리킵니다.")
+
+        local_yaml = _read_yaml_dict(self.app_local_path)
+        oracle_section = dict(local_yaml.get("oracle") or {})
+        oracle_section.setdefault("enabled", bool(current_cfg.oracle.get("enabled", True)))
+        oracle_section.setdefault("mode", str(current_cfg.oracle.get("mode", "thin")).lower())
+        oracle_section["asset_source"] = source
+        oracle_section["query_file"] = target_file
+        local_yaml["oracle"] = oracle_section
+        if query_sql is not None:
+            _atomic_write(resolved, query_sql if query_sql.endswith("\n") else query_sql + "\n")
         _atomic_write(self.app_local_path, yaml.safe_dump(local_yaml, allow_unicode=True, sort_keys=False))
         return self.public_settings()
 

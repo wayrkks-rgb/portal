@@ -6,6 +6,7 @@ from typing import Any
 
 from ..config import AppConfig
 from ..utils.validation import validate_oracle_identifier
+from .oracle_connection import OracleConnectionError, build_connect_kwargs, prepare_driver
 
 LOGGER = logging.getLogger(__name__)
 
@@ -22,41 +23,20 @@ class OracleITSMCollector:
         self.last_metadata: dict[str, Any] = {}
 
     def collect(self, max_rows: int | None = None) -> list[dict[str, Any]]:
-        try:
-            import oracledb  # type: ignore
-        except ImportError as exc:
-            raise OracleCollectionError("oracledb 패키지가 설치되지 않았습니다. FILE_ONLY/DEMO 모드는 계속 사용할 수 있습니다.") from exc
-
         oracle_cfg = self.config.oracle
+        try:
+            oracledb = prepare_driver(oracle_cfg)
+            kwargs = build_connect_kwargs(oracle_cfg)
+        except OracleConnectionError as exc:
+            raise OracleCollectionError(str(exc)) from exc
         mode = str(oracle_cfg.get("mode", "thin")).lower()
-        if mode not in {"thin", "thick"}:
-            raise OracleCollectionError("Oracle mode는 thin 또는 thick이어야 합니다.")
-        if mode == "thick":
-            client_dir = oracle_cfg.get("client_lib_dir")
-            if not client_dir:
-                raise OracleCollectionError("Thick mode에는 ORACLE_CLIENT_LIB_DIR가 필요합니다.")
-            try:
-                oracledb.init_oracle_client(lib_dir=str(client_dir))
-            except Exception as exc:
-                # The library may already be initialized in the process. Preserve the clear error otherwise.
-                if "already" not in str(exc).lower():
-                    raise OracleCollectionError(f"Oracle Client 초기화 실패: {exc}") from exc
-
-        user = str(oracle_cfg.get("user") or "").strip()
-        password = str(oracle_cfg.get("password") or "")
-        dsn = str(oracle_cfg.get("dsn") or "").strip()
-        host = str(oracle_cfg.get("host") or "").strip()
-        port = int(oracle_cfg.get("port", 1521))
-        service_name = str(oracle_cfg.get("service_name") or "").strip()
-        sid = str(oracle_cfg.get("sid") or "").strip()
-        if not user or not password:
-            raise OracleCollectionError("Oracle 설정이 필요합니다: ORACLE_USER/ORACLE_PASSWORD")
-        if not dsn and (not host or not (service_name or sid)):
-            raise OracleCollectionError("Oracle 설정이 필요합니다: ORACLE_DSN 또는 HOST + SERVICE_NAME/SID")
 
         query_path = self.config.resolve(oracle_cfg.get("query_file", "config/oracle_query.local.sql"))
         if not query_path.exists():
-            raise OracleCollectionError("서버 내부의 Oracle 자산 조회 SQL이 준비되지 않았습니다.")
+            raise OracleCollectionError(
+                "서버 내부의 Oracle 자산 조회 SQL이 준비되지 않았습니다. "
+                "관리 화면의 [자산 테이블 찾기]에서 대상 테이블을 선택하면 자동 생성됩니다."
+            )
         sql_template = query_path.read_text(encoding="utf-8")
         source_placeholders = ("${ASSET_SOURCE}", "${TABLE_NAME}")
         requires_asset_source = any(token in sql_template for token in source_placeholders)
@@ -64,7 +44,10 @@ class OracleITSMCollector:
         if requires_asset_source:
             raw_asset_source = str(oracle_cfg.get("asset_source", "")).strip()
             if not raw_asset_source:
-                raise OracleCollectionError("서버 내부의 Oracle 자산 조회 대상이 준비되지 않았습니다.")
+                raise OracleCollectionError(
+                    "서버 내부의 Oracle 자산 조회 대상이 준비되지 않았습니다. "
+                    "관리 화면의 [자산 테이블 찾기]에서 대상 테이블을 선택하세요."
+                )
             asset_source = validate_oracle_identifier(raw_asset_source, "asset_source")
         eos_field = validate_oracle_identifier(str(self.config.itsm.get("os_eos_field", "")), "os_eos_field")
         cpu_field = validate_oracle_identifier(str(self.config.itsm.get("cpu_compare_field", "CM_CPU_CORE_CNT")), "cpu_compare_field")
@@ -79,18 +62,13 @@ class OracleITSMCollector:
         fetch_size = int(oracle_cfg.get("fetch_size", 1000))
         self.last_metadata = {
             "asset_source_configured": bool(asset_source) or not requires_asset_source,
+            "asset_source": asset_source,
+            "query_file": str(query_path),
             "eos_field": eos_field,
             "cpu_field": cpu_field,
             "query_hash": hashlib.sha256(sql.encode("utf-8")).hexdigest(),
             "mode": mode,
         }
-
-        kwargs: dict[str, Any] = {"user": user, "password": password}
-        if dsn:
-            kwargs["dsn"] = dsn
-        else:
-            kwargs.update({"host": host, "port": port})
-            kwargs["service_name" if service_name else "sid"] = service_name or sid
 
         try:
             with oracledb.connect(**kwargs) as connection:

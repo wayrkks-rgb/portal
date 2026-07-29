@@ -13,7 +13,8 @@
 - [ ] Port
 - [ ] Service Name 또는 SID
 - [ ] SELECT 전용 사용자명·비밀번호
-- [ ] 자산 Table/View 또는 SQL
+- [ ] 자산 Table/View · 화면의 [자산 테이블 찾기]에서 선택하면 SQL 자동 생성
+- [ ] 조회 계정의 `ALL_TAB_COLUMNS` 등 데이터 딕셔너리 조회 가능 여부
 - [ ] CPU/Memory/EOS 실제 컬럼명
 - [ ] WAS → Oracle 포트 통신
 

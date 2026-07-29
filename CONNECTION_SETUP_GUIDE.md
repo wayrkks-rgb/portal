@@ -41,17 +41,50 @@ Test-NetConnection <VCENTER_IP_OR_FQDN> -Port 443
 | Service Name 또는 SID | 실제 접속 서비스 |
 | 조회 계정 | 자산 Table/View SELECT 권한이 있는 읽기 전용 계정 |
 | 비밀번호 | 해당 DB 계정 비밀번호 |
-| Table/View | 자산 원천 객체 |
-| SQL 파일 | `config/oracle_query.local.sql` |
-| CPU 컬럼 | `CM_CPU_CORE_CNT` |
-| Memory 컬럼 | `CM_MEMORY` |
-| EOS 컬럼 | 실제 OS 밴더지원종료일 컬럼 |
+
+Table/View와 SQL 파일, CPU·Memory·EOS 컬럼은 이 화면에서 직접 입력하지 않는다.
+Table/View는 아래 `2-1`의 자산 테이블 찾기에서 선택하고, SQL 파일
+(`config/oracle_query.local.sql`)은 그때 자동 생성된다.
 
 `Oracle 연결 테스트`는 다음을 확인한다.
 
 ```text
 TCP 통신 → DB 로그인 → SQL 실행 → 샘플 조회 → 필수 컬럼 검증
 ```
+
+## 2-1. 자산 테이블 찾기
+
+자산 조회 테스트가 `ORA-00942`(테이블 또는 뷰가 없습니다)나
+`서버 내부의 Oracle 자산 조회 SQL이 준비되지 않았습니다`로 실패하면 조회 대상
+객체가 등록되지 않았거나 실제 DB의 객체명과 다른 경우다. 접속정보를 입력한 뒤
+`관리 → 연동정보 관리 → Oracle 자산 테이블 찾기`에서 해결한다.
+
+| 버튼 | 동작 |
+|---|---|
+| 자산 테이블 추천 | `CM_ID`, `CM_HOSTNAME` 등 자산 컬럼이 가장 많이 포함된 객체를 순서대로 제시 |
+| 테이블 목록 조회 | 검색어·소유자 조건으로 조회 계정이 접근 가능한 테이블/뷰 목록 조회 |
+| 컬럼 보기 | 선택 객체의 컬럼 정의와 최대 10행 샘플 데이터 확인 |
+| 매핑 미리보기 | 선택 객체 기준으로 생성될 자산 조회 SQL과 컬럼 매핑 결과만 확인 |
+| 자산 원본으로 적용 | `asset_source` 저장 + 조회 SQL 생성 + 자산 조회 재검증 |
+
+조회는 모두 `ALL_TAB_COMMENTS`, `ALL_TAB_COLUMNS` 등 읽기 전용 데이터 딕셔너리
+뷰를 사용하며 조회 계정에 보이는 객체만 나타난다. 목록이 비어 있으면 DBA에게
+해당 객체의 `SELECT` 권한을 요청한다.
+
+컬럼 매핑은 다음 순서로 자동 결정된다.
+
+```text
+1. 컬럼명이 완전히 같은 경우            예: CM_HOSTNAME → CM_HOSTNAME
+2. CM_ 접두어를 제외하고 같은 경우      예: HOSTNAME    → CM_HOSTNAME
+3. 사이트별 관용 표기 사전              예: IP_ADDR     → CM_IP
+4. 위 어느 것도 없으면 NULL로 조회
+```
+
+원본 테이블에 없는 컬럼을 `NULL`로 조회하기 때문에 필수 컬럼 검증이 통과하며,
+그 항목은 화면의 매핑 결과에 `❌ 없음`으로 표시된다. 실제 컬럼으로 교체하거나
+`WHERE` 조건(예: `CM_CAT_CD IN ('HW0101','HW0102','HW0104')`)을 추가하려면 생성된
+`config/oracle_query.local.sql`을 직접 수정한다. 이 파일은 `.gitignore` 대상이며
+폐쇄망 서버에만 존재한다.
 
 ## 3. PowerCLI 설치 확인
 
