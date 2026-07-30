@@ -51,12 +51,14 @@ def issue_token(
     *,
     user: Mapping[str, Any],
     module_id: str,
+    permission: str = "VIEW",
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
     now: float | None = None,
 ) -> str:
     """호출 1건에 쓰이는 단기 토큰을 만든다.
 
     ``mod`` 를 넣기 때문에 A 모듈에 발급된 토큰을 B 모듈에 재사용할 수 없다.
+    ``perm`` 은 그 모듈에서의 실효 권한이라 WAS 가 쓰기 요청을 자체 판단할 수 있다.
     """
     if not secret:
         raise ValueError("모듈 공유 시크릿이 설정되지 않았습니다.")
@@ -68,6 +70,7 @@ def issue_token(
         "role": str(user.get("role") or "user"),
         "name": str(user.get("name") or ""),
         "mod": str(module_id),
+        "perm": str(permission or "VIEW").upper(),
         "iat": issued_at,
         "exp": issued_at + max(1, int(ttl_seconds)),
         "jti": secrets.token_hex(8),

@@ -34,6 +34,8 @@ modules:
     required_role: user
     menu_section: 운영
     page: asset_sync
+    # role: required_role 로 판정(기본) · explicit: 사용자별 명시 부여가 있어야 접근
+    access: role
 oracle:
   enabled: true
   mode: thin

@@ -202,11 +202,64 @@ GET /api/modules/dashboard   → 패널과 counts/degraded
 3. `required_role` 이 현재 사용자 권한보다 높지 않은가
 4. 통합 웹 WAS 에서 `base_url` 로 통신이 되는가
 
-## 8. 아직 남은 것
+## 8. 대메뉴별 권한
 
-- **모듈별 권한이 `user`/`admin` 2단계뿐이다.** 대메뉴마다 담당자를 나누려면
-  사용자-모듈 권한 테이블이 필요하다.
-- **대메뉴 화면은 패널 스펙으로만 그린다.** 모듈 고유의 복잡한 화면이 필요하면
-  `templates/modules/<id>.html` 로 분할하는 단계가 필요하다.
+`user_module_permission` 테이블에 사용자-대메뉴 단위로 부여한다. 판정 규칙은 세 줄이다.
+
+```text
+1. admin 은 모든 대메뉴에 MANAGE 권한을 갖는다
+2. 명시 부여가 있으면 그 값을 쓴다 (VIEW | MANAGE)
+3. 없으면 모듈의 access 설정으로 판정한다
+     access: role     (기본) → required_role 로 판정. 기존 동작과 같다
+     access: explicit        → 명시 부여가 없으면 접근 불가
+```
+
+기본값이 `role` 인 이유는 이 테이블을 도입해도 기존 계정이 갑자기 대메뉴를 잃지
+않게 하기 위한 것이다. **엄격히 통제할 대메뉴만 `access: explicit` 로 바꾼다.**
+
+| 권한 | 의미 |
+|---|---|
+| `VIEW` | 메뉴 노출 + 조회(GET) 프록시 허용 |
+| `MANAGE` | 추가로 `POST`/`PUT`/`DELETE` 프록시 허용 |
+
+부여는 `관리 → 사용자 관리 → 권한 설정` 에서 한다. 변경은 `audit_log` 에
+`action='PERMISSION'` 으로 남는다.
+
+WAS 쪽에서는 토큰의 `perm` 값으로 쓰기 권한을 다시 확인할 수 있다. 통합 웹이
+이미 막지만, WAS 가 자체적으로 판단할 수 있어야 다른 경로로 들어온 요청도 안전하다.
+
+```python
+payload = verify_token(request.headers.get("X-Portal-Token"), SECRET, module_id="capacity")
+if request.method != "GET" and payload.get("perm") != "MANAGE":
+    return jsonify({"error": "forbidden"}), 403
+```
+
+## 9. 화면 파일 구조
+
+대메뉴가 늘어도 팀별로 파일이 갈리도록 템플릿을 분할했다.
+
+```text
+templates/
+  base.html                 공통 셸: 스타일, 사이드바, 공통 스크립트
+  main.html                 통합 웹 화면 · 통합 대시보드(모듈 조합)
+  pages/<name>.html         통합 웹이 직접 담당하는 화면
+  modules/_generic.html     등록된 원격 모듈의 기본 화면(패널 렌더링)
+  partials/modals.html      공용 모달
+  partials/js/<name>.html   화면별 스크립트
+```
+
+- **통합 대시보드는 `main.html` 에 남겨 두었다.** 여러 모듈을 조합해 보여주는
+  화면이므로 통합 웹의 책임이다.
+- 새 대메뉴는 기본적으로 `modules/_generic.html` 이 패널 스펙만으로 그린다.
+  모듈 고유 화면이 필요하면 `templates/modules/<module_id>.html` 을 만들고
+  `main.html` 의 include 를 바꾼다. **다른 팀 파일을 건드리지 않는다.**
+- 공통 헬퍼(`escapeHtml`, `integrationFetch`, `setActionResult`, `setButtonBusy`,
+  `integrationToast`, 모달 제어)는 `partials/js/common.html` 에 있다. 화면
+  스크립트에서 그대로 호출한다.
+
+## 10. 아직 남은 것
+
 - **`audit_log` 에 모듈 구분 컬럼이 없다.** 여러 WAS 가 같은 감사 테이블에 쓰기
   시작하면 `module_id` 가 필요하다.
+- **권한 변경이 즉시 반영되지 않는다.** 메뉴는 화면을 새로 열 때 갱신된다.
+  세션에 캐시하지 않고 매 요청 조회하므로 API 는 즉시 반영된다.

@@ -1,0 +1,19 @@
+{# 등록된 원격 모듈의 기본 화면. 모듈 고유 화면이 필요하면
+   templates/modules/<module_id>.html 을 만들고 main.html 의 include 를 바꾼다.
+   권한 판정은 portal_modules 가 이미 걸러서 내려온다. #}
+<!-- ====== 연계 모듈 화면 (레지스트리 기반) ====== -->
+{% for module in portal_modules | default([]) if module.location == 'REMOTE' %}
+<div class="page {% if page==module.page %}active{% endif %}" id="page-{{ module.page }}">
+  <div class="topbar">
+    <div>
+      <div class="topbar-title">{{ module.icon }} {{ module.name }}</div>
+      <div class="topbar-sub">담당 WAS 를 통합 웹이 서버에서 호출해 표시합니다</div>
+    </div>
+    <button type="button" class="btn btn-secondary btn-sm" onclick="loadModulePage('{{ module.id }}')">새로고침</button>
+  </div>
+  <div class="content">
+    <div id="module-page-status-{{ module.id }}"></div>
+    <div id="module-page-body-{{ module.id }}" class="module-panel-grid"></div>
+  </div>
+</div>
+{% endfor %}

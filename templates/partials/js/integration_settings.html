@@ -1,0 +1,789 @@
+{# 연동정보 관리 스크립트 #}
+<script>
+// ── 연동정보 관리 ──
+let integrationVcenters = [];
+let integrationVCenterRuntime = {
+  default_username:'',
+  default_password_configured:false,
+  default_auth_mode:'CREDENTIAL',
+  default_bypass_ssl_check:false
+};
+let integrationOracleInternal = {
+  asset_source:'',
+  query_file:'config/oracle_query.local.sql',
+  cpu_compare_field:'CM_CPU_CORE_CNT',
+  memory_field:'CM_MEMORY',
+  os_eos_field:'OS_EOS_DATE'
+};
+
+
+function updateCommonAuthFields(){
+  const credential=document.getElementById('int-rv-default-auth')?.value==='CREDENTIAL';
+  const user=document.getElementById('int-rv-default-user'),pwd=document.getElementById('int-rv-default-password');
+  if(user)user.disabled=!credential;
+  if(pwd)pwd.disabled=!credential;
+}
+
+function updateVCenterEditorAuthFields(){
+  const profile=document.getElementById('vc-edit-profile')?.value||'CUSTOM';
+  const auth=document.getElementById('vc-edit-auth')?.value||'CREDENTIAL';
+  const custom=profile==='CUSTOM';
+  const credential=auth==='CREDENTIAL';
+  document.getElementById('vc-edit-auth').disabled=!custom;
+  document.getElementById('vc-edit-user').disabled=!credential;
+  document.getElementById('vc-edit-password').disabled=!credential;
+  document.getElementById('vc-edit-ssl').disabled=!custom;
+}
+
+function promoteVCenterToCustomAuth(){
+  const profile=document.getElementById('vc-edit-profile');
+  if(profile&&profile.value==='COMMON'){
+    profile.value='CUSTOM';
+    document.getElementById('vc-edit-auth').value='CREDENTIAL';
+    editorStatus('개별 계정으로 변경 중입니다. 비밀번호를 입력한 뒤 저장하세요.','warning');
+  }
+  updateVCenterEditorAuthFields();
+}
+
+function nextVCenterId(){
+  const used=new Set(integrationVcenters.map(v=>v.id));
+  let n=1,id='';
+  do{id='vc_'+String(n++).padStart(3,'0')}while(used.has(id));
+  return id;
+}
+
+function cloneVCenterList(){
+  return integrationVcenters.map(v=>({
+    ...v,
+    expected_baseline:{...(v.expected_baseline||{total_rows:null,powered_on_rows:null})}
+  }));
+}
+
+function normalizeVCenterCollectionMode(value){
+  const mode=String(value||'').trim().toUpperCase();
+  if(['POWERCLI','DEMO','FILE_ONLY'].includes(mode))return mode;
+  if(['VCENTER','VCENTER_ONLY','POWERCLI_DIRECT','DIRECT'].includes(mode))return 'POWERCLI';
+  if(['RVTOOLS','RVTOOLS_ONLY'].includes(mode))return 'FILE_ONLY';
+  return 'POWERCLI';
+}
+
+function restoreVCenterEditorDraft(entry,index=-1){
+  document.getElementById('vc-editor-index').value=String(index);
+  document.getElementById('vc-edit-id').value=entry.id||nextVCenterId();
+  document.getElementById('vc-edit-name').value=entry.name||'';
+  document.getElementById('vc-edit-server').value=entry.server||'';
+  document.getElementById('vc-edit-port').value=entry.port||443;
+  document.getElementById('vc-edit-site').value=entry.site||'';
+  document.getElementById('vc-edit-enabled').value=String(entry.enabled!==false);
+  document.getElementById('vc-edit-profile').value=(entry.auth_profile||'CUSTOM').toUpperCase();
+  document.getElementById('vc-edit-auth').value=(entry.auth_mode||'CREDENTIAL').toUpperCase();
+  document.getElementById('vc-edit-user').value=entry.username||'';
+  document.getElementById('vc-edit-password').value=entry.password||'';
+  document.getElementById('vc-edit-password').placeholder=entry.password_configured&&!entry.password?'비밀번호 등록됨 · 변경 시 입력':'등록 또는 변경할 때 입력';
+  document.getElementById('vc-edit-ssl').value=String(Boolean(entry.bypass_ssl_check));
+  updateVCenterEditorAuthFields();
+}
+
+function resetVCenterEditor(){
+  document.getElementById('vc-editor-index').value='-1';
+  document.getElementById('vc-edit-id').value=nextVCenterId();
+  document.getElementById('vc-edit-name').value='';
+  document.getElementById('vc-edit-server').value='';
+  document.getElementById('vc-edit-port').value=document.getElementById('int-rv-default-port')?.value||443;
+  document.getElementById('vc-edit-site').value='';
+  document.getElementById('vc-edit-enabled').value='true';
+  document.getElementById('vc-edit-profile').value='CUSTOM';
+  document.getElementById('vc-edit-auth').value='CREDENTIAL';
+  document.getElementById('vc-edit-user').value='';
+  document.getElementById('vc-edit-password').value='';
+  document.getElementById('vc-edit-password').placeholder='등록 또는 변경할 때 입력';
+  document.getElementById('vc-edit-ssl').value='false';
+  updateVCenterEditorAuthFields();
+  editorStatus('정보를 입력한 뒤 연결 테스트 또는 vCenter 저장을 선택하세요.');
+}
+
+function readVCenterEditor(){
+  const index=Number(document.getElementById('vc-editor-index').value||-1);
+  const previous=index>=0?integrationVcenters[index]:null;
+  const password=document.getElementById('vc-edit-password').value;
+  return {
+    ...(previous||{}),
+    id:document.getElementById('vc-edit-id').value.trim(),
+    name:document.getElementById('vc-edit-name').value.trim(),
+    server:document.getElementById('vc-edit-server').value.trim(),
+    port:Number(document.getElementById('vc-edit-port').value||443),
+    site:document.getElementById('vc-edit-site').value.trim(),
+    enabled:document.getElementById('vc-edit-enabled').value==='true',
+    auth_profile:document.getElementById('vc-edit-profile').value,
+    auth_mode:document.getElementById('vc-edit-auth').value,
+    username:document.getElementById('vc-edit-user').value.trim(),
+    password:password||(previous?.password||''),
+    password_configured:Boolean(previous?.password_configured||password),
+    bypass_ssl_check:document.getElementById('vc-edit-ssl').value==='true',
+    expected_baseline:previous?.expected_baseline||{total_rows:null,powered_on_rows:null},
+  };
+}
+
+function validateVCenterEntry(entry){
+  if(!entry.id)return '내부 식별 ID를 입력하세요.';
+  if(!/^[A-Za-z0-9_.-]+$/.test(entry.id))return 'ID에는 영문, 숫자, 점, 밑줄, 하이픈만 사용할 수 있습니다.';
+  if(!entry.name)return '화면 표시명을 입력하세요.';
+  if(!entry.server)return 'vCenter IP 또는 FQDN을 입력하세요.';
+  if(!entry.port||entry.port<1||entry.port>65535)return '포트 번호를 확인하세요.';
+  if(entry.auth_profile==='CUSTOM'&&entry.auth_mode==='CREDENTIAL'){
+    if(!entry.username)return '개별 계정 인증에는 vCenter 사용자명이 필요합니다.';
+    if(!entry.password&&!entry.password_configured)return '개별 계정 인증에는 vCenter 비밀번호가 필요합니다.';
+  }
+  return '';
+}
+
+function saveVCenterEditor({silent=false}={}){
+  const entry=readVCenterEditor();
+  const error=validateVCenterEntry(entry);
+  if(error){editorStatus(error,'error');if(!silent)integrationToast(error,'error');return false;}
+  const index=Number(document.getElementById('vc-editor-index').value||-1);
+  const duplicate=integrationVcenters.findIndex((v,i)=>v.id===entry.id&&i!==index);
+  if(duplicate>=0){const message=`동일한 ID(${entry.id})가 이미 등록되어 있습니다.`;editorStatus(message,'error');if(!silent)integrationToast(message,'error');return false;}
+  if(index>=0)integrationVcenters[index]=entry;
+  else integrationVcenters.push(entry);
+  renderVCenterCards();
+  const savedIndex=integrationVcenters.findIndex(v=>v.id===entry.id);
+  loadVCenterEditor(savedIndex);
+  editorStatus(`${entry.name} 정보를 저장 목록에 반영했습니다.`,'success');
+  if(!silent)integrationToast(`${entry.name} 정보 반영 완료`,'success');
+  return true;
+}
+
+function loadVCenterEditor(index){
+  const v=integrationVcenters[index];
+  if(!v)return;
+  document.getElementById('vc-editor-index').value=String(index);
+  document.getElementById('vc-edit-id').value=v.id||'';
+  document.getElementById('vc-edit-name').value=v.name||'';
+  document.getElementById('vc-edit-server').value=v.server||'';
+  document.getElementById('vc-edit-port').value=v.port||document.getElementById('int-rv-default-port').value||443;
+  document.getElementById('vc-edit-site').value=v.site||'';
+  document.getElementById('vc-edit-enabled').value=String(v.enabled!==false);
+  const profile=(v.auth_profile||'CUSTOM').toUpperCase();
+  const common=profile==='COMMON';
+  document.getElementById('vc-edit-profile').value=profile;
+  document.getElementById('vc-edit-auth').value=(common?integrationVCenterRuntime.default_auth_mode:(v.auth_mode||'CREDENTIAL')).toUpperCase();
+  document.getElementById('vc-edit-user').value=common?integrationVCenterRuntime.default_username:(v.username||'');
+  document.getElementById('vc-edit-password').value='';
+  const passwordConfigured=common?integrationVCenterRuntime.default_password_configured:Boolean(v.password_configured);
+  document.getElementById('vc-edit-password').placeholder=passwordConfigured?'비밀번호 등록됨 · 변경 시 입력':'등록 또는 변경할 때 입력';
+  document.getElementById('vc-edit-ssl').value=String(common?integrationVCenterRuntime.default_bypass_ssl_check:Boolean(v.bypass_ssl_check));
+  updateVCenterEditorAuthFields();
+  editorStatus(`${v.name||v.id} 설정을 편집 중입니다.${profile==='COMMON'?' 기존 공통 인증을 사용 중이며 계정을 수정하면 개별 인증으로 전환됩니다.':''}`);
+  document.getElementById('vc-edit-server').focus();
+}
+
+function renderVCenterCards(){
+  const list=document.getElementById('integration-vcenter-list');
+  if(!list)return;
+  const count=document.getElementById('vcenter-count');
+  if(count)count.textContent=String(integrationVcenters.length);
+  if(!integrationVcenters.length){list.innerHTML='<div class="vc-empty">등록된 vCenter가 없습니다.<br>왼쪽에서 첫 번째 vCenter 정보를 입력하세요.</div>';return;}
+  list.innerHTML=integrationVcenters.map((v,i)=>{
+    const status=v.test_status||'미실행';
+    const statusClass=status==='SUCCESS'?'badge-green':status==='FAILED'?'badge-red':status==='RUNNING'?'badge-yellow':'badge-blue';
+    const auth=(v.auth_profile||'CUSTOM').toUpperCase()==='COMMON'?'공통 인증':((v.auth_mode||'CREDENTIAL').toUpperCase()==='PASS_THROUGH'?'Pass-through':'개별 계정');
+    return `<div class="vc-item">
+      <div class="vc-item-head"><div><div class="vc-item-title">${syncEscape(v.name||v.id||'이름 없음')}</div><div class="vc-item-address">${syncEscape(v.server||'주소 미입력')}:${Number(v.port||443)}</div></div><span class="badge ${statusClass}">${syncEscape(status)}</span></div>
+      <div class="vc-item-meta"><span class="badge badge-blue">${syncEscape(v.id||'-')}</span><span class="badge badge-blue">${syncEscape(v.site||'사이트 미지정')}</span><span class="badge ${v.enabled!==false?'badge-green':'badge-red'}">${v.enabled!==false?'사용':'중지'}</span><span class="badge badge-blue">${syncEscape(auth)}</span></div>
+      <div class="vc-inline-status">${syncEscape(v.test_message||'아직 연결 테스트를 실행하지 않았습니다.')}</div>
+      <div class="vc-item-actions"><button type="button" class="btn btn-secondary btn-sm" onclick="loadVCenterEditor(${i})">수정</button><button type="button" class="btn btn-primary btn-sm" onclick="testSavedVCenter(${i})">테스트</button><button type="button" class="btn btn-danger btn-sm" onclick="deleteVCenterById('${syncEscape(v.id||'')}')">삭제</button></div>
+    </div>`;
+  }).join('');
+}
+
+async function deleteVCenterById(vcenterId){
+  const index=integrationVcenters.findIndex(v=>String(v.id)===String(vcenterId));
+  const v=index>=0?integrationVcenters[index]:null;
+  if(!v){integrationToast('삭제할 vCenter를 찾지 못했습니다. 목록을 다시 불러오세요.','error');return;}
+  if(!confirm(`[${v.name||v.id}] ${v.server||''}:${v.port||443}
+선택한 vCenter를 삭제할까요?`))return;
+  const backup=cloneVCenterList();
+  integrationVcenters.splice(index,1);
+  renderVCenterCards();
+  resetVCenterEditor();
+  const saved=await saveVCenterSettings({syncEditor:false,reason:'DELETE'});
+  if(!saved){
+    integrationVcenters=backup;
+    renderVCenterCards();
+    integrationToast(`${v.name||v.id} 삭제 저장에 실패해 목록을 복원했습니다.`,'error');
+    return;
+  }
+  setActionResult('vcenter-action-result',{state:'success',title:'vCenter 삭제 완료',summary:`${v.name||v.id} 항목을 삭제했습니다.`,meta:[`${v.server||'-'}:${v.port||443}`]});
+  integrationToast(`${v.name||v.id} 항목을 삭제했습니다.`,'success');
+}
+
+function toggleVCenterBulkPanel(){
+  const el=document.getElementById('vcenter-bulk-panel');
+  if(el)el.style.display=el.style.display==='none'?'block':'none';
+}
+function splitVCenterLine(line){const delimiter=line.includes('\t')?'\t':',';return line.split(delimiter).map(v=>v.trim().replace(/^"|"$/g,''));}
+function parseVCenterBulkText(text){
+  const rows=[];
+  const used=new Set(integrationVcenters.map(v=>v.id));
+  let sequence=1;
+  const allocateId=()=>{let id='';do{id='vc_'+String(sequence++).padStart(3,'0')}while(used.has(id));used.add(id);return id;};
+  text.split(/\r?\n/).map(v=>v.trim()).filter(Boolean).forEach((line,index)=>{
+    const c=splitVCenterLine(line);
+    if(index===0&&/^(name|표시명|vcenter)$/i.test(c[0]||''))return;
+    rows.push({id:allocateId(),name:c[0]||'',server:c[1]||'',site:c[2]||'',enabled:true,port:Number(document.getElementById('int-rv-default-port').value||443),auth_profile:'CUSTOM',auth_mode:'CREDENTIAL',username:'',password:'',password_configured:false,bypass_ssl_check:false,expected_baseline:{total_rows:null,powered_on_rows:null}});
+  });
+  return rows;
+}
+function applyVCenterBulkText(){
+  const rows=parseVCenterBulkText(document.getElementById('vcenter-bulk-text').value);
+  if(!rows.length){integrationAlert('반영할 vCenter 목록이 없습니다.','error');return;}
+  const map=new Map(integrationVcenters.map(v=>[v.id,v]));
+  rows.forEach(v=>map.set(v.id,{...(map.get(v.id)||{}),...v}));
+  integrationVcenters=[...map.values()];
+  renderVCenterCards();
+  setActionResult('vcenter-action-result',{state:'success',title:'일괄 목록 반영 완료',summary:`${rows.length}개 항목을 화면 목록에 반영했습니다.`,details:['각 항목의 수정 버튼에서 조회계정과 비밀번호를 입력하세요.','계정 입력 후 vCenter 저장을 누르면 서버 설정에 반영됩니다.']});
+}
+function importVCenterFile(input){
+  const file=input.files?.[0];
+  if(!file)return;
+  const reader=new FileReader();
+  reader.onload=()=>{document.getElementById('vcenter-bulk-text').value=String(reader.result||'');document.getElementById('vcenter-bulk-panel').style.display='block';applyVCenterBulkText();input.value='';};
+  reader.onerror=()=>integrationToast('CSV 파일을 읽지 못했습니다.','error');
+  reader.readAsText(file,'utf-8');
+}
+
+function currentVCenterRuntimeConfig(){
+  return {
+    // 연결 테스트는 일일 수집모드(DEMO/FILE_ONLY)와 무관하게 PowerCLI로 직접 확인합니다.
+    collection_mode:'POWERCLI',
+    powershell_path:document.getElementById('int-rv-executable').value.trim(),
+    script_path:document.getElementById('int-rv-script').value.trim(),
+    snapshot_dir:document.getElementById('int-rv-snapshot').value.trim(),
+    temp_dir:document.getElementById('int-rv-incoming').value.trim(),
+    incoming_dir:'data/incoming/vcenter',
+    export_xlsx:document.getElementById('int-rv-export-xlsx').value==='true',
+    hostname_suffixes:document.getElementById('int-rv-suffixes').value.split(',').map(v=>v.trim()).filter(Boolean),
+    timeout_seconds:Number(document.getElementById('int-rv-timeout').value||1800),
+    retry_count:Number(document.getElementById('int-rv-retry').value||1),
+    default_port:Number(document.getElementById('int-rv-default-port').value||443),
+    default_auth_mode:document.getElementById('int-rv-default-auth').value,
+    default_username:document.getElementById('int-rv-default-user').value.trim(),
+    default_password:document.getElementById('int-rv-default-password').value,
+    default_bypass_ssl_check:document.getElementById('int-rv-default-ssl').value==='true'
+  };
+}
+
+function buildOraclePayload(scope='ASSET_QUERY'){
+  return {
+    scope,
+    oracle:{
+      enabled:true,
+      mode:document.getElementById('int-oracle-mode').value||'thin',
+      host:document.getElementById('int-oracle-host').value.trim(),
+      dsn:document.getElementById('int-oracle-dsn').value.trim(),
+      port:document.getElementById('int-oracle-port').value.trim()||'1521',
+      service_name:document.getElementById('int-oracle-service').value.trim(),
+      sid:document.getElementById('int-oracle-sid').value.trim(),
+      user:document.getElementById('int-oracle-user').value.trim(),
+      password:document.getElementById('int-oracle-password').value,
+      client_lib_dir:document.getElementById('int-oracle-client').value.trim()
+    },
+    itsm:{collection_mode:'ORACLE'}
+  };
+}
+
+let oracleCatalogTables=[];
+let oracleCatalogSelection=null;
+let oracleCatalogColumns=[];
+let oracleCatalogOverrides={};
+let oracleCatalogAutoMapping={};
+
+function setOracleMappingOverride(logical,value){
+  // 사용자가 건드린 컬럼은 값이 자동매핑 결과와 같더라도 지정으로 유지합니다.
+  // 그래야 '(NULL로 조회)' 선택이 자동매핑으로 되돌아가지 않습니다.
+  oracleCatalogOverrides[logical]=value||'';
+  updateOracleMappingDirtyState();
+}
+
+function updateOracleMappingDirtyState(){
+  const count=Object.keys(oracleCatalogOverrides).length;
+  const badge=document.getElementById('oracle-mapping-dirty');
+  if(badge){
+    badge.style.display=count?'':'none';
+    badge.textContent=`직접 지정 ${count}개 · 미리보기 또는 적용을 눌러 반영`;
+  }
+  const resetButton=document.getElementById('btn-oracle-map-reset');
+  if(resetButton)resetButton.disabled=!count;
+}
+
+function resetOracleMappingOverrides(){
+  oracleCatalogOverrides={};
+  updateOracleMappingDirtyState();
+  applyOracleAssetSource(false);
+}
+
+function currentOracleFilter(){
+  const columnEl=document.getElementById('oracle-filter-column');
+  const valuesEl=document.getElementById('oracle-filter-values');
+  return {
+    filter_column:columnEl?columnEl.value:'',
+    filter_values:valuesEl?valuesEl.value:''
+  };
+}
+
+function renderOracleAssetSourceState(){
+  const el=document.getElementById('oracle-current-asset-source');
+  if(!el)return;
+  const source=integrationOracleInternal.asset_source||'';
+  if(!source){
+    el.textContent='미지정 · 아래에서 자산 테이블을 선택하세요';
+    return;
+  }
+  el.textContent=`${source} · 조회 SQL ${integrationOracleInternal.query_file_exists?'생성됨':'없음'}`;
+}
+
+function buildOracleCatalogPayload(extra={}){
+  return {...buildOraclePayload('CONNECTION'),...extra};
+}
+
+function renderOracleTableRows(rows,extraColumnLabel){
+  oracleCatalogTables=rows;
+  const body=document.getElementById('oracle-table-body');
+  if(!rows.length){
+    body.innerHTML='<tr><td colspan="6" style="text-align:center" class="text-muted">조건에 맞는 테이블이 없습니다.</td></tr>';
+    return;
+  }
+  body.innerHTML=rows.map((row,index)=>`<tr>
+    <td class="mono">${escapeHtml(row.owner)}</td>
+    <td class="mono">${escapeHtml(row.table_name)}</td>
+    <td>${escapeHtml(row.object_type||(extraColumnLabel?'추천':'-'))}</td>
+    <td class="mono">${row.num_rows==null?(row.total_columns!=null?`컬럼 ${fmtNumber(row.total_columns)}`:'-'):fmtNumber(row.num_rows)}</td>
+    <td>${escapeHtml(row.comments||(row.matched_count!=null?`자산 컬럼 ${row.matched_count}개 일치`:'-'))}</td>
+    <td><button type="button" class="btn btn-secondary btn-sm" onclick="inspectOracleTable(${index})">컬럼 보기</button></td>
+  </tr>`).join('');
+}
+
+async function loadOracleTables(){
+  setButtonBusy('btn-oracle-tables',true,'조회 중','테이블 목록 조회');
+  setActionResult('oracle-catalog-result',{state:'info',title:'테이블 목록 조회 중',summary:'조회 계정이 접근할 수 있는 테이블과 뷰를 확인합니다.'});
+  const res=await integrationFetch('/api/asset-sync/admin/oracle/tables',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildOracleCatalogPayload({
+    keyword:document.getElementById('int-oracle-table-keyword').value.trim(),
+    owner:document.getElementById('int-oracle-table-owner').value.trim(),
+    limit:Number(document.getElementById('int-oracle-table-limit').value||200)
+  }))});
+  setButtonBusy('btn-oracle-tables',false,'','테이블 목록 조회');
+  if(res.status!=='SUCCESS'){
+    setActionResult('oracle-catalog-result',{state:'error',title:'테이블 목록 조회 실패',summary:res.error||'조회 중 오류가 발생했습니다.',meta:[`HTTP ${res._httpStatus||0}`,res.stage||'UNKNOWN'],details:res.details||[]});
+    return;
+  }
+  renderOracleTableRows(res.tables||[]);
+  setActionResult('oracle-catalog-result',{state:'success',title:'테이블 목록 조회 완료',summary:res.message,meta:[`${res.count}건`]});
+}
+
+async function suggestOracleAssetSource(){
+  setButtonBusy('btn-oracle-suggest',true,'분석 중','자산 테이블 추천');
+  setActionResult('oracle-catalog-result',{state:'info',title:'자산 테이블 추천 중',summary:'CM_ID, CM_HOSTNAME 등 자산 컬럼이 많은 테이블을 찾습니다.'});
+  const res=await integrationFetch('/api/asset-sync/admin/oracle/asset-source/suggest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildOracleCatalogPayload({limit:20}))});
+  setButtonBusy('btn-oracle-suggest',false,'','자산 테이블 추천');
+  if(res.status!=='SUCCESS'){
+    setActionResult('oracle-catalog-result',{state:'error',title:'자산 테이블 추천 실패',summary:res.error||'조회 중 오류가 발생했습니다.',meta:[`HTTP ${res._httpStatus||0}`,res.stage||'UNKNOWN'],details:res.details||[]});
+    return;
+  }
+  renderOracleTableRows(res.candidates||[],'추천');
+  setActionResult('oracle-catalog-result',{state:res.count?'success':'info',title:'자산 테이블 추천 완료',summary:res.message,meta:[`${res.count}건`],details:res.count?['자산 컬럼이 가장 많이 일치하는 순서로 정렬했습니다.']:[]});
+}
+
+async function inspectOracleTable(index){
+  const target=oracleCatalogTables[index];
+  if(!target)return;
+  oracleCatalogSelection=target;
+  oracleCatalogColumns=[];
+  oracleCatalogOverrides={};
+  oracleCatalogAutoMapping={};
+  const detail=document.getElementById('oracle-table-detail');
+  detail.innerHTML='<div class="text-sm text-muted"><span class="loading"></span> 컬럼 정보를 불러오는 중...</div>';
+  const payload=buildOracleCatalogPayload({owner:target.owner,table_name:target.table_name});
+  const [columns,preview]=await Promise.all([
+    integrationFetch('/api/asset-sync/admin/oracle/columns',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),
+    integrationFetch('/api/asset-sync/admin/oracle/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...payload,limit:10})})
+  ]);
+  if(columns.status!=='SUCCESS'){
+    detail.innerHTML=`<div class="alert alert-error">❌ 컬럼 조회 실패: ${escapeHtml(columns.error||'')}</div>`;
+    return;
+  }
+  oracleCatalogColumns=(columns.columns||[]).map(c=>c.column_name);
+  const columnRows=(columns.columns||[]).map(c=>`<tr>
+    <td class="mono">${escapeHtml(c.column_name)}</td>
+    <td>${escapeHtml(c.data_type)}${c.data_precision!=null?`(${c.data_precision}${c.data_scale?','+c.data_scale:''})`:(c.data_length?`(${c.data_length})`:'')}</td>
+    <td>${c.nullable?'Y':'N'}</td>
+    <td>${escapeHtml(c.comments||'-')}</td></tr>`).join('');
+  const filterOptions=['<option value="">조건 없음 · 전체 행 수집</option>']
+    .concat(oracleCatalogColumns.map(name=>`<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`)).join('');
+  const previewBlock=preview.status==='SUCCESS'
+    ? `<div class="table-wrap" style="max-height:260px;overflow:auto"><table>
+         <thead><tr>${(preview.columns||[]).map(c=>`<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>
+         <tbody>${(preview.rows||[]).map(r=>`<tr>${r.map(v=>`<td class="mono">${escapeHtml(v==null?'':v)}</td>`).join('')}</tr>`).join('')||'<tr><td class="text-muted">데이터가 없습니다.</td></tr>'}</tbody>
+       </table></div>`
+    : `<div class="alert alert-warning">샘플 데이터 조회 실패: ${escapeHtml(preview.error||'')}</div>`;
+  detail.innerHTML=`
+    <div class="card" style="margin:0">
+      <div class="integration-card-head">
+        <div>
+          <div class="card-title" style="margin-bottom:4px">${escapeHtml(columns.full_name)}</div>
+          <div class="text-xs text-muted">${escapeHtml(columns.object_type)} · 컬럼 ${fmtNumber(columns.column_count)}개 · 샘플 ${fmtNumber(preview.row_count||0)}행</div>
+        </div>
+        <div class="integration-card-actions">
+          <button type="button" class="btn btn-secondary btn-sm" id="btn-oracle-map-preview" onclick="applyOracleAssetSource(false)">매핑 미리보기</button>
+          <button type="button" class="btn btn-primary btn-sm" id="btn-oracle-map-apply" onclick="applyOracleAssetSource(true)">자산 원본으로 적용</button>
+        </div>
+      </div>
+      <div id="oracle-mapping-result" class="action-result" aria-live="polite"></div>
+      <div class="alert alert-info" style="margin-top:12px;margin-bottom:0">
+        조회 조건을 지정하지 않으면 <strong>대상 테이블의 전체 행</strong>을 수집합니다.
+        서버 자산만 수집하려면 구분 컬럼과 실제 코드값을 지정하세요. 코드값이 실제와 다르면 0건 조회로 수집이 중단됩니다.
+      </div>
+      <div class="grid-2" style="margin-top:12px">
+        <div class="form-group" style="margin:0"><label class="form-label">조회 조건 컬럼</label>
+          <select class="form-select" id="oracle-filter-column">${filterOptions}</select></div>
+        <div class="form-group" style="margin:0"><label class="form-label">코드값 · 쉼표로 구분</label>
+          <input class="form-input" id="oracle-filter-values" placeholder="예: HW0101, HW0102, HW0104"></div>
+      </div>
+      <div class="grid-2" style="margin-top:12px">
+        <div>
+          <div class="text-sm" style="font-weight:700;margin-bottom:6px">컬럼 정의</div>
+          <div class="table-wrap" style="max-height:260px;overflow:auto"><table>
+            <thead><tr><th>컬럼</th><th>타입</th><th>NULL</th><th>설명</th></tr></thead><tbody>${columnRows}</tbody></table></div>
+        </div>
+        <div>
+          <div class="text-sm" style="font-weight:700;margin-bottom:6px">샘플 데이터 · 최대 10행</div>
+          ${previewBlock}
+        </div>
+      </div>
+      <div id="oracle-mapping-detail" style="margin-top:14px"></div>
+    </div>`;
+}
+
+async function applyOracleAssetSource(apply){
+  if(!oracleCatalogSelection)return;
+  const buttonId=apply?'btn-oracle-map-apply':'btn-oracle-map-preview';
+  const buttonText=apply?'자산 원본으로 적용':'매핑 미리보기';
+  setButtonBusy(buttonId,true,apply?'적용 중':'생성 중',buttonText);
+  setActionResult('oracle-mapping-result',{state:'info',title:`${buttonText} 실행 중`,summary:'선택한 테이블의 컬럼으로 자산 조회 SQL을 생성합니다.'});
+  const res=await integrationFetch('/api/asset-sync/admin/oracle/asset-source',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildOracleCatalogPayload({
+    owner:oracleCatalogSelection.owner,
+    table_name:oracleCatalogSelection.table_name,
+    apply:Boolean(apply),
+    mapping:oracleCatalogOverrides,
+    ...currentOracleFilter()
+  }))});
+  setButtonBusy(buttonId,false,'',buttonText);
+  if(res.status!=='SUCCESS'){
+    setActionResult('oracle-mapping-result',{state:'error',title:`${buttonText} 실패`,summary:res.error||'생성 중 오류가 발생했습니다.',meta:[`HTTP ${res._httpStatus||0}`,res.stage||'UNKNOWN'],details:res.details||[]});
+    return;
+  }
+  const verification=res.verification;
+  const failedVerification=verification&&verification.status!=='SUCCESS';
+  const details=[];
+  if(res.missing_required_columns&&res.missing_required_columns.length)details.push(`필수 컬럼 미매핑: ${res.missing_required_columns.join(', ')} · NULL로 조회됩니다.`);
+  if(res.missing_columns&&res.missing_columns.length)details.push(`전체 미매핑 컬럼 ${res.missing_columns.length}개`);
+  details.push(res.where_clause?`조회 조건: ${res.where_clause}`:'조회 조건 없음 · 대상 테이블 전체 행을 수집합니다.');
+  if(verification&&verification.status==='SUCCESS')details.push(`자산 조회 검증 성공 · 샘플 ${verification.sample_count}건`);
+  if(failedVerification)details.push(`자산 조회 검증 실패(${verification.stage}): ${verification.error}`);
+  setActionResult('oracle-mapping-result',{
+    state:failedVerification?'error':(res.applied?'success':'info'),
+    title:res.applied?'자산 원본 적용 완료':'매핑 미리보기 완료',
+    summary:res.message,
+    meta:[`${res.matched_count}/${res.total_count} 컬럼 매핑`,res.asset_source,res.filter_column?`조건 ${res.filter_column}`:'조건 없음'],
+    details
+  });
+  oracleCatalogAutoMapping={};
+  (res.mapping||[]).forEach(m=>{if(!m.forced)oracleCatalogAutoMapping[m.logical_column]=m.source_column||'';});
+  // 서버가 정규화한 조회 조건을 화면에 되돌려 실제 적용된 값과 일치시킵니다.
+  const filterColumnEl=document.getElementById('oracle-filter-column');
+  if(filterColumnEl)filterColumnEl.value=res.filter_column||'';
+  const filterValuesEl=document.getElementById('oracle-filter-values');
+  if(filterValuesEl)filterValuesEl.value=(res.filter_values||[]).join(', ');
+  if(res.applied){
+    integrationOracleInternal.asset_source=res.asset_source;
+    integrationOracleInternal.query_file_exists=true;
+    renderOracleAssetSourceState();
+    integrationToast(failedVerification?'자산 원본은 저장했지만 조회 검증에 실패했습니다.':'자산 원본을 적용했습니다.',failedVerification?'error':'success');
+  }
+  const columnOptions=(res.source_columns||oracleCatalogColumns||[]);
+  const mappingRows=(res.mapping||[]).map(m=>{
+    const selected=m.source_column||'';
+    const options=[`<option value=""${selected?'':' selected'}>(NULL로 조회)</option>`]
+      .concat(columnOptions.map(name=>`<option value="${escapeHtml(name)}"${name===selected?' selected':''}>${escapeHtml(name)}</option>`)).join('');
+    const label=m.match_type==='OVERRIDE'?'✏️ 직접 지정'
+      :m.match_type==='MISSING'?'❌ 없음'
+      :m.match_type==='EXACT'?'✅ 동일':'🔁 자동매핑';
+    const warn=m.required&&!m.source_column;
+    return `<tr${warn?' style="background:rgba(178,58,52,0.06)"':''}>
+      <td class="mono">${escapeHtml(m.logical_column)}</td>
+      <td><select class="form-select" style="min-width:180px" onchange="setOracleMappingOverride('${escapeHtml(m.logical_column)}',this.value)">${options}</select></td>
+      <td>${label}</td>
+      <td>${m.required?'필수':'선택'}</td></tr>`;
+  }).join('');
+  document.getElementById('oracle-mapping-detail').innerHTML=`
+    <details open>
+      <summary class="text-sm" style="cursor:pointer;font-weight:700">컬럼 매핑 결과 · ${res.matched_count}/${res.total_count}</summary>
+      <div class="text-xs text-muted" style="margin-top:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <span>자동매핑이 틀렸거나 비어 있으면 원본 컬럼을 직접 선택한 뒤 다시 미리보기 또는 적용을 누르세요.</span>
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-oracle-map-reset" onclick="resetOracleMappingOverrides()">자동매핑으로 초기화</button>
+        <span class="badge badge-blue" id="oracle-mapping-dirty" style="display:none"></span>
+      </div>
+      <div class="table-wrap" style="max-height:320px;overflow:auto;margin-top:8px"><table>
+        <thead><tr><th>수집 컬럼</th><th>원본 컬럼</th><th>매핑</th><th>구분</th></tr></thead><tbody>${mappingRows}</tbody></table></div>
+    </details>
+    <details style="margin-top:10px">
+      <summary class="text-sm" style="cursor:pointer;font-weight:700">생성된 자산 조회 SQL</summary>
+      <pre style="white-space:pre-wrap;margin-top:8px;font-size:12px">${escapeHtml(res.sql)}</pre>
+    </details>`;
+  updateOracleMappingDirtyState();
+}
+
+function buildVCenterPayload(){
+  const cleanVcenters=integrationVcenters.map(({test_status,test_message,...v})=>v);
+  // vCenter CRUD는 숨겨진 실행모드·파일경로를 수정하지 않습니다.
+  return {vcenter:{activate_powercli:true,vcenters:cleanVcenters}};
+}
+
+function buildRuntimePayload(){
+  const mask=document.getElementById('int-mask-logs').value==='true';
+  return {
+    security:{mask_ip_in_logs:mask,mask_hostname_in_logs:mask,mask_user_id_in_logs:mask,allow_sensitive_export:false,display_vcenter_server_in_logs:false},
+    scheduler:{daily_time:document.getElementById('int-schedule-time').value,task_name:document.getElementById('int-schedule-name').value.trim()}
+  };
+}
+
+async function loadIntegrationSettings(showMessage=false){
+  if(showMessage)setButtonBusy('btn-reload-integrations',true,'불러오는 중','저장값 다시 불러오기');
+  const res=await integrationFetch('/api/asset-sync/admin/settings');
+  if(showMessage)setButtonBusy('btn-reload-integrations',false,'','저장값 다시 불러오기');
+  if(res.error){
+    integrationAlert(res.error,'error');
+    integrationToast(`설정 불러오기 실패: ${res.error}`,'error');
+    return;
+  }
+  document.getElementById('int-oracle-mode').value=res.oracle.mode||'thin';
+  document.getElementById('int-oracle-host').value=res.oracle.host||'';
+  document.getElementById('int-oracle-dsn').value=res.oracle.dsn||'';
+  document.getElementById('int-oracle-port').value=res.oracle.port||'1521';
+  document.getElementById('int-oracle-service').value=res.oracle.service_name||'';
+  document.getElementById('int-oracle-sid').value=res.oracle.sid||'';
+  document.getElementById('int-oracle-user').value=res.oracle.user||'';
+  document.getElementById('int-oracle-password').value='';
+  document.getElementById('int-oracle-password').placeholder=res.oracle.password_configured?'비밀번호 등록됨 · 변경 시 입력':'Oracle 비밀번호';
+  document.getElementById('int-oracle-client').value=res.oracle.client_lib_dir||'';
+  integrationOracleInternal={
+    asset_source:res.oracle.asset_source||'',
+    query_file:res.oracle.query_file||'config/oracle_query.local.sql',
+    query_file_exists:Boolean(res.oracle.query_file_exists),
+    cpu_compare_field:res.itsm.cpu_compare_field||'CM_CPU_CORE_CNT',
+    memory_field:res.itsm.memory_field||'CM_MEMORY',
+    os_eos_field:res.itsm.os_eos_field||'OS_EOS_DATE'
+  };
+  renderOracleAssetSourceState();
+  const vc=res.vcenter||res.rvtools;
+  document.getElementById('int-rv-mode').value=normalizeVCenterCollectionMode(vc.collection_mode);
+  document.getElementById('int-rv-executable').value=vc.powershell_path||'powershell.exe';
+  document.getElementById('int-rv-script').value=vc.script_path||'scripts/collect_vcenter_inventory.ps1';
+  document.getElementById('int-rv-snapshot').value=vc.snapshot_dir||'data/archive/vcenter';
+  document.getElementById('int-rv-incoming').value=vc.temp_dir||'data/temp/powercli';
+  document.getElementById('int-rv-export-xlsx').value=String(vc.export_xlsx!==false);
+  document.getElementById('int-rv-suffixes').value=(vc.hostname_suffixes||[]).join(',');
+  document.getElementById('int-rv-timeout').value=vc.timeout_seconds||1800;
+  document.getElementById('int-rv-retry').value=vc.retry_count||1;
+  document.getElementById('int-rv-default-port').value=vc.default_port||443;
+  document.getElementById('int-rv-default-auth').value=vc.default_auth_mode||'CREDENTIAL';
+  document.getElementById('int-rv-default-user').value=vc.default_username||'';
+  document.getElementById('int-rv-default-password').value='';
+  document.getElementById('int-rv-default-password').placeholder=vc.default_password_configured?'비밀번호 등록됨 · 변경 시 입력':'vCenter 비밀번호';
+  document.getElementById('int-rv-default-ssl').value=String(vc.default_bypass_ssl_check||false);
+  integrationVCenterRuntime={
+    default_username:vc.default_username||'',
+    default_password_configured:Boolean(vc.default_password_configured),
+    default_auth_mode:(vc.default_auth_mode||'CREDENTIAL').toUpperCase(),
+    default_bypass_ssl_check:Boolean(vc.default_bypass_ssl_check)
+  };
+  document.getElementById('int-schedule-time').value=res.scheduler.daily_time||'07:00';
+  document.getElementById('int-schedule-name').value=res.scheduler.task_name||'AssetDailyCollection';
+  document.getElementById('int-mask-logs').value=String(res.security.mask_ip_in_logs&&res.security.mask_hostname_in_logs&&res.security.mask_user_id_in_logs);
+  integrationVcenters=(vc.vcenters||[]).map(v=>({...v,test_status:'미실행',test_message:'저장된 설정을 불러왔습니다.'}));
+  renderVCenterCards();
+  updateCommonAuthFields();
+  resetVCenterEditor();
+  if(showMessage){
+    integrationToast('저장된 연동정보를 다시 불러왔습니다.','success');
+    integrationAlert(`설정 로드 완료 · Oracle 비밀번호 ${res.oracle.password_configured?'등록됨':'미등록'} · vCenter ${integrationVcenters.length}대`,'success');
+  }
+}
+
+async function saveOracleSettings(){
+  setButtonBusy('btn-save-oracle',true,'저장 중','Oracle 설정 저장');
+  setActionResult('oracle-action-result',{state:'info',title:'Oracle 설정 저장 중',summary:'Oracle/ITSM 설정만 별도로 저장하고 있습니다.'});
+  const res=await integrationFetch('/api/asset-sync/admin/settings/oracle',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildOraclePayload())});
+  setButtonBusy('btn-save-oracle',false,'','Oracle 설정 저장');
+  if(!res._ok||res.error){
+    setActionResult('oracle-action-result',{state:'error',title:'Oracle 설정 저장 실패',summary:res.error||'저장 중 오류가 발생했습니다.',meta:[`HTTP ${res._httpStatus||0}`,res.stage||'SAVE'],details:res.details||[]});
+    integrationToast(`Oracle 설정 저장 실패: ${res.error||'알 수 없는 오류'}`,'error');
+    return false;
+  }
+  document.getElementById('int-oracle-password').value='';
+  document.getElementById('int-oracle-password').placeholder='비밀번호 등록됨 · 변경 시 입력';
+  setActionResult('oracle-action-result',{state:'success',title:'Oracle 설정 저장 완료',summary:res.message||'Oracle/ITSM 설정을 저장했습니다.',meta:[`HTTP ${res._httpStatus}`,'ORACLE/ITSM'],details:['vCenter 설정과 무관하게 저장되었습니다.','다음 Oracle 수집 또는 일일 배치부터 적용됩니다.']});
+  integrationToast('Oracle 설정을 저장했습니다.','success');
+  return true;
+}
+
+async function testOracleIntegration(scope='ASSET_QUERY'){
+  const connectionOnly=scope==='CONNECTION';
+  const buttonId=connectionOnly?'btn-test-oracle-connection':'btn-test-oracle';
+  const buttonText=connectionOnly?'접속 테스트':'자산 조회 테스트';
+  setButtonBusy(buttonId,true,'테스트 중',buttonText);
+  setActionResult('oracle-action-result',{state:'info',title:`Oracle ${buttonText} 중`,summary:connectionOnly?'TCP, 계정 로그인, SELECT 1 FROM DUAL을 확인합니다.':'서버 내부 자산 SQL을 실행하고 필수 컬럼까지 확인합니다.'});
+  const res=await integrationFetch('/api/asset-sync/admin/test/oracle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildOraclePayload(scope))});
+  setButtonBusy(buttonId,false,'',buttonText);
+  const network=res.network?.status||'미확인';
+  if(res.status==='SUCCESS'&&res._ok){
+    const details=connectionOnly
+      ? ['Oracle 계정 로그인 성공','SELECT 1 FROM DUAL 실행 성공']
+      : [`검증 컬럼: ${(res.required_columns||[]).join(', ')||'응답 참조'}`,`조회 컬럼 수: ${(res.columns||[]).length}`];
+    const meta=[`HTTP ${res._httpStatus}`,`단계 ${res.stage||'SUCCESS'}`,`TCP ${network}`];
+    if(!connectionOnly)meta.push(`샘플 ${Number(res.sample_count||0)}건`);
+    setActionResult('oracle-action-result',{state:'success',title:`Oracle ${buttonText} 성공`,summary:res.message||'정상적으로 완료되었습니다.',meta,details});
+    integrationToast(`Oracle ${buttonText}에 성공했습니다.`,'success');
+  }else{
+    const details=[...(res.details||[])];
+    if(res.network?.error)details.unshift(`TCP 오류: ${res.network.error}`);
+    setActionResult('oracle-action-result',{state:'error',title:`Oracle ${buttonText} 실패`,summary:res.error||'Oracle 테스트 중 오류가 발생했습니다.',meta:[`HTTP ${res._httpStatus||0}`,`실패 단계 ${res.stage||'UNKNOWN'}`,`TCP ${network}`],details});
+    integrationToast(`Oracle ${buttonText} 실패(${res.stage||'UNKNOWN'}): ${res.error||'오류 내용을 확인하세요.'}`,'error',6500);
+  }
+}
+
+async function saveVCenterSettings({syncEditor=true,reason='SAVE'}={}){
+  const listBackup=cloneVCenterList();
+  const editorIndexBefore=Number(document.getElementById('vc-editor-index').value||-1);
+  const editorDraft=readVCenterEditor();
+  let editorApplied=false;
+  if(syncEditor){
+    const hasEditorInput=Boolean(editorDraft.name||editorDraft.server||editorDraft.username||document.getElementById('vc-edit-password').value);
+    if(hasEditorInput){
+      if(!saveVCenterEditor({silent:true}))return false;
+      editorApplied=true;
+    }
+  }
+  setButtonBusy('btn-save-vcenters',true,'저장 중','목록 전체 저장');
+  setActionResult('vcenter-action-result',{state:'info',title:'vCenter 설정 저장 중',summary:`vCenter ${integrationVcenters.length}대 연결정보를 저장하고 있습니다.`});
+  const res=await integrationFetch('/api/asset-sync/admin/settings/vcenter',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildVCenterPayload())});
+  setButtonBusy('btn-save-vcenters',false,'','목록 전체 저장');
+  if(!res._ok||res.error){
+    if(editorApplied){
+      integrationVcenters=listBackup;
+      renderVCenterCards();
+      restoreVCenterEditorDraft(editorDraft,editorIndexBefore);
+    }
+    setActionResult('vcenter-action-result',{state:'error',title:'vCenter 설정 저장 실패',summary:res.error||'저장 중 오류가 발생했습니다.',meta:[`HTTP ${res._httpStatus||0}`,res.stage||'SAVE'],details:res.details||[]});
+    integrationToast(`vCenter 설정 저장 실패: ${res.error||'알 수 없는 오류'}`,'error');
+    return false;
+  }
+  document.getElementById('int-rv-default-password').value='';
+  integrationVcenters=integrationVcenters.map(v=>({...v,password:'',password_configured:Boolean(v.password||v.password_configured),test_message:v.test_message||'설정 저장 완료'}));
+  renderVCenterCards();
+  setActionResult('vcenter-action-result',{state:'success',title:reason==='DELETE'?'vCenter 삭제 저장 완료':'vCenter 설정 저장 완료',summary:res.message||'vCenter 연결정보를 저장했습니다.',meta:[`HTTP ${res._httpStatus}`,`등록 ${integrationVcenters.length}대`,`PowerCLI 직접조회`],details:['Oracle 설정과 무관하게 저장되었습니다.','다음 vCenter 수집 또는 일일 배치부터 적용됩니다.']});
+  integrationToast(`vCenter ${integrationVcenters.length}대 설정을 저장했습니다.`,'success');
+  return true;
+}
+
+async function saveCurrentVCenter(){
+  const listBackup=cloneVCenterList();
+  const editorIndexBefore=Number(document.getElementById('vc-editor-index').value||-1);
+  const editorDraft=readVCenterEditor();
+  if(!saveVCenterEditor({silent:true}))return false;
+  setButtonBusy('btn-apply-vcenter-editor',true,'저장 중','vCenter 저장');
+  const saved=await saveVCenterSettings({syncEditor:false,reason:'EDITOR'});
+  setButtonBusy('btn-apply-vcenter-editor',false,'','vCenter 저장');
+  if(saved){
+    document.getElementById('vc-edit-password').value='';
+    document.getElementById('vc-edit-password').placeholder='비밀번호 등록됨 · 변경 시 입력';
+    editorStatus(`${editorDraft.name||editorDraft.id} 연결정보를 서버에 저장했습니다.`,'success');
+  }else{
+    // 서버 저장 실패 시 화면 목록에 임시 중복 항목이 남지 않도록 원복합니다.
+    integrationVcenters=listBackup;
+    renderVCenterCards();
+    restoreVCenterEditorDraft(editorDraft,editorIndexBefore);
+    editorStatus(`저장 실패: 입력값은 유지했으며 등록 목록은 이전 상태로 복원했습니다.`,'error');
+  }
+  return saved;
+}
+
+async function saveRuntimeSettings(){
+  setButtonBusy('btn-save-runtime',true,'저장 중','실행 설정 저장');
+  setActionResult('runtime-action-result',{state:'info',title:'실행 설정 저장 중',summary:'스케줄 시간과 로그 마스킹 설정을 저장하고 있습니다.'});
+  const res=await integrationFetch('/api/asset-sync/admin/settings/runtime',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildRuntimePayload())});
+  setButtonBusy('btn-save-runtime',false,'','실행 설정 저장');
+  if(!res._ok||res.error){
+    setActionResult('runtime-action-result',{state:'error',title:'실행 설정 저장 실패',summary:res.error||'저장 중 오류가 발생했습니다.',meta:[`HTTP ${res._httpStatus||0}`,res.stage||'SAVE']});
+    integrationToast(`실행 설정 저장 실패: ${res.error||'알 수 없는 오류'}`,'error');
+    return false;
+  }
+  setActionResult('runtime-action-result',{state:'success',title:'실행 설정 저장 완료',summary:res.message||'실행 설정을 저장했습니다.',meta:[`HTTP ${res._httpStatus}`,`매일 ${res.scheduler?.daily_time||'-'}`]});
+  integrationToast('실행시간과 로그 설정을 저장했습니다.','success');
+  return true;
+}
+
+async function saveIntegrationSettings(){
+  const oracleSaved=await saveOracleSettings();
+  if(!oracleSaved)return false;
+  const vcenterSaved=await saveVCenterSettings();
+  if(!vcenterSaved)return false;
+  return saveRuntimeSettings();
+}
+
+async function runVCenterTest(entry,index=-1){
+  const error=validateVCenterEntry(entry);
+  if(error){editorStatus(error,'error');integrationToast(error,'error');return;}
+  setButtonBusy('btn-test-vcenter-editor',true,'테스트 중','연결 테스트');
+  if(index>=0){integrationVcenters[index].test_status='RUNNING';integrationVcenters[index].test_message='TCP 및 PowerCLI 테스트 중';renderVCenterCards();}
+  editorStatus(`${entry.name||entry.id}: TCP ${entry.port||443}, PowerCLI 모듈, 로그인, VM 조회를 확인 중입니다.`,'warning');
+  setActionResult('vcenter-action-result',{state:'info',title:`${entry.name||entry.id} 연결 테스트 중`,summary:'현재 입력한 vCenter 주소와 계정만 사용하며 Oracle 설정이나 다른 vCenter와 무관하게 테스트합니다.',meta:[`${entry.server}:${entry.port||443}`]});
+  const res=await integrationFetch('/api/asset-sync/admin/test/vcenter',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({entry,vcenter_config:currentVCenterRuntimeConfig()})});
+  setButtonBusy('btn-test-vcenter-editor',false,'','연결 테스트');
+  const success=res.status==='SUCCESS'&&res._ok;
+  const message=success?`TCP/PowerCLI 로그인 성공 · VM ${Number(res.row_count||0).toLocaleString()}건 조회`:`${res.error||res.stderr||'연결 테스트에 실패했습니다.'}`;
+  if(index>=0){integrationVcenters[index].test_status=success?'SUCCESS':'FAILED';integrationVcenters[index].test_message=success?message:`${res.stage||'UNKNOWN'}: ${message}`;renderVCenterCards();}
+  editorStatus(success?message:`실패(${res.stage||'UNKNOWN'}): ${message}`,success?'success':'error');
+  setActionResult('vcenter-action-result',{state:success?'success':'error',title:success?'vCenter 연결 테스트 성공':'vCenter 연결 테스트 실패',summary:message,meta:[`HTTP ${res._httpStatus||0}`,`단계 ${res.stage||'UNKNOWN'}`,`${entry.server}:${entry.port||443}`],details:res.details||[]});
+  integrationToast(success?`${entry.name||entry.id} 연결 테스트 성공`:`${entry.name||entry.id} 테스트 실패(${res.stage||'UNKNOWN'}): ${message}`,success?'success':'error',success?4200:6500);
+}
+
+async function testVCenterEditor(){
+  await runVCenterTest(readVCenterEditor(),Number(document.getElementById('vc-editor-index').value||-1));
+}
+async function testSavedVCenter(index){
+  const v=integrationVcenters[index];
+  if(!v)return;
+  loadVCenterEditor(index);
+  await runVCenterTest(v,index);
+}
+async function testAllVCenterIntegrations(){
+  const entries=integrationVcenters.filter(v=>v.enabled!==false);
+  if(!entries.length){setActionResult('vcenter-action-result',{state:'error',title:'전체 테스트 불가',summary:'테스트할 활성 vCenter가 없습니다.'});integrationToast('테스트할 활성 vCenter가 없습니다.','error');return;}
+  for(const v of entries){const error=validateVCenterEntry(v);if(error){setActionResult('vcenter-action-result',{state:'error',title:'전체 테스트 입력 오류',summary:`${v.name||v.id}: ${error}`});integrationToast(`${v.name||v.id}: ${error}`,'error');return;}}
+  entries.forEach(v=>{v.test_status='RUNNING';v.test_message='전체 테스트 중';});
+  renderVCenterCards();
+  setButtonBusy('btn-test-vcenters',true,'전체 테스트 중','등록목록 전체 테스트');
+  setActionResult('vcenter-action-result',{state:'info',title:'전체 vCenter 테스트 중',summary:`활성 vCenter ${entries.length}대를 순차 테스트합니다.`});
+  const res=await integrationFetch('/api/asset-sync/admin/test/vcenter/all',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({entries,vcenter_config:currentVCenterRuntimeConfig()})});
+  setButtonBusy('btn-test-vcenters',false,'','등록목록 전체 테스트');
+  (res.results||[]).forEach(r=>{const v=integrationVcenters.find(x=>x.id===r.id);if(v){v.test_status=r.status==='SUCCESS'?'SUCCESS':'FAILED';v.test_message=r.status==='SUCCESS'?`PowerCLI VM ${r.row_count||0}건 조회 성공`:`${r.stage||'UNKNOWN'}: ${r.error||'실패'}`;}});
+  renderVCenterCards();
+  const success=res.status==='SUCCESS'&&res._ok;
+  const partial=res.status==='PARTIAL_SUCCESS';
+  setActionResult('vcenter-action-result',{state:success?'success':partial?'warning':'error',title:success?'전체 vCenter 테스트 성공':partial?'일부 vCenter 테스트 실패':'전체 vCenter 테스트 실패',summary:res.error||`성공 ${res.success||0}대 / 실패 ${res.failed||0}대`,meta:[`HTTP ${res._httpStatus||0}`,`대상 ${entries.length}대`],details:(res.results||[]).filter(r=>r.status!=='SUCCESS').map(r=>`${r.name||r.id}: ${r.stage||'UNKNOWN'} - ${r.error||'실패'}`)});
+  integrationToast(success?'전체 vCenter 연결 테스트에 성공했습니다.':partial?'일부 vCenter 테스트가 실패했습니다.':'전체 vCenter 테스트가 실패했습니다.',success?'success':partial?'warning':'error',6000);
+}
+
+
+</script>

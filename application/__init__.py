@@ -50,10 +50,18 @@ def create_app() -> Flask:
     @app.context_processor
     def inject_modules() -> dict:
         # 모든 화면이 같은 메뉴를 그리도록 템플릿에 모듈 목록을 넣어준다.
-        from flask import session as flask_session
+        # 명시 부여를 반영해야 대메뉴별 담당자 구분이 화면에도 적용된다.
+        from application.modules.routes import current_user, granted_permissions
 
-        role = str((flask_session.get("user") or {}).get("role") or "user")
-        return {"portal_modules": [module.public() for module in registry.visible(role)]}
+        user = current_user()
+        if not user:
+            return {"portal_modules": []}
+        pairs = registry.accessible(user, granted_permissions(user))
+        return {
+            "portal_modules": [
+                {**module.public(), "permission": permission} for module, permission in pairs
+            ]
+        }
 
     # 계정은 공유 DB에 둔다. 레거시 users.json 이 남아 있으면 최초 기동 때 이관한다.
     manager = database_manager()

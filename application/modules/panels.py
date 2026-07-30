@@ -113,6 +113,7 @@ class PanelAggregator:
         user: Mapping[str, Any],
         params: Mapping[str, Any],
         timeout: float | None = None,
+        permission: str = "VIEW",
     ) -> dict[str, Any]:
         started = time.monotonic()
         if module.is_local:
@@ -136,7 +137,9 @@ class PanelAggregator:
                 elapsed_ms=int((time.monotonic() - started) * 1000),
             )
 
-        response = self.client.call(module.id, module.panel_path, user=user, params=params, timeout=timeout)
+        response = self.client.call(
+            module.id, module.panel_path, user=user, params=params, timeout=timeout, permission=permission
+        )
         if not response.ok:
             return _panel_envelope(
                 module, response.status, error=response.error,
@@ -153,12 +156,15 @@ class PanelAggregator:
         params: Mapping[str, Any] | None = None,
         *,
         module_ids: list[str] | None = None,
+        granted: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
-        role = str(user.get("role") or "user")
-        modules = self.registry.visible(role)
+        # 명시 부여를 반영해 접근 가능한 모듈만 모은다.
+        pairs = self.registry.accessible(user, granted)
         if module_ids:
             wanted = {str(item).strip().lower() for item in module_ids}
-            modules = [module for module in modules if module.id in wanted]
+            pairs = [pair for pair in pairs if pair[0].id in wanted]
+        modules = [module for module, _ in pairs]
+        permissions = {module.id: permission for module, permission in pairs}
         if not modules:
             return {"panels": [], "budget_seconds": self.registry.dashboard_budget, "degraded": False}
 
@@ -171,7 +177,10 @@ class PanelAggregator:
         pool = ThreadPoolExecutor(max_workers=min(8, len(modules)))
         try:
             futures = {
-                pool.submit(self._collect_one, module, user, request_params, budget): module
+                pool.submit(
+                    self._collect_one, module, user, request_params, budget,
+                    permissions.get(module.id, "VIEW"),
+                ): module
                 for module in modules
             }
             for future, module in futures.items():

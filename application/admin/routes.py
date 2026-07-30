@@ -7,6 +7,11 @@ from flask import Blueprint, jsonify, redirect, render_template, request, sessio
 from application.accounts import AccountError, UserRepository
 from application.common import load_json, require_admin, require_login, save_json
 from application.db import database_manager
+from application.permissions import (
+    ModulePermissionRepository,
+    PermissionError_,
+    resolve_permission,
+)
 from asset_sync.repositories import AssetRepository
 from application.settings import MAPPINGS_FILE
 
@@ -158,11 +163,53 @@ def update_user(uid):
     except AccountError as exc:
         return jsonify({'success': False, 'error': str(exc)}), 400
 
+@bp.route("/api/users/<int:uid>/modules", methods=["GET", "PUT"])
+@require_admin
+def user_modules(uid):
+    """대메뉴별 권한 조회/부여. 등록된 모듈만 대상으로 한다."""
+    from flask import current_app
+
+    registry = current_app.extensions.get("module_registry")
+    known = [module.id for module in registry.all()] if registry else []
+    try:
+        with database_manager().connect() as conn:
+            users = UserRepository(conn)
+            target = users.find_by_id(uid)
+            if not target:
+                return jsonify({"success": False, "error": "대상 계정을 찾을 수 없습니다."}), 404
+            permissions = ModulePermissionRepository(conn)
+            if request.method == "GET":
+                granted = permissions.for_user(uid)
+                modules = []
+                for module in (registry.all() if registry else []):
+                    modules.append({
+                        **module.public(),
+                        "granted": granted.get(module.id),
+                        "effective": resolve_permission(module, target, granted),
+                    })
+                return jsonify({"user_id": uid, "username": target["username"], "modules": modules})
+
+            payload = request.get_json(silent=True) or {}
+            before = permissions.for_user(uid)
+            permissions.replace_for_user(
+                uid,
+                payload.get("permissions") or {},
+                granted_by=str(session["user"].get("username") or ""),
+                known_modules=known,
+            )
+            after = permissions.for_user(uid)
+            _audit_account(conn, "PERMISSION", str(uid), before, after)
+        return jsonify({"success": True, "permissions": after})
+    except (AccountError, PermissionError_) as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+
 @bp.route("/api/users/<int:uid>", methods=["DELETE"])
 @require_admin
 def delete_user(uid):
     try:
         with database_manager().connect() as conn:
+            ModulePermissionRepository(conn).delete_for_user(uid)
             removed = UserRepository(conn).delete(uid)
             _audit_account(conn, 'DELETE', str(uid), {k: removed.get(k) for k in ('username', 'name', 'role')}, {})
         return jsonify({'success': True})

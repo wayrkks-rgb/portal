@@ -1,0 +1,205 @@
+{# 셸 공통 스크립트: 전역 상태, 페이지 전환, 연계 모듈 BFF 호출, 표시 헬퍼, 초기화 #}
+<script>
+// ── 전역 상태 ──
+const state = {
+  asisFile: null, tobeFile: null,
+  cmpAsisFile: null, cmpTobeFile: null,
+  menus: [], history: []
+};
+
+// ── 날짜 ──
+document.getElementById('today-date').textContent = new Date().toLocaleDateString('ko-KR', {year:'numeric',month:'long',day:'numeric',weekday:'short'});
+
+// ── 페이지 전환 ──
+function showPage(id) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  const el = document.getElementById(`page-${id}`);
+  if(el) el.classList.add('active');
+  if (id === 'history') loadHistory();
+  if (id === 'admin_mapping') loadMenus();
+  if (id === 'admin_users') loadUsers();
+  if (id === 'integration_settings') loadIntegrationSettings();
+  if (id === 'dashboard') loadDashboard();
+  if (id === 'report') loadResourceUsage();
+  if (id === 'asset_sync') loadAssetSyncDashboard();
+  if (id === 'dashboard') loadModulePanels();
+}
+
+// ── 연계 모듈 (BFF 호출) ──
+// 통합 웹이 서버에서 각 WAS 를 호출하므로 브라우저는 항상 통합 웹만 바라본다.
+const PORTAL_MODULES = {{ portal_modules | default([]) | tojson }};
+
+function moduleById(id){ return PORTAL_MODULES.find(m => m.id === id) || null; }
+
+function showModulePage(moduleId){
+  const module = moduleById(moduleId);
+  if(!module) return;
+  showPage(module.page);
+  loadModulePage(moduleId);
+}
+
+function renderPanelCard(entry){
+  const failed = entry.status !== 'SUCCESS';
+  const panel = entry.panel || {};
+  const statusBadge = {
+    SUCCESS:'<span class="badge badge-green">정상</span>',
+    TIMEOUT:'<span class="badge badge-yellow">응답 지연</span>',
+    UNREACHABLE:'<span class="badge badge-red">연결 실패</span>',
+    SKIPPED:'<span class="badge">미제공</span>'
+  }[entry.status] || '<span class="badge badge-red">오류</span>';
+  const metrics = (panel.metrics || []).map(m=>`
+    <div class="module-metric ${escapeHtml(m.state||'info')}">
+      <div class="module-metric-value">${m.value===null||m.value===undefined?'-':escapeHtml(typeof m.value==='number'?fmtNumber(m.value):m.value)}${m.unit?`<span style="font-size:11px;font-weight:600"> ${escapeHtml(m.unit)}</span>`:''}</div>
+      <div class="module-metric-label">${escapeHtml(m.label)}</div>
+    </div>`).join('');
+  const table = panel.table && panel.table.columns && panel.table.columns.length ? `
+    <div class="table-wrap" style="max-height:220px;overflow:auto">
+      <table><thead><tr>${panel.table.columns.map(c=>`<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>
+      <tbody>${(panel.table.rows||[]).map(r=>`<tr>${r.map(v=>`<td class="mono">${v===null||v===undefined?'-':escapeHtml(typeof v==='number'?fmtNumber(v):v)}</td>`).join('')}</tr>`).join('')
+        || `<tr><td colspan="${panel.table.columns.length}" style="text-align:center" class="text-muted">데이터가 없습니다.</td></tr>`}</tbody></table>
+    </div>` : '';
+  return `
+    <div class="module-panel${failed?' failed':''}">
+      <div class="module-panel-head">
+        <div class="module-panel-title"><span>${escapeHtml(entry.icon||'🧩')}</span>${escapeHtml(panel.title || entry.module_name)}</div>
+        <div class="flex gap-2" style="align-items:center">${statusBadge}<span class="text-xs text-muted">${entry.elapsed_ms||0}ms</span></div>
+      </div>
+      ${failed
+        ? `<div class="alert alert-error" style="margin:0">${escapeHtml(entry.error || '모듈 응답을 받지 못했습니다.')}</div>`
+        : `${metrics?`<div class="module-panel-metrics">${metrics}</div>`:''}${table}
+           ${panel.note?`<div class="text-xs text-muted" style="margin-top:10px">${escapeHtml(panel.note)}</div>`:''}`}
+    </div>`;
+}
+
+async function loadModulePanels(){
+  const container = document.getElementById('module-panels');
+  const statusEl = document.getElementById('module-panels-status');
+  if(!container) return;
+  setButtonBusy('btn-refresh-panels', true, '조회 중', '모듈 현황 새로고침');
+  container.innerHTML = '<div class="text-sm text-muted"><span class="loading"></span> 모듈 현황을 불러오는 중...</div>';
+  const res = await integrationFetch('/api/modules/dashboard');
+  setButtonBusy('btn-refresh-panels', false, '', '모듈 현황 새로고침');
+  if(res.error && !res.panels){
+    statusEl.innerHTML = `<div class="alert alert-error">모듈 현황 조회 실패: ${escapeHtml(res.error)}</div>`;
+    container.innerHTML = '';
+    return;
+  }
+  const panels = res.panels || [];
+  const counts = res.counts || {};
+  // 일부 모듈이 실패해도 나머지 패널은 그대로 보여준다.
+  statusEl.innerHTML = panels.length
+    ? (res.degraded
+        ? `<div class="alert alert-warning">모듈 ${counts.total}개 중 ${counts.success}개 정상 · 실패 ${counts.failed||0} · 미제공 ${counts.skipped||0} (${res.elapsed_ms||0}ms)</div>`
+        : `<div class="alert alert-success">모듈 ${counts.total}개 전부 정상 (${res.elapsed_ms||0}ms)</div>`)
+    : '<div class="alert alert-info">등록된 연계 모듈이 없습니다. 관리자가 모듈 레지스트리에 대메뉴를 추가하면 여기에 표시됩니다.</div>';
+  container.innerHTML = panels.map(renderPanelCard).join('');
+}
+
+async function loadModulePage(moduleId){
+  const statusEl = document.getElementById(`module-page-status-${moduleId}`);
+  const bodyEl = document.getElementById(`module-page-body-${moduleId}`);
+  if(!bodyEl) return;
+  bodyEl.innerHTML = '<div class="text-sm text-muted"><span class="loading"></span> 모듈 데이터를 불러오는 중...</div>';
+  const res = await integrationFetch(`/api/modules/dashboard?modules=${encodeURIComponent(moduleId)}`);
+  const panels = (res.panels || []);
+  if(!panels.length){
+    statusEl.innerHTML = `<div class="alert alert-error">${escapeHtml(res.error || '모듈 응답을 받지 못했습니다.')}</div>`;
+    bodyEl.innerHTML = '';
+    return;
+  }
+  statusEl.innerHTML = '';
+  bodyEl.innerHTML = panels.map(renderPanelCard).join('');
+}
+
+// ── 대시보드 ──
+// ── 공통 표시 헬퍼 (분할 전에는 각 화면 스크립트에 흩어져 있었다) ──
+function dashboardDateText(value){return value?new Date(value).toLocaleString('ko-KR'):'-';}
+function dashboardNumber(value){return Number(value||0).toLocaleString();}
+function escapeHtml(v) {
+  return String(v ?? '').replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
+}
+function fmtNumber(n) { return Number(n || 0).toLocaleString('ko-KR'); }
+function syncEscape(value) {
+  return String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+}
+function integrationAlert(message, type='info') {
+  const el=document.getElementById('integration-settings-alert');
+  if(el) el.innerHTML=`<div class="alert alert-${type}">${syncEscape(message)}</div>`;
+}
+
+function integrationToast(message,type='info',duration=4200){
+  const wrap=document.getElementById('integration-toast-container');
+  if(!wrap)return;
+  const toast=document.createElement('div');
+  toast.className=`integration-toast ${type}`;
+  const icon=type==='success'?'✅':type==='error'?'❌':type==='warning'?'⚠️':'ℹ️';
+  toast.innerHTML=`${icon} ${syncEscape(message)}`;
+  wrap.appendChild(toast);
+  window.setTimeout(()=>toast.remove(),duration);
+}
+
+function setActionResult(id,{state='info',title='',summary='',details=[],meta=[]}={}){
+  const el=document.getElementById(id);
+  if(!el)return;
+  const detailItems=(details||[]).filter(Boolean).map(v=>`<li>${syncEscape(String(v))}</li>`).join('');
+  const badges=(meta||[]).filter(Boolean).map(v=>`<span class="badge badge-blue">${syncEscape(String(v))}</span>`).join('');
+  el.className=`action-result show ${state}`;
+  el.innerHTML=`
+    <div class="action-result-title">${syncEscape(title||'처리 결과')}</div>
+    ${summary?`<div>${syncEscape(summary)}</div>`:''}
+    ${badges?`<div class="action-result-meta">${badges}</div>`:''}
+    ${detailItems?`<ul class="action-result-details">${detailItems}</ul>`:''}`;
+}
+
+function editorStatus(message,type='info'){
+  const el=document.getElementById('vcenter-editor-status');
+  if(!el)return;
+  const prefix=type==='success'?'✅ ':type==='error'?'❌ ':type==='warning'?'⚠️ ':'ℹ️ ';
+  el.innerHTML=`${prefix}${syncEscape(message)}`;
+}
+
+function setButtonBusy(id,busy,busyText,normalText){
+  const button=document.getElementById(id);
+  if(!button)return;
+  button.disabled=Boolean(busy);
+  button.innerHTML=busy?`<span class="loading"></span> ${syncEscape(busyText)}`:syncEscape(normalText);
+}
+
+async function integrationFetch(url, options={}){
+  try{
+    const response=await fetch(url,options);
+    const raw=await response.text();
+    let data={};
+    try{data=raw?JSON.parse(raw):{};}
+    catch(_){data={status:'FAILED',stage:'RESPONSE_PARSE',error:`서버 응답을 해석할 수 없습니다. HTTP ${response.status}: ${raw.slice(0,500)}`};}
+    data._httpStatus=response.status;
+    data._ok=response.ok;
+    if(!response.ok&&!data.error)data.error=`HTTP ${response.status} 요청 실패`;
+    return data;
+  }catch(error){
+    return {status:'FAILED',stage:'WAS_API',error:`WAS API 호출 실패: ${error.message||error}`,_httpStatus:0,_ok:false};
+  }
+}
+function closeModal(e) { if(e.target === document.getElementById('modal-overlay')) closeModalDirect(); }
+function closeModalDirect() {
+  document.getElementById('modal-overlay').classList.remove('show');
+  setTimeout(()=>{ document.querySelectorAll('.modal').forEach(m=>m.style.display='none'); }, 200);
+}
+// ── 초기화 ──
+window.addEventListener('load', () => {
+  loadHistorySelects();
+  initAutoReportDates();
+  initResourceUsageDates();
+  loadDashboard();
+  loadModulePanels();
+  const page = '{{ page }}';
+  if(page === 'history') loadHistory();
+  if(page === 'admin') { loadMenus(); }
+  if(page === 'asset_sync') { loadAssetSyncDashboard(); }
+  if(page === 'integration_settings') { loadIntegrationSettings(); }
+  if(page === 'report') { loadResourceUsage(); }
+  const openModule = PORTAL_MODULES.find(m => m.location === 'REMOTE' && m.page === page);
+  if(openModule) loadModulePage(openModule.id);
+});
+</script>

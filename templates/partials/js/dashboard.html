@@ -1,0 +1,161 @@
+{# 통합 대시보드 스크립트 #}
+<script>
+function setDashboardPeriod(mode){
+  const today=new Date(), end=new Date(today), start=new Date(today);
+  if(mode==='week') start.setDate(end.getDate()-6);
+  else if(mode==='month') start.setDate(1);
+  const iso=d=>{const local=new Date(d.getTime()-d.getTimezoneOffset()*60000);return local.toISOString().slice(0,10)};
+  if(mode!=='custom'){document.getElementById('dash-start').value=iso(start);document.getElementById('dash-end').value=iso(end);}
+}
+async function loadDashboard() {
+  if(!document.getElementById('dash-start').value)setDashboardPeriod('today');
+  const start=document.getElementById('dash-start').value, end=document.getElementById('dash-end').value;
+  const alertEl=document.getElementById('dashboard-alert');
+  alertEl.innerHTML='<div class="alert alert-info"><span class="loading"></span> 자동수집 결과를 불러오는 중...</div>';
+  try{
+    const response=await fetch(`/api/asset-sync/dashboard?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&limit=500`);
+    const data=await response.json();
+    if(!response.ok||data.error)throw new Error(data.error||`HTTP ${response.status}`);
+    alertEl.innerHTML='';
+    renderAutomation(data.automation||{});
+    renderAssetStatus(data.asset_status||{});
+    renderITSMChanges(data.itsm_changes||{});
+    renderVCenterChanges(data.vcenter_changes||{});
+    renderComparison(data.comparison||{});
+  }catch(error){alertEl.innerHTML=`<div class="alert alert-error">❌ ${syncEscape(error.message)}</div>`;}
+}
+function renderAutomation(item){
+  const el=document.getElementById('dash-automation'), status=String(item.status||'NO_RUN').toLowerCase();
+  el.className=`auto-status ${status}`;
+  const resource=item.resource_usage_status||'PENDING_SCRIPT';
+  el.innerHTML=`<span class="auto-status-dot"></span><div><strong>${syncEscape(item.status||'자동실행 이력 없음')}</strong><div class="text-xs text-muted">마지막 실행 ${dashboardDateText(item.started_at)} · 종료 ${dashboardDateText(item.ended_at)} · VM_ResourceUsageExport ${syncEscape(resource)}</div></div>`;
+}
+function renderAssetStatus(data){
+  const category=data.category||{}, location=data.location||{};
+  document.getElementById('dash-total').textContent=dashboardNumber(data.total);
+  document.getElementById('dash-physical').textContent=dashboardNumber(category['물리']);
+  document.getElementById('dash-logical').textContent=dashboardNumber(category['논리']);
+  document.getElementById('dash-idc-dr').textContent=`${dashboardNumber(location.IDC)} / ${dashboardNumber(location.DR)}`;
+  document.getElementById('dash-category-total').textContent=dashboardNumber(data.total);
+  const physical=Number(category['물리']||0), logical=Number(category['논리']||0), total=Math.max(physical+logical,1), p=Math.round(physical/total*100);
+  document.getElementById('dash-category-donut').style.background=`conic-gradient(#284566 0 ${p}%, #c2ccdb ${p}% 100%)`;
+  document.getElementById('dash-category-legend').innerHTML=`<div class="legend-row"><span>🟠 물리</span><strong>${dashboardNumber(physical)}</strong></div><div class="legend-row"><span>⚪ 논리</span><strong>${dashboardNumber(logical)}</strong></div><div class="legend-row"><span>IDC / DR</span><strong>${dashboardNumber(location.IDC)} / ${dashboardNumber(location.DR)}</strong></div>`;
+  const rows=data.os||[], max=Math.max(...rows.map(r=>Number(r.count||0)),1);
+  document.getElementById('dash-os-bars').innerHTML=rows.length?rows.slice(0,12).map(r=>`<div class="bar-row"><span title="${syncEscape(r.name)}">${syncEscape(r.name)}</span><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2,Number(r.count||0)/max*100)}%"></div></div><strong>${dashboardNumber(r.count)}</strong></div>`).join(''):'<div class="text-muted">정상 ITSM 스냅샷이 없습니다.</div>';
+}
+function renderITSMChanges(data){
+  const counts=data.counts||{};
+  document.getElementById('dash-change-badges').innerHTML=['신규','삭제','변경','상태변경'].map(k=>`<span class="badge ${k==='신규'?'badge-green':k==='삭제'?'badge-red':'badge-blue'}">${k} ${dashboardNumber(counts[k])}</span>`).join('');
+  const body=document.getElementById('dash-change-body'), rows=data.details||[];
+  body.innerHTML=rows.length?rows.map(r=>`<tr><td>${dashboardDateText(r.detected_at)}</td><td>${syncBadge(r.category)}</td><td class="mono">${syncEscape(r.asset_key)}</td><td>${syncEscape(r.server_name||'-')}</td><td><div>${syncEscape(r.hostname||'-')}</div><div class="text-xs text-muted">${syncEscape(r.primary_ip||'-')}</div></td><td>${syncEscape(r.status||'-')}</td><td>${syncEscape(r.location||'-')}</td><td>${syncEscape(r.server_type||'-')}</td><td>${syncEscape([r.os,r.os_version].filter(Boolean).join(' ')||'-')}</td><td>${syncEscape(r.field_name||r.event_type)}: ${memoryChangeValue(r.field_name,r.event_type,r.old_value)} → ${memoryChangeValue(r.field_name,r.event_type,r.new_value)}</td></tr>`).join(''):'<tr><td colspan="10" style="text-align:center">선택 기간의 자산 변동이 없습니다.</td></tr>';
+}
+function renderVCenterChanges(data){
+  const counts=data.counts||{};
+  document.getElementById('dash-vc-change-badges').innerHTML=['신규','삭제','CPU변경','MEM변경','통합기이동'].map(k=>`<span class="badge ${k==='삭제'?'badge-red':k==='신규'?'badge-green':'badge-yellow'}">${k} ${dashboardNumber(counts[k])}</span>`).join('');
+  const rows=data.details||[], body=document.getElementById('dash-vc-change-body');
+  const eventName={RV_NEW:'신규 VM',RV_REMOVED:'삭제 VM',RV_CPU_CHANGED:'CPU 변경',RV_MEMORY_CHANGED:'MEM 변경',RV_HOST_CHANGED:'통합기 이동',RV_VCENTER_CHANGED:'vCenter 이동'};
+  body.innerHTML=rows.length?rows.map(r=>`<tr><td>${dashboardDateText(r.detected_at)}</td><td>${syncBadge(eventName[r.event_type]||r.event_type)}</td><td>${syncEscape(r.vcenter_id||'-')}</td><td>${syncEscape(r.esxi_host||'-')}</td><td>${syncEscape(r.vm_name||'-')}</td><td>${syncEscape(r.field_name||'-')}</td><td>${memoryChangeValue(r.field_name,r.event_type,r.old_value)}</td><td>${memoryChangeValue(r.field_name,r.event_type,r.new_value)}</td><td>${r.current_cpu_cores==null?'-':dashboardNumber(r.current_cpu_cores)+' Core'}</td><td>${memoryGbValue(r.current_memory_mb)}</td></tr>`).join(''):'<tr><td colspan="10" style="text-align:center">선택 기간의 VM 구성·할당 자원 변경이 없습니다.</td></tr>';
+}
+function renderComparison(data){
+  const counts=data.counts||{}, period=data.period_metrics||{}, end=period.end||{};
+  document.getElementById('dash-itsm-logical').textContent=dashboardNumber(end.itsm_logical);
+  document.getElementById('dash-vcenter-vm').textContent=dashboardNumber(end.vcenter_vm);
+  document.getElementById('dash-match').textContent=dashboardNumber(counts.MATCHED);
+  const issues=Object.entries(counts).filter(([k])=>!['MATCHED','COLLECTION_GAP'].includes(k)).reduce((a,[,v])=>a+Number(v||0),0);
+  document.getElementById('dash-mismatch').textContent=dashboardNumber(issues);
+  document.getElementById('dash-exception-count').textContent=dashboardNumber(data.exception_count);
+  document.getElementById('dash-comparison-badges').innerHTML=`<span class="badge badge-green">일치 ${dashboardNumber(counts.MATCHED)}</span><span class="badge badge-yellow">값 불일치 ${dashboardNumber(counts.MATCHED_WITH_DRIFT)}</span><span class="badge badge-red">ITSM만 ${dashboardNumber(counts.ITSM_ONLY)}</span><span class="badge badge-red">vCenter만 ${dashboardNumber(counts.RVTOOLS_ONLY)}</span><span class="badge badge-blue">일치율 ${data.match_rate==null?'-':data.match_rate+'%'}</span><span class="badge">기간 신규 ITSM ${dashboardNumber((period.itsm||{})['신규'])} / VC ${dashboardNumber((period.vcenter||{})['신규'])}</span><span class="badge">기간 삭제 ITSM ${dashboardNumber((period.itsm||{})['삭제'])} / VC ${dashboardNumber((period.vcenter||{})['삭제'])}</span>`;
+  const body=document.getElementById('dash-recon-body'), rows=data.details||[], admin={{ 'true' if user.role == 'admin' else 'false' }};
+  body.innerHTML=rows.length?rows.map(r=>`<tr>${admin?`<td><input type="checkbox" class="dash-recon-check" data-type="${syncEscape(r.match_status)}" data-cm="${syncEscape(r.cm_id||'')}" data-rv="${syncEscape(r.rv_asset_key||'')}" data-name="${syncEscape(r.server_name||'')}"></td>`:''}<td>${syncBadge(r.match_status)}</td><td>${syncEscape(r.server_name||'-')}</td><td class="mono">${syncEscape(r.cm_id||'-')}</td><td class="mono">${syncEscape(r.rv_asset_key||'-')}</td><td><div>${syncEscape(r.hostname||'-')}</div><div class="text-xs text-muted">${syncEscape(r.primary_ip||'-')}</div></td><td>${syncEscape((r.drifts||[]).map(d=>d.status).join(', ')||'-')}</td><td>${syncEscape(r.reason||'-')}</td></tr>`).join(''):`<tr><td colspan="${admin?8:7}" style="text-align:center">확인할 정합성 이상이 없습니다.</td></tr>`;
+}
+function toggleAllReconRows(checked){document.querySelectorAll('.dash-recon-check').forEach(el=>el.checked=checked);}
+async function createSelectedExceptions(){
+  const selected=[...document.querySelectorAll('.dash-recon-check:checked')];
+  const reason=document.getElementById('dash-exception-reason').value.trim();
+  if(!selected.length)return integrationToast('예외처리할 자산을 선택하세요.','warning');
+  if(!reason)return integrationToast('예외처리 사유를 입력하세요.','warning');
+  const validTo=document.getElementById('dash-exception-valid-to').value;
+  const items=selected.map(el=>({exception_type:el.dataset.type,cm_id:el.dataset.cm||null,rv_asset_key:el.dataset.rv||null,server_name:el.dataset.name||null,reason,valid_to:validTo||null}));
+  const response=await fetch('/api/asset-sync/exceptions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items})});
+  const data=await response.json();
+  if(!response.ok) return integrationToast(data.error||'예외처리 등록 실패','error');
+  integrationToast(`${data.created_count}건 예외처리 등록 완료`,'success');loadDashboard();loadExceptionHistory();
+}
+function toggleExceptionHistory(){const card=document.getElementById('dash-exception-history-card');card.style.display=card.style.display==='none'?'block':'none';if(card.style.display!=='none')loadExceptionHistory();}
+async function loadExceptionHistory(){
+  const rows=await fetch('/api/asset-sync/exceptions?include_inactive=1').then(r=>r.json()), admin={{ 'true' if user.role == 'admin' else 'false' }};
+  const body=document.getElementById('dash-exception-body');
+  body.innerHTML=rows.length?rows.map(r=>`<tr><td>${r.active_yn?'<span class="badge badge-green">활성</span>':'<span class="badge">해제</span>'}</td><td>${syncEscape(r.exception_type)}</td><td>${syncEscape(r.server_name||'-')}</td><td class="mono">${syncEscape(r.cm_id||'-')}</td><td class="mono">${syncEscape(r.rv_asset_key||'-')}</td><td>${syncEscape(r.reason)}</td><td>${syncEscape(r.valid_from||'-')} ~ ${syncEscape(r.valid_to||'영구')}</td><td>${syncEscape(r.created_by)}<br><span class="text-xs text-muted">${dashboardDateText(r.created_at)}</span></td>${admin?`<td>${r.active_yn?`<button class="btn btn-secondary btn-sm" onclick="deactivateException(${r.id})">해제</button>`:'-'}</td>`:''}</tr>`).join(''):'<tr><td colspan="9" style="text-align:center">예외처리 이력이 없습니다.</td></tr>';
+}
+async function deactivateException(id){
+  const response=await fetch(`/api/asset-sync/exceptions/${id}`,{method:'DELETE'}),data=await response.json();
+  if(!response.ok)return integrationToast(data.error||'예외 해제 실패','error');
+  integrationToast('예외처리를 해제했습니다.','success');loadExceptionHistory();loadDashboard();
+}
+async function importExceptionFile(input){
+  const file=input.files[0];if(!file)return;const fd=new FormData();fd.append('file',file);
+  const el=document.getElementById('dash-exception-result');el.innerHTML='<div class="alert alert-info"><span class="loading"></span> Import 중...</div>';
+  const response=await fetch('/api/asset-sync/exceptions/import',{method:'POST',body:fd}),data=await response.json();
+  el.innerHTML=response.ok?`<div class="alert alert-success">✅ ${dashboardNumber(data.created_count)}건 등록, ${dashboardNumber(data.error_count)}건 오류</div>`:`<div class="alert alert-error">❌ ${syncEscape(data.error||'Import 실패')}</div>`;
+  if(response.ok){loadExceptionHistory();loadDashboard();} input.value='';
+}
+
+function initResourceUsageDates(){
+  const today=new Date(), end=new Date(today);end.setDate(end.getDate()-1);const start=new Date(end);start.setDate(start.getDate()-29);
+  const iso=d=>new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10);
+  const s=document.getElementById('resource-start'),e=document.getElementById('resource-end');if(s&&!s.value)s.value=iso(start);if(e&&!e.value)e.value=iso(end);
+}
+function resourceValue(value,suffix=''){return value==null||value===''?'-':`${Number(value).toLocaleString()}${suffix}`;}
+function memoryGbValue(value){
+  if(value==null||value==='')return '-';
+  const gb=Number(value)/1024;
+  if(!Number.isFinite(gb))return syncEscape(String(value));
+  return `${gb.toLocaleString(undefined,{minimumFractionDigits:0,maximumFractionDigits:2})} GB`;
+}
+function memoryChangeValue(field,eventType,value){
+  const isMemory=String(eventType||'')==='RV_MEMORY_CHANGED'||String(field||'').toUpperCase().includes('MEMORY')||String(field||'').toUpperCase().includes('MEM');
+  return isMemory?memoryGbValue(value):syncEscape(value==null||value===''?'-':String(value));
+}
+function resourceQuery(){
+  const q=new URLSearchParams({start:document.getElementById('resource-start').value,end:document.getElementById('resource-end').value});
+  [['vcenter_id','resource-vcenter'],['cluster_name','resource-cluster'],['esxi_host','resource-host']].forEach(([k,id])=>{const v=document.getElementById(id).value;if(v)q.set(k,v)});return q;
+}
+async function loadResourceUsage(){
+  if(!document.getElementById('resource-start'))return;initResourceUsageDates();const result=document.getElementById('resource-result');result.innerHTML='<span class="loading"></span> 자동수집 결과 조회 중';
+  try{const response=await fetch(`/api/asset-sync/resource-usage?${resourceQuery()}`),data=await response.json();if(!response.ok)throw new Error(data.error||`HTTP ${response.status}`);
+    result.textContent=`${data.period.start} ~ ${data.period.end} · 일별 자동수집 데이터 집계`;renderResourceFilters(data.filters||{});renderResourceUsage(data);
+  }catch(e){result.innerHTML=`<span class="text-error">${syncEscape(e.message)}</span>`;}
+}
+function renderResourceFilters(filters){
+  [['resource-vcenter',filters.vcenters||[]],['resource-cluster',filters.clusters||[]],['resource-host',filters.hosts||[]]].forEach(([id,values])=>{const el=document.getElementById(id),current=el.value;el.innerHTML='<option value="">전체</option>'+values.map(v=>`<option value="${syncEscape(v)}">${syncEscape(v)}</option>`).join('');if(values.includes(current))el.value=current;});
+}
+function renderResourceUsage(data){
+  const sum=data.summary||{};document.getElementById('resource-host-count').textContent=dashboardNumber(sum.host_count);document.getElementById('resource-vm-count').textContent=dashboardNumber(sum.vm_count);document.getElementById('resource-scale-count').textContent=dashboardNumber(Number(sum.cpu_changed||0)+Number(sum.memory_changed||0));document.getElementById('resource-vm-change-count').textContent=dashboardNumber(Number(sum.vm_added||0)+Number(sum.vm_removed||0));
+  const hosts=data.hosts||[],vms=data.vms||[],changes=data.changes||[];
+  document.getElementById('resource-host-body').innerHTML=hosts.length?hosts.map(r=>`<tr onclick="selectResourceHost('${String(r.esxi_host||'').replace(/'/g,"\'")}')" style="cursor:pointer"><td>${syncEscape(r.service_name||'-')}</td><td>${syncEscape(r.vcenter_id||'-')}</td><td>${syncEscape(r.cluster_name||'-')}</td><td><strong>${syncEscape(r.esxi_host||'-')}</strong></td><td>${dashboardNumber(r.vm_count)}</td><td>${resourceValue(r.allocated_cpu_cores,' Core')}</td><td>${memoryGbValue(r.allocated_memory_mb)}</td><td>${resourceValue(r.cpu_max_pct,'%')}</td><td>${resourceValue(r.cpu_avg_pct,'%')}</td><td>${resourceValue(r.mem_max_pct,'%')}</td><td>${resourceValue(r.mem_avg_pct,'%')}</td></tr>`).join(''):'<tr><td colspan="11" style="text-align:center">수집된 통합기 자원사용률이 없습니다.</td></tr>';
+  document.getElementById('resource-vm-body').innerHTML=vms.length?vms.map(r=>`<tr><td>${syncEscape(r.service_name||'-')}</td><td>${syncEscape(r.cluster_name||'-')}</td><td>${syncEscape(r.esxi_host||'-')}</td><td><strong>${syncEscape(r.vm_name||'-')}</strong></td><td>${syncBadge(r.power_state||'-')}</td><td>${resourceValue(r.allocated_cpu_cores,' Core')}</td><td>${memoryGbValue(r.allocated_memory_mb)}</td><td>${resourceValue(r.cpu_max_pct,'%')}</td><td>${resourceValue(r.cpu_avg_pct,'%')}</td><td>${resourceValue(r.mem_max_pct,'%')}</td><td>${resourceValue(r.mem_avg_pct,'%')}</td></tr>`).join(''):'<tr><td colspan="11" style="text-align:center">수집된 VM 자원사용률이 없습니다.</td></tr>';
+  const eventName={RV_NEW:'신규 VM',RV_REMOVED:'삭제 VM',RV_CPU_CHANGED:'CPU 변경',RV_MEMORY_CHANGED:'MEM 변경',RV_HOST_CHANGED:'통합기 이동',RV_VCENTER_CHANGED:'vCenter 이동'};
+  document.getElementById('resource-change-body').innerHTML=changes.length?changes.map(r=>`<tr><td>${dashboardDateText(r.detected_at)}</td><td>${syncEscape(r.vcenter_id||'-')}</td><td>${syncEscape(r.esxi_host||'-')}</td><td>${syncEscape(r.vm_name||'-')}</td><td>${syncBadge(eventName[r.event_type]||r.event_type)}</td><td>${syncEscape(r.field_name||'-')}</td><td>${memoryChangeValue(r.field_name,r.event_type,r.old_value)}</td><td>${memoryChangeValue(r.field_name,r.event_type,r.new_value)}</td></tr>`).join(''):'<tr><td colspan="8" style="text-align:center">선택 기간의 VM 구성 변경이 없습니다.</td></tr>';
+}
+function selectResourceHost(host){document.getElementById('resource-host').value=host;loadResourceUsage();}
+function openResourceUsage(){document.getElementById('resource-usage-section').scrollIntoView({behavior:'smooth',block:'start'});loadResourceUsage();}
+async function exportResourceUsage(){const response=await fetch(`/api/asset-sync/resource-usage/export?${resourceQuery()}`);if(!response.ok){const d=await response.json().catch(()=>({}));return integrationToast(d.error||`HTTP ${response.status}`,'error')}const blob=await response.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`통합서버_자원사용현황_${document.getElementById('resource-start').value}_${document.getElementById('resource-end').value}.xlsx`;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);integrationToast('통합서버 자원사용현황을 Excel로 내보냈습니다.','success');}
+
+function initAutoReportDates(){
+  const today=new Date(), start=new Date(today.getFullYear(),today.getMonth(),1);
+  const iso=d=>new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10);
+  if(document.getElementById('auto-report-start'))document.getElementById('auto-report-start').value=iso(start);
+  if(document.getElementById('auto-report-end'))document.getElementById('auto-report-end').value=iso(today);
+}
+async function downloadAutoReport(type){
+  const start=document.getElementById('auto-report-start')?.value||'',end=document.getElementById('auto-report-end')?.value||'';
+  const result=document.getElementById('auto-report-result');result.innerHTML='<div class="alert alert-info"><span class="loading"></span> 보고서 생성 중...</div>';
+  const response=await fetch(`/api/asset-sync/reports/${type}?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);
+  if(!response.ok){const data=await response.json().catch(()=>({}));result.innerHTML=`<div class="alert alert-error">❌ ${syncEscape(data.error||`HTTP ${response.status}`)}</div>`;return;}
+  const blob=await response.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');
+  const disposition=response.headers.get('Content-Disposition')||'',match=disposition.match(/filename="?([^";]+)"?/i);
+  a.href=url;a.download=match?decodeURIComponent(match[1]):`${type}.xlsx`;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
+  result.innerHTML='<div class="alert alert-success">✅ 자동 보고서를 생성했습니다.</div>';
+}
+
+</script>

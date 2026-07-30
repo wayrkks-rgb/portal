@@ -376,3 +376,16 @@ CREATE TABLE IF NOT EXISTS app_user (
     last_login_at TEXT,
     password_updated_at TEXT
 );
+
+-- 대메뉴별 사용자 권한. 대메뉴마다 담당자가 다르므로 admin/user 2단계로는 부족하다.
+-- 명시 부여가 없으면 모듈의 required_role 로 판정한다(기존 동작 유지).
+CREATE TABLE IF NOT EXISTS user_module_permission (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+    module_id TEXT NOT NULL,
+    permission TEXT NOT NULL DEFAULT 'VIEW',
+    granted_by TEXT,
+    granted_at TEXT NOT NULL,
+    UNIQUE(user_id, module_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_module_permission_module ON user_module_permission(module_id, permission);

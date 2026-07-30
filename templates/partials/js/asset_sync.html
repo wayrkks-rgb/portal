@@ -1,0 +1,115 @@
+{# ITSM·vCenter 자동수집/정합성 스크립트 #}
+<script>
+function syncBadge(status) {
+  const red = ['ITSM_ONLY','RVTOOLS_ONLY','AMBIGUOUS','COLLECTION_GAP','FAILED'];
+  const yellow = ['MATCHED_WITH_DRIFT','IP_CHANGE_CANDIDATE','HOSTNAME_REVIEW','PARTIAL_SUCCESS','RUNNING'];
+  const cls = red.includes(status) ? 'badge-red' : yellow.includes(status) ? 'badge-yellow' : 'badge-green';
+  const label = ({RVTOOLS_ONLY:'VCENTER_ONLY', RVTOOLS:'vCenter'})[status] || status;
+  return `<span class="badge ${cls}">${syncEscape(label)}</span>`;
+}
+async function loadAssetSyncDashboard() {
+  const alertEl = document.getElementById('asset-sync-alert');
+  try {
+    const summary = await fetch('/api/asset-sync/dashboard').then(r=>r.json());
+    const itsm = summary.latest_itsm, rv = summary.latest_rvtools;
+    document.getElementById('sync-itsm-count').textContent = itsm ? Number(itsm.record_count).toLocaleString() : '-';
+    document.getElementById('sync-rv-count').textContent = rv ? Number(rv.record_count).toLocaleString() : '-';
+    document.getElementById('sync-itsm-time').textContent = itsm ? new Date(itsm.collected_at).toLocaleString('ko-KR') : '정상 스냅샷 없음';
+    document.getElementById('sync-rv-time').textContent = rv ? new Date(rv.collected_at).toLocaleString('ko-KR') : '정상 스냅샷 없음';
+    const counts = summary.reconciliation_counts || {};
+    const matched = (counts.MATCHED||0);
+    const total = Object.values(counts).reduce((a,b)=>a+Number(b),0);
+    document.getElementById('sync-matched-count').textContent = matched.toLocaleString();
+    document.getElementById('sync-issue-count').textContent = Math.max(total-matched,0).toLocaleString();
+    alertEl.innerHTML = (!itsm || !rv) ? '<div class="alert alert-warning">⚠️ ITSM 또는 vCenter 정상 스냅샷이 없습니다. 최초 수집 후 비교가 시작됩니다.</div>' : '';
+    renderSyncRuns(summary.collection_runs || []);
+    await Promise.all([loadSyncReconciliation(), loadDailyComparison('ITSM'), loadDailyComparison('RVTOOLS'), loadSyncChanges(), loadSyncResults()]);
+    const today = new Date().toISOString().slice(0,10);
+    document.getElementById('period-date1').value = today;
+    document.getElementById('period-date2').value = today;
+    updatePeriodInputs();
+  } catch(e) {
+    alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(e.message)}</div>`;
+  }
+}
+function switchSyncTab(name, tab) {
+  ['reconciliation','daily','changes','sync','period','runs'].forEach(n=>document.getElementById(`sync-panel-${n}`).classList.remove('active'));
+  tab.parentElement.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  tab.classList.add('active'); document.getElementById(`sync-panel-${name}`).classList.add('active');
+}
+async function loadSyncReconciliation() {
+  const status = document.getElementById('sync-recon-filter')?.value || '';
+  const rows = await fetch('/api/asset-sync/reconciliation?limit=1000'+(status?'&status='+encodeURIComponent(status):'')).then(r=>r.json());
+  const body = document.getElementById('sync-recon-body'); if(!body) return;
+  body.innerHTML = rows.length ? rows.map(r=>`<tr><td>${syncBadge(r.match_status)}</td><td class="mono">${syncEscape(r.cm_id||'-')}</td><td class="mono">${syncEscape(r.rv_asset_key||'-')}</td><td>${syncEscape(r.match_method||'-')}</td><td>${r.score}</td><td>${syncEscape((r.drifts||[]).map(d=>d.status).join(', ')||'-')}</td><td>${syncEscape(r.reason||'-')}</td></tr>`).join('') : '<tr><td colspan="7" style="text-align:center">정합성 결과가 없습니다.</td></tr>';
+}
+async function loadDailyComparison(source) {
+  const key=source==='ITSM'?'itsm':'rvtools';
+  const summaryEl=document.getElementById(`daily-${key}-summary`), body=document.getElementById(`daily-${key}-body`); if(!summaryEl||!body)return;
+  const res=await fetch(`/api/asset-sync/daily-comparison?source=${source}&limit=2000`).then(r=>r.json());
+  if(res.error){summaryEl.innerHTML=`<div class="alert alert-error">${syncEscape(res.error)}</div>`;return;}
+  if(res.status==='NO_SNAPSHOT'){summaryEl.innerHTML='<div class="alert alert-warning">정상 스냅샷이 없습니다.</div>';body.innerHTML='<tr><td colspan="6" style="text-align:center">비교 결과 없음</td></tr>';return;}
+  if(res.status==='NO_BASELINE'){summaryEl.innerHTML=`<div class="alert alert-warning">최초 정상 수집입니다. 현재 ${Number(res.current?.record_count||0).toLocaleString()}건이며 다음 정상 수집부터 비교됩니다.</div>`;body.innerHTML='<tr><td colspan="6" style="text-align:center">NO_BASELINE</td></tr>';return;}
+  const c=res.counts||{}, rc=res.record_counts||{};
+  const basis=res.comparison_basis==='PREVIOUS_DAY'?'전일 정상 스냅샷 대비':'동일 일자 직전 실행 대비(전일 기준자료 없음)';
+  summaryEl.innerHTML=`<div class="text-xs text-muted mb-4">${syncEscape(basis)} · ${syncEscape(res.previous.snapshot_date)} (${Number(rc.previous||0).toLocaleString()}건) → ${syncEscape(res.current.snapshot_date)} (${Number(rc.current||0).toLocaleString()}건), 순증감 ${Number(rc.net||0).toLocaleString()}</div><div class="flex gap-2"><span class="badge badge-green">추가 ${c.ADDED||0}</span><span class="badge badge-red">삭제 ${c.REMOVED||0}</span><span class="badge badge-yellow">변경 ${c.CHANGED||0}</span><span class="badge badge-blue">상태변경 ${c.STATUS_CHANGED||0}</span><span class="badge badge-red">수집공백 ${c.COLLECTION_GAP||0}</span></div>`;
+  body.innerHTML=(res.events||[]).length?(res.events||[]).map(r=>`<tr><td>${syncBadge(r.category||'-')}</td><td class="mono">${syncEscape(r.asset_key)}</td><td>${syncEscape(r.event_type)}</td><td>${syncEscape(r.field_name||'-')}</td><td>${memoryChangeValue(r.field_name,r.event_type,r.old_value)}</td><td>${memoryChangeValue(r.field_name,r.event_type,r.new_value)}</td></tr>`).join(''):'<tr><td colspan="6" style="text-align:center">변경 없음</td></tr>';
+}
+
+async function loadSyncChanges() {
+  const source = document.getElementById('sync-change-source')?.value || '';
+  const rows = await fetch('/api/asset-sync/changes?limit=1000'+(source?'&source='+encodeURIComponent(source):'')).then(r=>r.json());
+  const body = document.getElementById('sync-changes-body'); if(!body) return;
+  body.innerHTML = rows.length ? rows.map(r=>`<tr><td>${syncEscape(new Date(r.detected_at).toLocaleString('ko-KR'))}</td><td>${syncBadge(r.source)}</td><td class="mono">${syncEscape(r.asset_key)}</td><td>${syncEscape(r.event_type)}</td><td>${syncEscape(r.field_name||'-')}</td><td>${memoryChangeValue(r.field_name,r.event_type,r.old_value)}</td><td>${memoryChangeValue(r.field_name,r.event_type,r.new_value)}</td></tr>`).join('') : '<tr><td colspan="7" style="text-align:center">변경 이력이 없습니다.</td></tr>';
+}
+async function loadSyncResults() {
+  const rows = await fetch('/api/asset-sync/sync-results?limit=1000').then(r=>r.json());
+  const body = document.getElementById('sync-link-body'); if(!body) return;
+  body.innerHTML = rows.length ? rows.map(r=>`<tr><td>${syncEscape(r.period_start)} ~ ${syncEscape(r.period_end)}</td><td class="mono">${syncEscape(r.asset_identity)}</td><td>${syncEscape(r.rv_event_type||'-')}</td><td>${syncEscape(r.itsm_event_type||'-')}</td><td>${syncBadge(r.sync_status)}</td><td>${syncEscape(JSON.stringify(r.detail||{}))}</td></tr>`).join('') : '<tr><td colspan="6" style="text-align:center">변경 동기화 판정 결과가 없습니다.</td></tr>';
+}
+async function evaluateTodaySync() {
+  const end = new Date(), start = new Date(end.getTime()-24*60*60*1000);
+  const res = await fetch('/api/asset-sync/evaluate-sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({start:start.toISOString(),end:end.toISOString()})}).then(r=>r.json());
+  const alertEl=document.getElementById('asset-sync-alert');
+  alertEl.innerHTML=res.error?`<div class="alert alert-error">❌ ${syncEscape(res.error)}</div>`:`<div class="alert alert-success">✅ 변경 동기화 판정 완료: ${syncEscape(JSON.stringify(res.counts||{}))}</div>`;
+  if(!res.error) loadSyncResults();
+}
+
+function renderSyncRuns(rows) {
+  const body = document.getElementById('sync-runs-body'); if(!body) return;
+  body.innerHTML = rows.length ? rows.map(r=>`<tr><td>${syncEscape(new Date(r.started_at).toLocaleString('ko-KR'))}</td><td>${syncEscape(r.source)}</td><td>${syncBadge(r.status)}</td><td>${Number(r.record_count||0).toLocaleString()}</td><td>${syncEscape(r.success_scope_json||'[]')}</td><td>${syncEscape(r.failed_scope_json||'[]')}</td><td>${syncEscape(r.error_message||'-')}</td></tr>`).join('') : '<tr><td colspan="7" style="text-align:center">수집 이력이 없습니다.</td></tr>';
+}
+async function runAssetCollection(source) {
+  const alertEl = document.getElementById('asset-sync-alert');
+  alertEl.innerHTML = '<div class="alert alert-info"><span class="loading"></span> 수집 실행 중...</div>';
+  const body = {};
+  const res = await fetch(`/api/asset-sync/collect/${source}`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+  alertEl.innerHTML = res.error ? `<div class="alert alert-error">❌ ${syncEscape(res.error)}</div>` : `<div class="alert alert-success">✅ ${syncEscape(source)} 수집 완료: ${Number(res.count||0).toLocaleString()}건</div>`;
+  if(!res.error) loadAssetSyncDashboard();
+}
+async function runDailyAssetBatch() {
+  const alertEl = document.getElementById('asset-sync-alert');
+  alertEl.innerHTML = '<div class="alert alert-info"><span class="loading"></span> PowerCLI vCenter·ITSM 수집 및 정합성 분석 중...</div>';
+  const res = await fetch('/api/asset-sync/run-daily',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}).then(r=>r.json());
+  alertEl.innerHTML = res.error ? `<div class="alert alert-error">❌ ${syncEscape(res.error)}</div>` : '<div class="alert alert-success">✅ 일일 배치가 완료되었습니다.</div>';
+  if(!res.error) loadAssetSyncDashboard();
+}
+function updatePeriodInputs() {
+  const mode = document.getElementById('period-mode')?.value;
+  const second = document.getElementById('period-date2');
+  if(second) second.disabled = mode !== 'custom';
+}
+async function loadPeriodSummary() {
+  const source=document.getElementById('period-source').value, mode=document.getElementById('period-mode').value;
+  const d1=document.getElementById('period-date1').value, d2=document.getElementById('period-date2').value;
+  let query=`source=${source}&mode=${mode}`;
+  if(mode==='daily') query+=`&date=${d1}`;
+  else if(mode==='weekly') query+=`&end_date=${d1}`;
+  else if(mode==='monthly') { const [y,m]=d1.split('-'); query+=`&year=${y}&month=${m}`; }
+  else query+=`&start=${d1}T00:00:00&end=${d2}T23:59:59`;
+  const res=await fetch('/api/asset-sync/period-summary?'+query).then(r=>r.json());
+  const el=document.getElementById('period-result'); el.style.display='block';
+  el.innerHTML=`<div class="grid-3"><div><strong>기간 중 이벤트</strong><pre class="mono text-xs">${syncEscape(JSON.stringify(res.event_totals||{},null,2))}</pre></div><div><strong>순변화</strong><pre class="mono text-xs">${syncEscape(JSON.stringify(res.net_changes||{},null,2))}</pre></div><div><strong>일별 누적 재현</strong><pre class="mono text-xs">${syncEscape(JSON.stringify(res.replay||{},null,2))}</pre></div></div>`;
+}
+
+</script>

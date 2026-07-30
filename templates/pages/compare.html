@@ -1,0 +1,105 @@
+{# 자동 분할된 파일입니다. 이 화면을 담당하는 팀이 이 파일만 수정하면 됩니다. #}
+<!-- ====== 자산 변경/현황 분석 ====== -->
+<div class="page {% if page=='compare' %}active{% endif %}" id="page-compare">
+  <div class="topbar">
+    <div>
+      <div class="topbar-title">자산 변경/현황 분석</div>
+      <div class="topbar-sub">이전/변경 자산현황을 비교하고 OS·물리/논리·EOSL 기준 현황을 집계합니다</div>
+    </div>
+  </div>
+  <div class="content">
+    <div class="alert alert-info">💡 기본값은 자산현황 샘플 기준입니다. 헤더 3행, 데이터 4행, 식별키 A열, 상태값 F열, 현황 기준은 운영+대기입니다.</div>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-title"><span class="icon">📁</span> 이전 파일</div>
+        <div class="upload-zone" onclick="document.getElementById('cmp-asis-input').click()">
+          <div class="upload-icon">📂</div>
+          <div class="upload-title">이전 자산현황 업로드</div>
+          <div class="upload-sub">.xlsx</div>
+        </div>
+        <input type="file" id="cmp-asis-input" accept=".xlsx" style="display:none" onchange="uploadCompare(this,'cmp_asis')">
+        <div id="cmp-asis-result"></div>
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="icon">📁</span> 변경 파일</div>
+        <div class="upload-zone" onclick="document.getElementById('cmp-tobe-input').click()">
+          <div class="upload-icon">📋</div>
+          <div class="upload-title">변경 자산현황 업로드</div>
+          <div class="upload-sub">.xlsx</div>
+        </div>
+        <input type="file" id="cmp-tobe-input" accept=".xlsx" style="display:none" onchange="uploadCompare(this,'cmp_tobe')">
+        <div id="cmp-tobe-result"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="icon">⚙️</span> 분석 기준 설정</div>
+      <div class="grid-4">
+        <div class="form-group">
+          <label class="form-label">헤더 행</label>
+          <input type="number" class="form-input" id="asset-header-row" value="3" min="1">
+        </div>
+        <div class="form-group">
+          <label class="form-label">데이터 시작 행</label>
+          <input type="number" class="form-input" id="asset-data-start-row" value="4" min="1">
+        </div>
+        <div class="form-group">
+          <label class="form-label">식별키 열</label>
+          <input type="text" class="form-input" id="asset-key-cols" value="A" placeholder="A 또는 A,B">
+        </div>
+        <div class="form-group">
+          <label class="form-label">상태값 열</label>
+          <input type="text" class="form-input" id="asset-status-col" value="F">
+        </div>
+      </div>
+      <div class="grid-4">
+        <div class="form-group">
+          <label class="form-label">일반 비교 제외 열</label>
+          <input type="text" class="form-input" id="asset-exclude-cols" value="F" placeholder="F">
+        </div>
+        <div class="form-group">
+          <label class="form-label">현황 대수 기준</label>
+          <select class="form-select" id="asset-scope">
+            <option value="active" selected>운영+대기</option>
+            <option value="all">전체</option>
+            <option value="inactive">미사용+매각폐기</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">물리/논리 열</label>
+          <input type="text" class="form-input" id="asset-physical-col" value="AA">
+        </div>
+        <div class="form-group">
+          <label class="form-label">OS 열</label>
+          <input type="text" class="form-input" id="asset-os-col" value="AI">
+        </div>
+      </div>
+      <div class="grid-4">
+        <div class="form-group">
+          <label class="form-label">OS 버전 열</label>
+          <input type="text" class="form-input" id="asset-os-version-col" value="AJ">
+        </div>
+        <div class="form-group">
+          <label class="form-label">OS EOSL 열</label>
+          <input type="text" class="form-input" id="asset-eosl-col" value="AK">
+        </div>
+        <div class="form-group">
+          <label class="form-label">사용자 지정 집계 열</label>
+          <input type="text" class="form-input" id="asset-custom-group-col" value="" placeholder="예: AI, AA, D">
+        </div>
+        <div class="form-group">
+          <label class="form-label">EOSL 처리 기준</label>
+          <input type="text" class="form-input" value="앞 4자리 연도, 99991231=미정" disabled>
+        </div>
+      </div>
+      <div class="alert alert-warning">⚠️ 운영↔대기 상태 변경은 삭제가 아니라 일반 변경으로 표시합니다. 운영/대기 → 미사용/매각폐기는 상태값 기준 삭제로 분리합니다.</div>
+      <button class="btn btn-primary" id="compare-btn" onclick="doCompare()" disabled>
+        <span>🔍</span> 분석 실행
+      </button>
+    </div>
+
+    <div id="compare-result"></div>
+  </div>
+</div>
+

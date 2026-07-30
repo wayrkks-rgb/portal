@@ -427,3 +427,17 @@ CREATE TABLE IF NOT EXISTS app_user (
     password_updated_at VARCHAR(32),
     UNIQUE KEY uq_app_user_username (username)
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 대메뉴별 사용자 권한. 대메뉴마다 담당자가 다르므로 admin/user 2단계로는 부족하다.
+-- 명시 부여가 없으면 모듈의 required_role 로 판정한다(기존 동작 유지).
+CREATE TABLE IF NOT EXISTS user_module_permission (
+    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    module_id VARCHAR(64) NOT NULL,
+    permission VARCHAR(16) NOT NULL DEFAULT 'VIEW',
+    granted_by VARCHAR(128),
+    granted_at VARCHAR(32) NOT NULL,
+    UNIQUE KEY uq_user_module_permission (user_id, module_id),
+    KEY idx_user_module_permission_module (module_id, permission),
+    CONSTRAINT fk_user_module_permission_user FOREIGN KEY (user_id) REFERENCES app_user(id) ON DELETE CASCADE
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

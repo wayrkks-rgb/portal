@@ -1,0 +1,90 @@
+{# 자동 분할된 파일입니다. 이 화면을 담당하는 팀이 이 파일만 수정하면 됩니다. #}
+<!-- ===== 모달들 ===== -->
+<div class="modal-overlay" id="modal-overlay" onclick="closeModal(event)">
+
+  <!-- 메뉴 추가/수정 모달 -->
+  <div class="modal" id="modal-menu" style="display:none">
+    <div class="modal-title" id="modal-menu-title">메뉴 설정</div>
+    <input type="hidden" id="edit-menu-id">
+    <div class="form-group">
+      <label class="form-label">메뉴명</label>
+      <input type="text" class="form-input" id="menu-name" placeholder="예: x86 통합 자원사용률 상세 현황">
+    </div>
+    <div class="divider"></div>
+    <div style="font-size:13px;font-weight:700;margin-bottom:12px;color:var(--accent)">📥 AS-IS 파일 설정</div>
+    <div class="grid-2">
+      <div class="form-group"><label class="form-label">헤더 행 번호</label><input type="number" class="form-input" id="asis-header-row" value="1" min="1"></div>
+      <div class="form-group"><label class="form-label">VM명 열</label><input type="text" class="form-input" id="asis-col-vm" value="A" maxlength="3"></div>
+      <div class="form-group"><label class="form-label">CPU MAX 열</label><input type="text" class="form-input" id="asis-col-cpu-max" value="B" maxlength="3"></div>
+      <div class="form-group"><label class="form-label">CPU AVG 열</label><input type="text" class="form-input" id="asis-col-cpu-avg" value="C" maxlength="3"></div>
+      <div class="form-group"><label class="form-label">MEM MAX 열</label><input type="text" class="form-input" id="asis-col-mem-max" value="D" maxlength="3"></div>
+      <div class="form-group"><label class="form-label">MEM AVG 열</label><input type="text" class="form-input" id="asis-col-mem-avg" value="E" maxlength="3"></div>
+    </div>
+    <div class="divider"></div>
+    <div style="font-size:13px;font-weight:700;margin-bottom:12px;color:var(--accent2)">📤 TO-BE 파일 설정</div>
+    <div class="grid-2">
+      <div class="form-group"><label class="form-label">데이터 시작 행</label><input type="number" class="form-input" id="tobe-data-start-row" value="7" min="1"></div>
+      <div class="form-group"><label class="form-label">서버 대수 표시 행</label><input type="number" class="form-input" id="tobe-count-row" value="3" min="1"></div>
+      <div class="form-group"><label class="form-label">VM명 열</label><input type="text" class="form-input" id="tobe-col-vm" value="B" maxlength="3"></div>
+      <div class="form-group"><label class="form-label">CPU MAX 열</label><input type="text" class="form-input" id="tobe-col-cpu-max" value="E" maxlength="3"></div>
+      <div class="form-group"><label class="form-label">CPU AVG 열</label><input type="text" class="form-input" id="tobe-col-cpu-avg" value="F" maxlength="3"></div>
+      <div class="form-group"><label class="form-label">MEM MAX 열</label><input type="text" class="form-input" id="tobe-col-mem-max" value="G" maxlength="3"></div>
+      <div class="form-group"><label class="form-label">MEM AVG 열</label><input type="text" class="form-input" id="tobe-col-mem-avg" value="H" maxlength="3"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModalDirect()">취소</button>
+      <button class="btn btn-primary" onclick="saveMenu()">저장</button>
+    </div>
+  </div>
+
+  <!-- 시트-VM 매핑 모달 -->
+  <div class="modal" id="modal-sheet-vm" style="display:none;max-width:700px">
+    <div class="modal-title">시트 ↔ VM 매핑 설정</div>
+    <div class="alert alert-info">각 시트에 속하는 VM명을 입력하세요. AS-IS 파일에서 해당 VM의 데이터를 찾아 이 시트에 기입합니다.</div>
+    <input type="hidden" id="svm-menu-id">
+    <div id="sheet-vm-list"></div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModalDirect()">닫기</button>
+      <button class="btn btn-primary" onclick="saveSheetVmAll()">전체 저장</button>
+    </div>
+  </div>
+
+  <!-- 대메뉴 권한 모달 -->
+  <div class="modal" id="modal-user-modules" style="display:none;max-width:620px">
+    <div class="modal-title">대메뉴 권한 · <span id="perm-username" class="mono"></span></div>
+    <div class="text-xs text-muted" style="margin-bottom:12px">
+      관리자는 모든 대메뉴에 변경 권한을 갖습니다. 직접 지정하지 않은 대메뉴는 모듈 설정(<code>access</code>)에 따라 판정됩니다.
+    </div>
+    <div class="table-wrap" style="max-height:340px;overflow:auto">
+      <table>
+        <thead><tr><th>대메뉴</th><th>구분</th><th>직접 지정</th><th>실효 권한</th></tr></thead>
+        <tbody id="perm-table-body"></tbody>
+      </table>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModalDirect()">취소</button>
+      <button class="btn btn-primary" id="btn-save-user-modules" onclick="saveUserModules()">권한 저장</button>
+    </div>
+  </div>
+
+  <!-- 사용자 추가 모달 -->
+  <div class="modal" id="modal-user" style="display:none">
+    <div class="modal-title">사용자 추가</div>
+    <div class="form-group"><label class="form-label">이름</label><input type="text" class="form-input" id="new-user-name" placeholder="홍길동"></div>
+    <div class="form-group"><label class="form-label">아이디</label><input type="text" class="form-input" id="new-user-id" placeholder="user01"></div>
+    <div class="form-group"><label class="form-label">비밀번호</label><input type="password" class="form-input" id="new-user-pw" placeholder="비밀번호"></div>
+    <div class="form-group">
+      <label class="form-label">권한</label>
+      <select class="form-select" id="new-user-role">
+        <option value="user">일반사용자</option>
+        <option value="admin">관리자</option>
+      </select>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModalDirect()">취소</button>
+      <button class="btn btn-primary" onclick="addUser()">추가</button>
+    </div>
+  </div>
+
+</div>
+

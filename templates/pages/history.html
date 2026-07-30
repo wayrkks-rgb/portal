@@ -1,0 +1,28 @@
+{# 자동 분할된 파일입니다. 이 화면을 담당하는 팀이 이 파일만 수정하면 됩니다. #}
+<!-- ====== 파일 이력 ====== -->
+<div class="page {% if page=='history' %}active{% endif %}" id="page-history">
+  <div class="topbar">
+    <div>
+      <div class="topbar-title">파일 이력</div>
+      <div class="topbar-sub">업로드된 모든 파일의 이력을 관리합니다</div>
+    </div>
+  </div>
+  <div class="content">
+    <div class="card">
+      <div class="card-title"><span class="icon">🗂️</span> 전체 업로드 이력</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>파일명</th><th>유형</th><th>정보</th><th>업로드 시각</th><th>업로드자</th>
+            </tr>
+          </thead>
+          <tbody id="history-table-body">
+            <tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:32px">데이터를 불러오는 중...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+

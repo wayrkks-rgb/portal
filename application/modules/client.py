@@ -82,7 +82,9 @@ class ModuleClient:
     def close(self) -> None:
         self.session.close()
 
-    def _auth_headers(self, module: ModuleDefinition, user: Mapping[str, Any] | None) -> tuple[dict[str, str], str]:
+    def _auth_headers(
+        self, module: ModuleDefinition, user: Mapping[str, Any] | None, permission: str = "VIEW"
+    ) -> tuple[dict[str, str], str]:
         auth = self.registry.auth
         secret = str(auth.get("shared_secret") or "")
         header_name = str(auth.get("header") or "X-Portal-Token")
@@ -94,6 +96,7 @@ class ModuleClient:
             secret,
             user=user,
             module_id=module.id,
+            permission=permission,
             ttl_seconds=int(auth.get("token_ttl_seconds") or 60),
         )
         return {header_name: token}, token
@@ -111,6 +114,7 @@ class ModuleClient:
         extra_headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
         parse_json: bool = True,
+        permission: str = "VIEW",
     ) -> ModuleResponse:
         started = time.monotonic()
         verb = str(method or "GET").upper()
@@ -124,7 +128,7 @@ class ModuleClient:
         except ModuleConfigError as exc:
             return ModuleResponse(module_id, STATUS_FAILED, error=str(exc))
 
-        headers, token = self._auth_headers(module, user)
+        headers, token = self._auth_headers(module, user, permission)
         headers["Accept"] = "application/json"
         if extra_headers:
             headers.update({k: v for k, v in extra_headers.items() if k.lower() not in _BLOCKED_REQUEST_HEADERS})

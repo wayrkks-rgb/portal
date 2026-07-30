@@ -1,0 +1,156 @@
+{# 자산 변경·현황 분석 스크립트 #}
+<script>
+
+async function uploadCompare(input, key) {
+  const file = input.files[0]; if(!file) return;
+  const opt = getAssetOptions();
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('header_row', opt.header_row);
+  fd.append('data_start_row', opt.data_start_row);
+  const resultEl = document.getElementById(key==='cmp_asis'?'cmp-asis-result':'cmp-tobe-result');
+  resultEl.innerHTML = '<div class="upload-result"><span class="loading"></span> 업로드 중...</div>';
+  const res = await fetch('/api/upload-asset', {method:'POST',body:fd}).then(r=>r.json());
+  if(res.success) {
+    cmpState[key] = res.saved_name;
+    resultEl.innerHTML = `<div class="upload-result"><span>✅</span><div><strong>${escapeHtml(res.filename)}</strong><br><span class="text-xs text-muted">${fmtNumber(res.row_count)}개 자산 · 헤더 ${opt.header_row}행 / 데이터 ${opt.data_start_row}행</span></div></div>`;
+    document.getElementById('compare-btn').disabled = !(cmpState.cmp_asis && cmpState.cmp_tobe);
+  } else {
+    resultEl.innerHTML = `<div class="alert alert-error mt-4">❌ ${escapeHtml(res.error)}</div>`;
+  }
+}
+
+function renderCountTable(title, items, keyLabel='구분', limit=0) {
+  const data = limit ? items.slice(0, limit) : items;
+  if(!data || data.length === 0) return `<div class="card"><div class="card-title">${title}</div><div class="text-muted">대상 없음</div></div>`;
+  return `
+    <div class="card">
+      <div class="card-title">${title}</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>${keyLabel}</th><th>대수</th></tr></thead>
+          <tbody>${data.map(i=>`<tr><td>${escapeHtml(i.name ?? i.year)}</td><td class="mono">${fmtNumber(i.count)}</td></tr>`).join('')}</tbody>
+        </table>
+      </div>
+      ${limit && items.length > limit ? `<div class="text-xs text-muted mt-4">화면에는 상위 ${limit}건만 표시됩니다. 전체 결과는 엑셀 다운로드 파일에서 확인하세요.</div>` : ''}
+    </div>`;
+}
+
+function renderAssetTable(title, items, badgeClass='badge-blue', limit=100) {
+  if(!items || items.length === 0) return '';
+  const display = items.slice(0, limit);
+  const fieldLabels = [];
+  const seen = new Set();
+  display.forEach(item => (item.fields || []).forEach(f => {
+    const label = `${f.col} ${f.name}`;
+    if(!seen.has(label)) { seen.add(label); fieldLabels.push(label); }
+  }));
+  return `
+    <div class="card">
+      <div class="card-title"><span class="badge ${badgeClass}">${fmtNumber(items.length)}건</span> ${title}</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>자산코드</th><th>행번호</th>${fieldLabels.map(l=>`<th>${escapeHtml(l)}</th>`).join('')}</tr></thead>
+          <tbody>${display.map(item=>{
+            const fmap = {};
+            (item.fields || []).forEach(f => fmap[`${f.col} ${f.name}`] = f.value);
+            return `<tr><td class="mono">${escapeHtml(item.key)}</td><td>${item.row_num || item.new_row_num || '-'}</td>${fieldLabels.map(l=>`<td>${escapeHtml(fmap[l] || '-')}</td>`).join('')}</tr>`;
+          }).join('')}</tbody>
+        </table>
+      </div>
+      ${items.length > limit ? `<div class="text-xs text-muted mt-4">화면에는 ${limit}건만 표시됩니다. 전체 결과는 엑셀 다운로드 파일에서 확인하세요.</div>` : ''}
+    </div>`;
+}
+
+function renderChangeTable(title, items, limit=200) {
+  if(!items || items.length === 0) return '';
+  const rows = [];
+  items.forEach(item => {
+    (item.changes || []).forEach(ch => rows.push({key:item.key, oldRow:item.old_row_num, newRow:item.new_row_num, ...ch}));
+  });
+  const display = rows.slice(0, limit);
+  return `
+    <div class="card">
+      <div class="card-title"><span class="badge badge-yellow">${fmtNumber(items.length)}개 자산</span> ${title}</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>자산코드</th><th>이전 행</th><th>변경 행</th><th>변경열</th><th>항목명</th><th>이전값</th><th>변경값</th></tr></thead>
+          <tbody>${display.map(r=>`<tr><td class="mono">${escapeHtml(r.key)}</td><td>${r.oldRow}</td><td>${r.newRow}</td><td class="mono">${escapeHtml(r.col)}</td><td>${escapeHtml(r.name)}</td><td>${escapeHtml(r.before)}</td><td>${escapeHtml(r.after)}</td></tr>`).join('')}</tbody>
+        </table>
+      </div>
+      ${rows.length > limit ? `<div class="text-xs text-muted mt-4">화면에는 변경 상세 ${limit}건만 표시됩니다. 전체 결과는 엑셀 다운로드 파일에서 확인하세요.</div>` : ''}
+    </div>`;
+}
+
+function renderPivotTable(summary, limit=50) {
+  if(!summary || !summary.eosl_pivot || summary.eosl_pivot.length === 0) return '';
+  const years = summary.eosl_years || [];
+  const rows = summary.eosl_pivot.slice(0, limit);
+  return `
+    <div class="card">
+      <div class="card-title">📅 OS 버전 × EOSL 연도별 대수</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>OS VER</th><th>합계</th>${years.map(y=>`<th>${escapeHtml(y)}</th>`).join('')}</tr></thead>
+          <tbody>${rows.map(r=>`<tr><td>${escapeHtml(r.os_version)}</td><td class="mono">${fmtNumber(r.total)}</td>${years.map(y=>`<td class="mono">${r.years[y] ? fmtNumber(r.years[y]) : ''}</td>`).join('')}</tr>`).join('')}</tbody>
+        </table>
+      </div>
+      ${summary.eosl_pivot.length > limit ? `<div class="text-xs text-muted mt-4">화면에는 상위 ${limit}개 OS 버전만 표시됩니다. 전체 결과는 엑셀 다운로드 파일에서 확인하세요.</div>` : ''}
+    </div>`;
+}
+
+async function doCompare() {
+  const btn = document.getElementById('compare-btn');
+  btn.disabled=true; btn.innerHTML='<span class="loading"></span> 분석 중...';
+  const opt = getAssetOptions();
+  const res = await fetch('/api/compare',{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({file1:cmpState.cmp_asis, file2:cmpState.cmp_tobe, ...opt})
+  }).then(r=>r.json());
+  btn.disabled=false; btn.innerHTML='<span>🔍</span> 분석 실행';
+  const el = document.getElementById('compare-result');
+  if(res.success) {
+    const c = res.compare;
+    const s = res.summary;
+    const warnDup = (res.warnings?.old_duplicate_keys?.length || res.warnings?.new_duplicate_keys?.length) > 0;
+    el.innerHTML = `
+      <div class="card">
+        <div class="card-title"><span class="icon">✅</span> 분석 완료</div>
+        <div class="grid-4 mb-4">
+          <div class="stat-card"><div class="stat-value">${fmtNumber(c.new_count)}</div><div class="stat-label">변경 파일 자산 수</div></div>
+          <div class="stat-card"><div class="stat-value text-success">${fmtNumber(c.added_count)}</div><div class="stat-label">추가 자산</div></div>
+          <div class="stat-card"><div class="stat-value text-error">${fmtNumber(c.status_deleted_count)}</div><div class="stat-label">상태값 기준 삭제</div></div>
+          <div class="stat-card"><div class="stat-value text-accent">${fmtNumber(c.changed_count)}</div><div class="stat-label">일반 변경 자산</div></div>
+        </div>
+        <div class="grid-3 mb-4">
+          <div class="stat-card"><div class="stat-value">${fmtNumber(c.removed_count)}</div><div class="stat-label">물리적 삭제</div></div>
+          <div class="stat-card"><div class="stat-value">${fmtNumber(c.common_count)}</div><div class="stat-label">공통 자산</div></div>
+          <div class="stat-card"><div class="stat-value">${fmtNumber(s.total_count)}</div><div class="stat-label">현황 집계 대상 · ${escapeHtml(res.options.scope_label)}</div></div>
+        </div>
+        <div class="alert alert-info">📌 ${escapeHtml(res.options.eosl_rule)} · 현재 현황 기준: ${escapeHtml(res.options.scope_label)}</div>
+        ${warnDup ? `<div class="alert alert-warning">⚠️ A열 등 식별키 중복이 있습니다. 이전 ${res.warnings.old_duplicate_keys.length}건, 변경 ${res.warnings.new_duplicate_keys.length}건</div>` : ''}
+        ${res.output_file ? `<a href="/api/download/${encodeURIComponent(res.output_file)}" class="btn btn-success">⬇️ 분석 결과 엑셀 다운로드</a>` : ''}
+      </div>
+
+      ${renderAssetTable('추가 자산', res.added, 'badge-green')}
+      ${renderAssetTable('상태값 기준 삭제 · 운영/대기 → 미사용/매각폐기', res.status_deleted, 'badge-red')}
+      ${renderChangeTable('일반 변경 상세', res.changed)}
+      ${renderAssetTable('물리적 삭제 · 이전 파일에만 존재', res.removed, 'badge-red')}
+
+      <div class="grid-2">
+        ${renderCountTable('🖥️ OS별 대수', s.os_counts, 'OS')}
+        ${renderCountTable('🧩 물리/논리 서버 대수', s.physical_counts, '구분')}
+      </div>
+      <div class="grid-2">
+        ${renderCountTable('📌 OS 버전별 대수', s.os_version_counts, 'OS VER', 30)}
+        ${renderCountTable('📅 OS EOSL 연도별 대수', s.eosl_by_year, 'EOSL 연도')}
+      </div>
+      ${renderPivotTable(s)}
+      ${res.custom_summary ? renderCountTable(`🔎 사용자 지정 집계 · ${escapeHtml(res.custom_summary.group_col)} ${escapeHtml(res.custom_summary.group_label)}`, res.custom_summary.counts, res.custom_summary.group_label) : ''}
+    `;
+  } else {
+    el.innerHTML = `<div class="alert alert-error">❌ 오류: ${escapeHtml(res.error)}${res.trace ? `<br><pre style="white-space:pre-wrap;margin-top:8px">${escapeHtml(res.trace)}</pre>` : ''}</div>`;
+  }
+}
+
+</script>

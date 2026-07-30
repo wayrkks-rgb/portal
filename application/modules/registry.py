@@ -18,6 +18,7 @@ LOGGER = logging.getLogger(__name__)
 
 _MODULE_ID = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _ROLE_RANK = {"user": 0, "admin": 1}
+_ACCESS_MODES = ("role", "explicit")
 DEFAULT_ALLOWED_PREFIXES = ("/api/",)
 
 
@@ -40,6 +41,8 @@ class ModuleDefinition:
     timeout_seconds: float | None = None
     allowed_prefixes: tuple[str, ...] = field(default=DEFAULT_ALLOWED_PREFIXES)
     show_in_menu: bool = True
+    # role: required_role 로 판정(기본) · explicit: 명시 부여가 있어야 접근 가능
+    access: str = "role"
 
     @property
     def is_local(self) -> bool:
@@ -62,6 +65,7 @@ class ModuleDefinition:
             "required_role": self.required_role,
             "location": "LOCAL" if self.is_local else "REMOTE",
             "show_in_menu": self.show_in_menu,
+            "access": self.access,
         }
 
     def resolve(self, path: str) -> str:
@@ -103,6 +107,9 @@ def _build(item: Mapping[str, Any]) -> ModuleDefinition:
         for prefix in (item.get("allowed_prefixes") or DEFAULT_ALLOWED_PREFIXES)
         if str(prefix).strip()
     )
+    access = str(item.get("access") or "role").strip().lower()
+    if access not in _ACCESS_MODES:
+        raise ModuleConfigError(f"{module_id} access 는 {', '.join(_ACCESS_MODES)} 중 하나여야 합니다: {access}")
     timeout = item.get("timeout_seconds")
     return ModuleDefinition(
         id=module_id,
@@ -118,6 +125,7 @@ def _build(item: Mapping[str, Any]) -> ModuleDefinition:
         timeout_seconds=float(timeout) if timeout not in (None, "") else None,
         allowed_prefixes=prefixes or DEFAULT_ALLOWED_PREFIXES,
         show_in_menu=_as_bool(item.get("show_in_menu"), True),
+        access=access,
     )
 
 
@@ -157,7 +165,23 @@ class ModuleRegistry:
         return [module for module in self._modules.values() if module.enabled]
 
     def visible(self, role: str) -> list[ModuleDefinition]:
-        return [module for module in self._modules.values() if module.visible_to(role)]
+        """등급만 보고 판정한다. 명시 부여를 반영하려면 accessible() 을 쓴다."""
+        return [
+            module
+            for module in self._modules.values()
+            if module.access == "role" and module.visible_to(role)
+        ]
+
+    def accessible(self, user: Any, granted: Any = None) -> list[tuple[ModuleDefinition, str]]:
+        """사용자가 접근할 수 있는 모듈과 실효 권한을 함께 돌려준다."""
+        from application.permissions import PERMISSION_NONE, resolve_permission
+
+        result: list[tuple[ModuleDefinition, str]] = []
+        for module in self._modules.values():
+            permission = resolve_permission(module, user, granted)
+            if permission != PERMISSION_NONE:
+                result.append((module, permission))
+        return result
 
     def get(self, module_id: str) -> ModuleDefinition | None:
         return self._modules.get(str(module_id or "").strip().lower())
