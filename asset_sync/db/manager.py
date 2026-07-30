@@ -58,6 +58,13 @@ class SQLiteManager(DatabaseManager):
         with self.connect() as conn:
             conn.executescript(schema)
             conn.execute("INSERT OR IGNORE INTO schema_version(version) VALUES (1)")
+        self._apply_migrations()
+
+    def _apply_migrations(self) -> None:
+        # 기존 DB 에 컬럼을 추가하는 단계는 CREATE TABLE IF NOT EXISTS 로 처리되지 않는다.
+        from .migrations import apply_pending
+
+        apply_pending(self)
 
     @contextmanager
     def connect(self) -> Iterator[ManagedConnection]:
@@ -148,6 +155,12 @@ class MySQLManager(DatabaseManager):
         with self.connect() as conn:
             conn.executescript(schema)
             conn.execute("INSERT IGNORE INTO schema_version(version) VALUES (1)")
+        self._apply_migrations()
+
+    def _apply_migrations(self) -> None:
+        from .migrations import apply_pending
+
+        apply_pending(self)
 
     @contextmanager
     def connect(self) -> Iterator[ManagedConnection]:

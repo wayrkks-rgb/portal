@@ -212,6 +212,8 @@ CREATE TABLE IF NOT EXISTS data_quality_exception (
 
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- 여러 WAS 가 같은 테이블에 쓰므로 어느 모듈 기록인지 구분해야 한다.
+    module_id TEXT NOT NULL DEFAULT 'portal',
     user_id TEXT NOT NULL,
     action TEXT NOT NULL,
     target_type TEXT NOT NULL,
@@ -222,6 +224,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(created_at DESC);
+-- idx_audit_module 은 migrations.py 가 만든다. 기존 DB 에는 module_id 컬럼이 아직
+-- 없으므로 이 파일에서 인덱스를 만들면 스키마 적용 자체가 실패한다.
 
 CREATE TABLE IF NOT EXISTS daily_batch_run (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

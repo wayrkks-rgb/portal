@@ -280,3 +280,25 @@ def test_permission_change_is_audited(portal) -> None:
     admin.put(f"/api/users/{target['id']}/modules", json={"permissions": {"secrets_menu": "VIEW"}})
     rows = admin.get("/api/admin/audit-log").get_json()
     assert any(row["action"] == "PERMISSION" and row["target_type"] == "app_user" for row in rows)
+
+def test_audit_log_can_be_filtered_by_module(portal) -> None:
+    """여러 WAS 가 같은 감사 테이블에 쓰므로 출처별 조회가 필요하다."""
+    admin = _client(portal)
+    target = next(item for item in admin.get("/api/users").get_json() if item["username"] == "user")
+    admin.put(f"/api/users/{target['id']}/modules", json={"permissions": {"secrets_menu": "VIEW"}})
+
+    # 다른 모듈이 쓴 것처럼 한 건을 남긴다.
+    from application.db import database_manager
+    from asset_sync.repositories import AssetRepository
+
+    with database_manager().connect() as conn:
+        AssetRepository(conn).audit("was-capacity", "SYNC", "capacity_job", "9", None, {}, {}, module_id="capacity")
+
+    everything = admin.get("/api/admin/audit-log").get_json()
+    assert {row["module_id"] for row in everything} >= {"portal", "capacity"}
+
+    only_capacity = admin.get("/api/admin/audit-log?module_id=capacity").get_json()
+    assert only_capacity and all(row["module_id"] == "capacity" for row in only_capacity)
+
+    summary = {row["module_id"]: row["cnt"] for row in admin.get("/api/admin/audit-log/modules").get_json()}
+    assert summary["capacity"] == 1 and summary["portal"] >= 1

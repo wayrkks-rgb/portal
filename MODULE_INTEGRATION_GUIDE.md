@@ -257,9 +257,55 @@ templates/
   `integrationToast`, 모달 제어)는 `partials/js/common.html` 에 있다. 화면
   스크립트에서 그대로 호출한다.
 
-## 10. 아직 남은 것
+## 10. 공유 감사로그
 
-- **`audit_log` 에 모듈 구분 컬럼이 없다.** 여러 WAS 가 같은 감사 테이블에 쓰기
-  시작하면 `module_id` 가 필요하다.
-- **권한 변경이 즉시 반영되지 않는다.** 메뉴는 화면을 새로 열 때 갱신된다.
+`audit_log` 는 통합 웹과 각 WAS 가 함께 쓰는 테이블이다. `module_id` 로 출처를
+구분한다.
+
+```sql
+INSERT INTO audit_log(module_id, user_id, action, target_type, target_id, reason,
+                      before_json, after_json, created_at)
+VALUES ('capacity', 'hong', 'UPDATE', 'storage_pool', '12', '증설 승인',
+        '{"size":700}', '{"size":812}', '2026-07-30T09:12:00');
+```
+
+| 컬럼 | 값 |
+|---|---|
+| `module_id` | 자기 모듈 id. 통합 웹 자체 기록은 `portal`, 자산 정합성은 `asset_sync` |
+| `user_id` | 토큰의 `sub` 값을 그대로 쓴다. 그래야 통합 웹 기록과 이어진다 |
+| `action` / `target_type` / `target_id` | 모듈이 정한다. `target_type` 은 모듈 안에서만 고유하면 된다 |
+
+조회 API:
+
+```text
+GET /api/admin/audit-log                  전체
+GET /api/admin/audit-log?module_id=capacity  특정 모듈만
+GET /api/admin/audit-log/modules           모듈별 건수와 마지막 기록 시각
+```
+
+기존 DB 에는 이 컬럼이 없으므로 기동 시 자동으로 추가된다(아래 참고).
+
+## 11. 스키마 변경 규칙
+
+`schema_version` 기반 마이그레이션이 있다. `asset_sync/db/migrations.py` 의
+`MIGRATIONS` 에 단계를 추가하면 모든 진입점(웹·배치·스크립트)이 기동 시 적용한다.
+
+**기존 테이블에 컬럼을 추가할 때 그 컬럼을 참조하는 인덱스를 `schema.sql` 에
+넣으면 안 된다.** 기존 DB 에서는 `CREATE TABLE IF NOT EXISTS` 가 no-op 이라 컬럼
+없이 인덱스를 만들려 해 스키마 적용 자체가 실패한다. 컬럼은 `CREATE TABLE` 에
+두고 인덱스는 마이그레이션에서 만든다.
+
+각 단계는 적용 여부를 스스로 확인하므로 여러 WAS 가 동시에 기동해도 안전하다.
+
+## 12. 아직 남은 것
+
+- **권한 변경이 메뉴에 즉시 반영되지 않는다.** 화면을 새로 열 때 갱신된다.
   세션에 캐시하지 않고 매 요청 조회하므로 API 는 즉시 반영된다.
+- **모듈이 자기 HTML 을 직접 제공할 수는 없다.** 지금은 패널 스펙(JSON)만 통합
+  웹이 렌더링한다. 모듈 고유 화면이 필요하면 `templates/modules/<id>.html` 을
+  통합 웹 저장소에 추가해야 한다.
+- **프록시는 대용량 파일에 맞지 않다.** 요청 본문을 메모리에 모두 읽고 응답은
+  `max_response_bytes`(기본 4MB)로 제한된다. 대용량 업로드·다운로드가 필요하면
+  별도 설계가 필요하다.
+- **레지스트리는 기동 시 1회 읽는다.** 대메뉴를 추가하면 통합 웹을 재시작해야
+  한다.

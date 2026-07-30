@@ -242,6 +242,8 @@ CREATE TABLE IF NOT EXISTS data_quality_exception (
 
 CREATE TABLE IF NOT EXISTS audit_log (
     id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    -- 여러 WAS 가 같은 테이블에 쓰므로 어느 모듈 기록인지 구분해야 한다.
+    module_id VARCHAR(64) NOT NULL DEFAULT 'portal',
     user_id VARCHAR(128) NOT NULL,
     action VARCHAR(64) NOT NULL,
     target_type VARCHAR(64) NOT NULL,
@@ -250,6 +252,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     before_json LONGTEXT,
     after_json LONGTEXT,
     created_at VARCHAR(32) NOT NULL,
+    -- idx_audit_module 은 migrations.py 가 만든다 (기존 DB 호환)
     KEY idx_audit_time (created_at DESC)
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

@@ -414,8 +414,23 @@ class AssetRepository:
         )
         return len(rows)
 
-    def audit(self, user_id: str, action: str, target_type: str, target_id: str | None, reason: str | None, before: Any, after: Any) -> None:
+    def audit(
+        self,
+        user_id: str,
+        action: str,
+        target_type: str,
+        target_id: str | None,
+        reason: str | None,
+        before: Any,
+        after: Any,
+        module_id: str = "portal",
+    ) -> None:
+        """감사 기록. module_id 는 여러 WAS 가 같은 테이블에 쓸 때 출처를 구분한다."""
         self.conn.execute(
-            "INSERT INTO audit_log(user_id, action, target_type, target_id, reason, before_json, after_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (user_id, action, target_type, target_id, reason, canonical_json(before), canonical_json(after), datetime.now().isoformat()),
+            "INSERT INTO audit_log(module_id, user_id, action, target_type, target_id, reason, before_json, after_json, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(module_id or "portal"), user_id, action, target_type, target_id, reason,
+                canonical_json(before), canonical_json(after), datetime.now().isoformat(),
+            ),
         )
