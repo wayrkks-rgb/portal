@@ -9,7 +9,7 @@ sys.path.insert(0, str(ROOT))
 import streamlit as st  # type: ignore
 
 from asset_sync.config import load_config
-from asset_sync.db.sqlite_manager import SQLiteManager
+from asset_sync.db.manager import create_manager
 from asset_sync.repositories import AssetRepository
 from asset_sync.services.dashboard_service import DashboardService
 
@@ -19,7 +19,7 @@ st.title("ITSM·vCenter 자산 현황")
 st.caption("선택 설치 기능입니다. 핵심 운영 화면은 기존 Flask에 통합되어 있습니다.")
 
 cfg = load_config()
-manager = SQLiteManager(cfg.database_path)
+manager = create_manager(cfg)
 manager.initialize()
 with manager.connect() as connection:
     repo = AssetRepository(connection)

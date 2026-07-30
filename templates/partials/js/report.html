@@ -1,0 +1,156 @@
+{# 보고서 · 업로드/이력선택/보고서 생성 스크립트 #}
+<script>
+// ── 드래그&드롭 ──
+function handleDragOver(e, zoneId) { e.preventDefault(); document.getElementById(zoneId).classList.add('dragover'); }
+function handleDragLeave(e, zoneId) { document.getElementById(zoneId).classList.remove('dragover'); }
+function handleDrop(e, inputId) {
+  e.preventDefault();
+  const input = document.getElementById(inputId);
+  const zone = input.closest('.card').querySelector('.upload-zone');
+  zone.classList.remove('dragover');
+  if(e.dataTransfer.files.length) {
+    const dt = new DataTransfer();
+    dt.items.add(e.dataTransfer.files[0]);
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change'));
+  }
+}
+
+// ── AS-IS 업로드 ──
+async function uploadAsIs(input) {
+  const file = input.files[0]; if(!file) return;
+  const fd = new FormData(); fd.append('file', file);
+  document.getElementById('asis-result').innerHTML = '<div class="upload-result" style="background:rgba(40,69,102,0.08);border-color:rgba(40,69,102,0.22)"><span class="loading"></span> 업로드 중...</div>';
+  const res = await fetch('/api/upload-asis', {method:'POST', body:fd}).then(r=>r.json());
+  if(res.success) {
+    state.asisFile = res.saved_name;
+    document.getElementById('asis-result').innerHTML = `
+      <div class="upload-result">
+        <span>✅</span>
+        <div><strong>${res.filename}</strong><br><span class="text-xs text-muted">${res.row_count.toLocaleString()}개 VM · 파일 ID: ${res.file_id}</span></div>
+      </div>`;
+    checkGenerateBtn(); loadHistorySelects();
+  } else {
+    document.getElementById('asis-result').innerHTML = `<div class="alert alert-error mt-4">❌ ${res.error}</div>`;
+  }
+}
+
+// ── TO-BE 업로드 ──
+async function uploadToBe(input) {
+  const file = input.files[0]; if(!file) return;
+  const fd = new FormData(); fd.append('file', file);
+  document.getElementById('tobe-result').innerHTML = '<div class="upload-result" style="background:rgba(40,69,102,0.08)"><span class="loading"></span> 업로드 중...</div>';
+  const res = await fetch('/api/upload-tobe', {method:'POST', body:fd}).then(r=>r.json());
+  if(res.success) {
+    state.tobeFile = res.saved_name;
+    document.getElementById('tobe-result').innerHTML = `
+      <div class="upload-result">
+        <span>✅</span>
+        <div><strong>${res.filename}</strong><br><span class="text-xs text-muted">${res.sheets.length}개 시트</span></div>
+      </div>`;
+    checkGenerateBtn(); loadHistorySelects();
+  } else {
+    document.getElementById('tobe-result').innerHTML = `<div class="alert alert-error mt-4">❌ ${res.error}</div>`;
+  }
+}
+
+function checkGenerateBtn() {
+  document.getElementById('generate-btn').disabled = !(state.asisFile && state.tobeFile);
+}
+
+// ── 이력 선택 ──
+async function loadHistorySelects() {
+  const hist = await fetch('/api/history').then(r=>r.json());
+  state.history = hist;
+  const asisSel = document.getElementById('asis-history-select');
+  const tobeSel = document.getElementById('tobe-history-select');
+  const asisItems = hist.filter(h=>h.type==='asis');
+  const tobeItems = hist.filter(h=>h.type==='tobe');
+  asisSel.innerHTML = '<option value="">-- 이전 업로드 파일 선택 --</option>' + asisItems.map(h=>`<option value="${h.saved_name}">${h.filename} (${new Date(h.uploaded_at).toLocaleDateString('ko-KR')})</option>`).join('');
+  tobeSel.innerHTML = '<option value="">-- 이전 업로드 파일 선택 --</option>' + tobeItems.map(h=>`<option value="${h.saved_name}">${h.filename} (${new Date(h.uploaded_at).toLocaleDateString('ko-KR')})</option>`).join('');
+}
+
+function selectFromHistory(type) {
+  const sel = document.getElementById(`${type}-history-select`).value;
+  if(!sel) return;
+  const item = state.history.find(h=>h.saved_name===sel);
+  if(!item) return;
+  if(type==='asis') {
+    state.asisFile = sel;
+    document.getElementById('asis-result').innerHTML = `<div class="upload-result"><span>📂</span><div><strong>${item.filename}</strong><br><span class="text-xs text-muted">이력에서 선택됨 · ${item.row_count||''}${item.row_count?'개 VM':''}</span></div></div>`;
+  } else {
+    state.tobeFile = sel;
+    document.getElementById('tobe-result').innerHTML = `<div class="upload-result"><span>📋</span><div><strong>${item.filename}</strong><br><span class="text-xs text-muted">이력에서 선택됨</span></div></div>`;
+  }
+  checkGenerateBtn();
+}
+
+// ── 보고서 생성 ──
+async function generateReport() {
+  const btn = document.getElementById('generate-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="loading"></span> 생성 중...';
+  const menuId = document.getElementById('menu-select').value;
+  const res = await fetch('/api/generate-report', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({asis_file: state.asisFile, tobe_file: state.tobeFile, menu_id: menuId})
+  }).then(r=>r.json());
+
+  btn.disabled = false; btn.innerHTML = '<span>📊</span> 보고서 생성';
+
+  const el = document.getElementById('generate-result');
+  if(res.success) {
+    const s = res.summary;
+    const notFoundSheets = res.sheet_results.filter(r=>r.not_found.length>0);
+    el.style.display='block';
+    el.innerHTML = `
+      <div class="card">
+        <div class="card-title"><span class="icon">✅</span> 생성 완료</div>
+        <div class="grid-3 mb-4">
+          <div class="stat-card"><div class="stat-value text-success">${s.total_matched}</div><div class="stat-label">매핑 성공 VM</div></div>
+          <div class="stat-card"><div class="stat-value">${s.total_vms_in_tobe}</div><div class="stat-label">TO-BE 전체 VM</div></div>
+          <div class="stat-card"><div class="stat-value">${s.sheets_processed}</div><div class="stat-label">처리된 시트 수</div></div>
+        </div>
+        <a href="/api/download/${res.output_file}" class="btn btn-success mb-4">⬇️ 보고서 다운로드</a>
+        ${notFoundSheets.length > 0 ? `
+        <div class="alert alert-warning">
+          ⚠️ 아래 VM은 AS-IS에서 찾지 못했습니다. 관리 페이지에서 시트-VM 매핑을 확인하세요.
+        </div>` : ''}
+        <div class="result-box">
+          <div style="font-size:12px;font-weight:700;color:var(--text-muted);margin-bottom:8px">시트별 처리 결과</div>
+          ${res.sheet_results.map(r=>`
+            <div class="result-sheet-item">
+              <span class="text-sm">${r.sheet}</span>
+              <span>
+                <span class="badge badge-green">${r.matched}/${r.total_in_sheet} 매핑</span>
+                ${r.not_found.length ? `<span class="badge badge-red ml-2" title="${r.not_found.join(', ')}">${r.not_found.length}개 미매핑</span>` : ''}
+              </span>
+            </div>`).join('')}
+        </div>
+      </div>`;
+  } else {
+    el.style.display='block';
+    el.innerHTML = `<div class="alert alert-error">❌ 오류: ${res.error}</div>`;
+  }
+}
+
+// ── 자산 변경/현황 분석 ──
+let cmpState = {};
+
+function getAssetOptions() {
+  return {
+    header_row: parseInt(document.getElementById('asset-header-row').value || '3'),
+    data_start_row: parseInt(document.getElementById('asset-data-start-row').value || '4'),
+    key_cols: document.getElementById('asset-key-cols').value.split(',').map(c=>c.trim().toUpperCase()).filter(Boolean),
+    status_col: document.getElementById('asset-status-col').value.trim().toUpperCase() || 'F',
+    exclude_cols: document.getElementById('asset-exclude-cols').value.split(',').map(c=>c.trim().toUpperCase()).filter(Boolean),
+    scope: document.getElementById('asset-scope').value,
+    physical_col: document.getElementById('asset-physical-col').value.trim().toUpperCase() || 'AA',
+    os_col: document.getElementById('asset-os-col').value.trim().toUpperCase() || 'AI',
+    os_version_col: document.getElementById('asset-os-version-col').value.trim().toUpperCase() || 'AJ',
+    eosl_col: document.getElementById('asset-eosl-col').value.trim().toUpperCase() || 'AK',
+    custom_group_col: document.getElementById('asset-custom-group-col').value.trim().toUpperCase()
+  };
+}
+
+</script>

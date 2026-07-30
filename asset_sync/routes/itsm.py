@@ -5,13 +5,13 @@ from typing import Any
 from flask import Blueprint, jsonify, request
 
 from ..config import AppConfig
-from ..db.sqlite_manager import SQLiteManager
+from ..db.manager import DatabaseManager
 from ..repositories import AssetRepository
 from ..services import PeriodService
 from ..web_common import login_required
 
 
-def create_itsm_blueprint(cfg: AppConfig, manager: SQLiteManager) -> Blueprint:
+def create_itsm_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint:
     del cfg
     bp = Blueprint("asset_sync_itsm", __name__)
 

@@ -1,0 +1,115 @@
+{# 자동 분할된 파일입니다. 이 화면을 담당하는 팀이 이 파일만 수정하면 됩니다. #}
+<!-- ====== ITSM · vCenter 자동수집/정합성 ====== -->
+<div class="page {% if page=='asset_sync' %}active{% endif %}" id="page-asset_sync">
+  <div class="topbar">
+    <div>
+      <div class="topbar-title">ITSM · vCenter 자산 정합성</div>
+      <div class="topbar-sub">매일 Oracle ITSM과 vCenter 정보를 자동 수집하여 변경·정합성을 분석합니다</div>
+    </div>
+    <div class="flex gap-2">
+      <a class="btn btn-success btn-sm" href="/api/asset-sync/export">⬇ 결과 다운로드</a>
+      {% if user.role == 'admin' %}
+      <button class="btn btn-secondary btn-sm" onclick="runAssetCollection('vcenter')">vCenter 수집</button>
+      <button class="btn btn-secondary btn-sm" onclick="runAssetCollection('itsm')">ITSM 수집</button>
+      <button class="btn btn-primary btn-sm" onclick="runDailyAssetBatch()">일일 전체 실행</button>
+      {% endif %}
+    </div>
+  </div>
+  <div class="content">
+    <div id="asset-sync-alert"></div>
+    <div class="grid-4 mb-4">
+      <div class="stat-card"><div class="stat-value" id="sync-itsm-count">-</div><div class="stat-label">ITSM 최신 자산</div><div class="stat-delta" id="sync-itsm-time"></div></div>
+      <div class="stat-card"><div class="stat-value" id="sync-rv-count">-</div><div class="stat-label">vCenter 최신 VM</div><div class="stat-delta" id="sync-rv-time"></div></div>
+      <div class="stat-card"><div class="stat-value text-success" id="sync-matched-count">-</div><div class="stat-label">정상 매칭</div></div>
+      <div class="stat-card"><div class="stat-value text-error" id="sync-issue-count">-</div><div class="stat-label">불일치·검토 대상</div></div>
+    </div>
+
+    <div class="tabs">
+      <div class="tab active" onclick="switchSyncTab('reconciliation', this)">당일 정합성</div>
+      <div class="tab" onclick="switchSyncTab('daily', this)">전일 대비</div>
+      <div class="tab" onclick="switchSyncTab('changes', this)">변경 이력</div>
+      <div class="tab" onclick="switchSyncTab('sync', this)">변경 동기화</div>
+      <div class="tab" onclick="switchSyncTab('period', this)">기간 집계</div>
+      <div class="tab" onclick="switchSyncTab('runs', this)">수집 상태</div>
+    </div>
+
+    <div class="tab-panel active" id="sync-panel-reconciliation">
+      <div class="card">
+        <div class="flex justify-between items-center mb-4">
+          <div class="card-title" style="margin-bottom:0"><span class="icon">🔗</span> ITSM ↔ vCenter 정합성 결과</div>
+          <select class="form-select" id="sync-recon-filter" style="width:220px" onchange="loadSyncReconciliation()">
+            <option value="">전체 상태</option><option value="MATCHED">MATCHED</option><option value="MATCHED_WITH_DRIFT">MATCHED_WITH_DRIFT</option>
+            <option value="IP_CHANGE_CANDIDATE">IP_CHANGE_CANDIDATE</option><option value="HOSTNAME_REVIEW">HOSTNAME_REVIEW</option>
+            <option value="ITSM_ONLY">ITSM_ONLY</option><option value="RVTOOLS_ONLY">VCENTER_ONLY</option><option value="AMBIGUOUS">AMBIGUOUS</option>
+          </select>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th>상태</th><th>CM_ID</th><th>vCenter 자산키</th><th>매칭방식</th><th>점수</th><th>Drift</th><th>사유</th></tr></thead><tbody id="sync-recon-body"></tbody></table></div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="sync-panel-daily">
+      <div class="grid-2">
+        <div class="card">
+          <div class="flex justify-between items-center mb-4">
+            <div class="card-title" style="margin-bottom:0"><span class="icon">🗄️</span> ITSM 최신 스냅샷 대비 직전 스냅샷</div>
+            <button class="btn btn-secondary btn-sm" onclick="loadDailyComparison('ITSM')">새로고침</button>
+          </div>
+          <div id="daily-itsm-summary" class="mb-4"></div>
+          <div class="table-wrap"><table><thead><tr><th>분류</th><th>자산키</th><th>이벤트</th><th>필드</th><th>이전</th><th>현재</th></tr></thead><tbody id="daily-itsm-body"></tbody></table></div>
+        </div>
+        <div class="card">
+          <div class="flex justify-between items-center mb-4">
+            <div class="card-title" style="margin-bottom:0"><span class="icon">🛰️</span> vCenter 최신 스냅샷 대비 직전 스냅샷</div>
+            <button class="btn btn-secondary btn-sm" onclick="loadDailyComparison('RVTOOLS')">새로고침</button>
+          </div>
+          <div id="daily-rvtools-summary" class="mb-4"></div>
+          <div class="table-wrap"><table><thead><tr><th>분류</th><th>자산키</th><th>이벤트</th><th>필드</th><th>이전</th><th>현재</th></tr></thead><tbody id="daily-rvtools-body"></tbody></table></div>
+        </div>
+      </div>
+      <div class="alert alert-info">비교 기준은 단순 달력 날짜 고정이 아니라 <strong>최신 정상 스냅샷과 직전 정상 스냅샷</strong>입니다. 매일 07:00 정상 수집되면 전일/오늘 비교가 되며, 전일 수집이 누락되면 화면에 실제 비교 날짜가 표시됩니다.</div>
+    </div>
+
+    <div class="tab-panel" id="sync-panel-changes">
+      <div class="card">
+        <div class="flex justify-between items-center mb-4">
+          <div class="card-title" style="margin-bottom:0"><span class="icon">🧾</span> 출처별 변경 이력</div>
+          <select class="form-select" id="sync-change-source" style="width:180px" onchange="loadSyncChanges()"><option value="">전체</option><option value="ITSM">ITSM</option><option value="RVTOOLS">vCenter</option></select>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th>시각</th><th>출처</th><th>자산키</th><th>이벤트</th><th>필드</th><th>이전</th><th>현재</th></tr></thead><tbody id="sync-changes-body"></tbody></table></div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="sync-panel-sync">
+      <div class="card">
+        <div class="flex justify-between items-center mb-4">
+          <div class="card-title" style="margin-bottom:0"><span class="icon">⚖️</span> vCenter 변경 ↔ ITSM 변경 동기화</div>
+          {% if user.role == 'admin' %}<button class="btn btn-primary btn-sm" onclick="evaluateTodaySync()">최근 24시간 판정</button>{% endif %}
+        </div>
+        <div class="alert alert-info">vCenter 변경과 ITSM 변경을 자산 식별값·변경유형·허용기간으로 연결합니다. CPU·MEM·IP 등 값까지 같아야 SYNCED로 판단합니다.</div>
+        <div class="table-wrap"><table><thead><tr><th>기간</th><th>자산</th><th>RV 이벤트</th><th>ITSM 이벤트</th><th>판정</th><th>상세</th></tr></thead><tbody id="sync-link-body"></tbody></table></div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="sync-panel-period">
+      <div class="card">
+        <div class="card-title"><span class="icon">📆</span> 일·주·월 기간 집계</div>
+        <div class="grid-4">
+          <div class="form-group"><label class="form-label">출처</label><select class="form-select" id="period-source"><option value="ITSM">ITSM</option><option value="RVTOOLS">vCenter</option></select></div>
+          <div class="form-group"><label class="form-label">구분</label><select class="form-select" id="period-mode" onchange="updatePeriodInputs()"><option value="daily">일별</option><option value="weekly" selected>주별(7일)</option><option value="monthly">월별</option><option value="custom">직접 지정</option></select></div>
+          <div class="form-group"><label class="form-label">기준일/시작일</label><input class="form-input" type="date" id="period-date1"></div>
+          <div class="form-group"><label class="form-label">종료일</label><input class="form-input" type="date" id="period-date2"></div>
+        </div>
+        <button class="btn btn-primary" onclick="loadPeriodSummary()">기간 분석</button>
+        <div id="period-result" class="result-box" style="display:none"></div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="sync-panel-runs">
+      <div class="card">
+        <div class="card-title"><span class="icon">🩺</span> 최근 수집 실행</div>
+        <div class="table-wrap"><table><thead><tr><th>시작</th><th>출처</th><th>상태</th><th>건수</th><th>성공 범위</th><th>실패 범위</th><th>오류</th></tr></thead><tbody id="sync-runs-body"></tbody></table></div>
+      </div>
+    </div>
+  </div>
+</div>
+

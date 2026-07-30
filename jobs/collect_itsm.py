@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from asset_sync.config import load_config
-from asset_sync.db.sqlite_manager import SQLiteManager
+from asset_sync.db.manager import create_manager
 from asset_sync.logging_config import configure_logging
 from asset_sync.services.collection_service import CollectionService
 
@@ -20,7 +20,7 @@ def main() -> None:
     args = parser.parse_args()
     cfg = load_config()
     configure_logging(cfg.resolve("logs"), cfg.log_level, cfg)
-    manager = SQLiteManager(cfg.database_path)
+    manager = create_manager(cfg)
     manager.initialize()
     result = CollectionService(cfg, manager).collect_itsm(mode=args.mode)
     print(json.dumps(result, ensure_ascii=False, default=str))

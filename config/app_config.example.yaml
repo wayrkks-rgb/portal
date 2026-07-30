@@ -2,6 +2,40 @@ app:
   timezone: Asia/Seoul
   sqlite_path: data/asset_history.db
   log_level: INFO
+database:
+  # sqlite: 단일 호스트/데모. mysql: 여러 WAS가 하나의 DB를 공유할 때.
+  engine: sqlite
+  mysql:
+    host: ''
+    port: 3306
+    database: ''
+    user: ''
+    password: ''
+    charset: utf8mb4
+    connect_timeout_seconds: 10
+modules:
+  # 대메뉴별 담당 WAS. base_url 이 비어 있으면 통합 웹 내부 모듈이다.
+  # 자세한 내용은 MODULE_INTEGRATION_GUIDE.md 참고.
+  request_timeout_seconds: 5
+  retry_count: 1
+  dashboard_budget_seconds: 12
+  max_response_bytes: 4194304
+  verify_tls: true
+  auth:
+    shared_secret: ''
+    token_ttl_seconds: 60
+    header: X-Portal-Token
+  registry:
+  - id: asset_sync
+    name: 자산 정합성
+    icon: 🔗
+    base_url: ''
+    enabled: true
+    required_role: user
+    menu_section: 운영
+    page: asset_sync
+    # role: required_role 로 판정(기본) · explicit: 사용자별 명시 부여가 있어야 접근
+    access: role
 oracle:
   enabled: true
   mode: thin

@@ -1,0 +1,77 @@
+{# 자동 분할된 파일입니다. 이 화면을 담당하는 팀이 이 파일만 수정하면 됩니다. #}
+<!-- ====== 보고서 ====== -->
+<div class="page {% if page=='report' %}active{% endif %}" id="page-report">
+  <div class="topbar">
+    <div>
+      <div class="topbar-title">보고서</div>
+      <div class="topbar-sub">자동수집된 ITSM·vCenter 데이터를 기준으로 보고서를 생성합니다.</div>
+    </div>
+  </div>
+  <div class="content">
+    <div class="card" id="resource-usage-section">
+      <div class="dashboard-section-head">
+        <div><div class="card-title" style="margin-bottom:4px"><span class="icon">🖥️</span> 통합서버 자원사용현황</div><div class="text-xs text-muted">07시 자동수집 결과를 기간별로 집계합니다. VM 소속과 실제 할당 CPU/MEM은 같은 배치의 최신 vCenter 인벤토리를 사용합니다.</div></div>
+        <button class="btn btn-primary btn-sm" onclick="exportResourceUsage()">Excel Export</button>
+      </div>
+      <div class="resource-filter-grid">
+        <div class="form-group"><label class="form-label">시작일</label><input class="form-input" type="date" id="resource-start"></div>
+        <div class="form-group"><label class="form-label">종료일</label><input class="form-input" type="date" id="resource-end"></div>
+        <div class="form-group"><label class="form-label">vCenter/서비스</label><select class="form-select" id="resource-vcenter"><option value="">전체</option></select></div>
+        <div class="form-group"><label class="form-label">Cluster</label><select class="form-select" id="resource-cluster"><option value="">전체</option></select></div>
+        <div class="form-group"><label class="form-label">통합기</label><select class="form-select" id="resource-host"><option value="">전체</option></select></div>
+      </div>
+      <div class="flex gap-2"><button class="btn btn-primary btn-sm" onclick="loadResourceUsage()">조회</button><span id="resource-result" class="text-xs text-muted" style="align-self:center"></span></div>
+      <div class="resource-summary-grid">
+        <div class="stat-card"><div class="stat-value" id="resource-host-count">-</div><div class="stat-label">통합기 수</div></div>
+        <div class="stat-card"><div class="stat-value" id="resource-vm-count">-</div><div class="stat-label">VM 수</div></div>
+        <div class="stat-card"><div class="stat-value" id="resource-scale-count">-</div><div class="stat-label">CPU/MEM 변경</div></div>
+        <div class="stat-card"><div class="stat-value" id="resource-vm-change-count">-</div><div class="stat-label">신규/삭제/이동</div></div>
+      </div>
+      <div class="resource-table-title">통합기별 자원사용현황</div>
+      <div class="resource-scroll"><table><thead><tr><th>서비스명</th><th>vCenter</th><th>Cluster</th><th>통합기</th><th>VM 대수</th><th>실제 CPU Core</th><th>실제 MEM(GB)</th><th>CPU MAX</th><th>CPU AVG</th><th>MEM MAX</th><th>MEM AVG</th></tr></thead><tbody id="resource-host-body"><tr><td colspan="11" style="text-align:center">조회 조건을 선택하세요.</td></tr></tbody></table></div>
+      <div class="resource-table-title">통합기 내 VM 자원사용현황</div>
+      <div class="resource-scroll"><table><thead><tr><th>서비스명</th><th>Cluster</th><th>통합기</th><th>VM명</th><th>상태</th><th>실제 CPU Core</th><th>실제 MEM(GB)</th><th>CPU MAX</th><th>CPU AVG</th><th>MEM MAX</th><th>MEM AVG</th></tr></thead><tbody id="resource-vm-body"><tr><td colspan="11" style="text-align:center">조회 조건을 선택하세요.</td></tr></tbody></table></div>
+      <div class="resource-table-title">VM 구성·할당 자원 변경 이력</div>
+      <div class="resource-scroll"><table><thead><tr><th>일시</th><th>vCenter</th><th>통합기</th><th>VM명</th><th>변경유형</th><th>필드</th><th>이전값</th><th>현재값</th></tr></thead><tbody id="resource-change-body"><tr><td colspan="8" style="text-align:center">조회 조건을 선택하세요.</td></tr></tbody></table></div>
+    </div>
+
+    <div class="card">
+      <div class="dashboard-section-head">
+        <div><div class="card-title" style="margin-bottom:4px"><span class="icon">📊</span> 자동 보고서 생성</div><div class="text-xs text-muted">수동 원본 업로드 없이 최신 정상 스냅샷과 선택 기간의 변경이력을 사용합니다.</div></div>
+        <div class="dashboard-filter">
+          <div class="form-group"><label class="form-label">시작일</label><input class="form-input" type="date" id="auto-report-start"></div>
+          <div class="form-group"><label class="form-label">종료일</label><input class="form-input" type="date" id="auto-report-end"></div>
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="stat-card clickable-stat" onclick="downloadAutoReport('server_status')"><div class="stat-value" style="font-size:22px">서버 현황</div><div class="stat-label">OS·IDC/DR·물리/논리·기간 변동</div></div>
+        <div class="stat-card clickable-stat" onclick="downloadAutoReport('physical')"><div class="stat-value" style="font-size:22px">물리 장비 현황</div><div class="stat-label">OS·IDC/DR·최근 3개월 대수 추이</div></div>
+        <div class="stat-card clickable-stat" onclick="downloadAutoReport('eosl')"><div class="stat-value" style="font-size:22px">EOSL 현황</div><div class="stat-label">종료·올해 종료·예정·미정·확인필요</div></div>
+        <div class="stat-card clickable-stat" onclick="openResourceUsage()"><div class="stat-value" style="font-size:22px">통합서버 자원현황</div><div class="stat-label">07시 자동수집 · 통합기/VM 실제 할당량과 Max/Avg</div></div>
+      </div>
+      <div id="auto-report-result" class="mt-4"></div>
+    </div>
+
+    <details>
+      <summary class="text-sm" style="cursor:pointer;font-weight:700">기존 수동 Excel 보조도구</summary>
+      <div class="alert alert-warning mt-4">자동 연동 전 과거 파일 재처리 또는 장애 분석 용도로만 사용합니다.</div>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title"><span class="icon">📥</span> AS-IS 파일</div>
+          <div class="upload-zone" id="asis-zone" onclick="document.getElementById('asis-input').click()" ondragover="handleDragOver(event,'asis-zone')" ondrop="handleDrop(event,'asis-input')" ondragleave="handleDragLeave(event,'asis-zone')"><div class="upload-icon">📂</div><div class="upload-title">과거 백데이터 업로드</div><div class="upload-sub">.xlsx</div></div>
+          <input type="file" id="asis-input" accept=".xlsx,.xls" style="display:none" onchange="uploadAsIs(this)"><div id="asis-result"></div>
+          <div style="margin-top:16px"><select class="form-select" id="asis-history-select" onchange="selectFromHistory('asis')"><option value="">-- 이전 업로드 파일 선택 --</option></select></div>
+        </div>
+        <div class="card">
+          <div class="card-title"><span class="icon">📤</span> TO-BE 양식</div>
+          <div class="upload-zone" id="tobe-zone" onclick="document.getElementById('tobe-input').click()" ondragover="handleDragOver(event,'tobe-zone')" ondrop="handleDrop(event,'tobe-input')" ondragleave="handleDragLeave(event,'tobe-zone')"><div class="upload-icon">📋</div><div class="upload-title">기존 보고서 양식 업로드</div><div class="upload-sub">.xlsx</div></div>
+          <input type="file" id="tobe-input" accept=".xlsx,.xls" style="display:none" onchange="uploadToBe(this)"><div id="tobe-result"></div>
+          <div style="margin-top:16px"><select class="form-select" id="tobe-history-select" onchange="selectFromHistory('tobe')"><option value="">-- 이전 업로드 파일 선택 --</option></select></div>
+        </div>
+      </div>
+      <div class="card"><div class="form-group"><label class="form-label">기존 매핑</label><select class="form-select" id="menu-select"><option value="vm_resource">x86 통합 자원사용률 상세 현황</option></select></div><button class="btn btn-secondary" id="generate-btn" onclick="generateReport()" disabled>기존 방식으로 생성</button></div>
+      <div id="generate-result" style="display:none"></div>
+    </details>
+  </div>
+</div>
+

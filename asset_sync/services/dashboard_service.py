@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from datetime import datetime, timedelta
 from typing import Any
 
 from ..repositories import AssetRepository
@@ -22,8 +23,12 @@ class DashboardService:
                 (latest_recon["created_at"],),
             ).fetchall()
             recon_counts = {row["match_status"]: row["cnt"] for row in rows}
+        # 경계값을 파이썬에서 만든다. datetime('now','-1 day') 는 SQLite 전용 문법이고,
+        # detected_at 은 두 엔진 모두 ISO 문자열로 저장되므로 문자열 비교로 충분하다.
+        since = (datetime.now() - timedelta(days=1)).isoformat()
         changes = self.repo.conn.execute(
-            "SELECT source, event_type, COUNT(*) AS cnt FROM change_event WHERE detected_at>=datetime('now','-1 day') GROUP BY source, event_type"
+            "SELECT source, event_type, COUNT(*) AS cnt FROM change_event WHERE detected_at>=? GROUP BY source, event_type",
+            (since,),
         ).fetchall()
         return {
             "latest_itsm": dict(itsm) if itsm else None,

@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from asset_sync.config import load_config
-from asset_sync.db.sqlite_manager import SQLiteManager
+from asset_sync.db.manager import create_manager
 
 
 def main() -> None:
@@ -31,7 +31,7 @@ def main() -> None:
         modules["oracledb"] = "NOT_INSTALLED (FILE_ONLY/DEMO 가능)"
 
     cfg = load_config()
-    manager = SQLiteManager(cfg.database_path)
+    manager = create_manager(cfg)
     manager.initialize()
     directories = [
         cfg.resolve("data/incoming/itsm"), cfg.resolve("data/incoming/vcenter"),
@@ -43,8 +43,8 @@ def main() -> None:
     result = {
         "python": sys.version,
         "modules": modules,
-        "database": str(cfg.database_path),
-        "database_exists": cfg.database_path.exists(),
+        "database": manager.describe(),
+        "database_engine": manager.engine,
         "itsm_mode": cfg.itsm.get("collection_mode"),
         "vcenter_mode": cfg.rvtools.get("collection_mode"),
         "directories": [str(path) for path in directories],

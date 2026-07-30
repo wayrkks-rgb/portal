@@ -2,6 +2,60 @@ app:
   timezone: Asia/Seoul
   sqlite_path: data/asset_history.db
   log_level: INFO
+database:
+  # sqlite: 단일 호스트/데모. mysql: 여러 WAS가 하나의 DB를 공유할 때.
+  engine: sqlite
+  mysql:
+    host: ''
+    port: 3306
+    database: ''
+    user: ''
+    password: ''
+    charset: utf8mb4
+    connect_timeout_seconds: 10
+modules:
+  # 대메뉴별 담당 WAS. base_url 이 비어 있으면 통합 웹 내부 모듈이다.
+  # 자세한 내용은 MODULE_INTEGRATION_GUIDE.md 참고.
+  request_timeout_seconds: 5
+  retry_count: 1
+  dashboard_budget_seconds: 12
+  max_response_bytes: 4194304
+  verify_tls: true
+  auth:
+    shared_secret: ''
+    token_ttl_seconds: 60
+    header: X-Portal-Token
+  # 새 대메뉴는 config/modules/<id>.yaml 로 추가한다. 여기 목록은 통합 웹이
+  # 직접 갖고 있는 대메뉴만 둔다. 자세한 내용은 config/modules/README.md 참고.
+  registry:
+  - id: asset_sync
+    name: 자산 정합성
+    icon: 🔗
+    base_url: ''
+    enabled: true
+    required_role: user
+    menu_section: 자산 관리
+    page: asset_sync
+    # role: required_role 로 판정(기본) · explicit: 사용자별 명시 부여가 있어야 접근
+    access: role
+    # 통합 대시보드 12칸 격자에서 차지할 크기
+    dashboard:
+      width: 4
+      height: 1
+    # 소메뉴. page 는 통합 웹이 이미 갖고 있는 화면 id 다.
+    children:
+    - id: asset_sync_status
+      name: 정합성 현황
+      icon: 📋
+      page: asset_sync
+    - id: asset_sync_compare
+      name: ITSM↔vCenter 비교
+      icon: 🔍
+      page: compare
+    - id: asset_sync_history
+      name: 수집 이력
+      icon: 🗃️
+      page: history
 oracle:
   enabled: true
   mode: thin

@@ -4,6 +4,7 @@ import copy
 import json
 import logging
 import socket
+from datetime import datetime
 from typing import Any
 
 from flask import Blueprint, jsonify, render_template, request, session
@@ -20,15 +21,18 @@ from ..collectors import (
     oracle_connection,
 )
 from ..config import AppConfig, load_config
-from ..db.sqlite_manager import SQLiteManager
+from ..db.manager import DatabaseManager
 from ..repositories import AssetRepository
 from ..settings_store import LocalSettingsStore, SettingsValidationError
 from ..web_common import admin_required
 
 LOGGER = logging.getLogger(__name__)
 
+# 감사 기록의 출처. 여러 WAS 가 같은 audit_log 를 공유하므로 모듈을 밝힌다.
+MODULE_ID = "asset_sync"
 
-def create_admin_blueprint(cfg: AppConfig, manager: SQLiteManager) -> Blueprint:
+
+def create_admin_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint:
     bp = Blueprint("asset_sync_admin", __name__)
     settings_store = LocalSettingsStore(cfg.root_dir)
 
@@ -497,7 +501,7 @@ def create_admin_blueprint(cfg: AppConfig, manager: SQLiteManager) -> Blueprint:
                         json.dumps(payload.get("config", {}), ensure_ascii=False),
                     ),
                 )
-                repo.audit(user, "CREATE", "data_quality_rule", str(cur.lastrowid), payload.get("reason"), {}, payload)
+                repo.audit(user, "CREATE", "data_quality_rule", str(cur.lastrowid), payload.get("reason"), {}, payload, module_id=MODULE_ID)
                 return jsonify({"success": True, "id": cur.lastrowid})
             rule_id = int(payload["id"])
             before = conn.execute("SELECT * FROM data_quality_rule WHERE id=?", (rule_id,)).fetchone()
@@ -509,7 +513,7 @@ def create_admin_blueprint(cfg: AppConfig, manager: SQLiteManager) -> Blueprint:
                     json.dumps(payload.get("config", {}), ensure_ascii=False), rule_id,
                 ),
             )
-            repo.audit(user, "UPDATE", "data_quality_rule", str(rule_id), payload.get("reason"), dict(before) if before else {}, payload)
+            repo.audit(user, "UPDATE", "data_quality_rule", str(rule_id), payload.get("reason"), dict(before) if before else {}, payload, module_id=MODULE_ID)
             return jsonify({"success": True})
 
     @bp.route("/api/admin/manual-overrides", methods=["GET", "POST", "PUT"])
@@ -523,13 +527,14 @@ def create_admin_blueprint(cfg: AppConfig, manager: SQLiteManager) -> Blueprint:
             user = str(session["user"].get("id") or session["user"].get("username"))
             if request.method == "POST":
                 cur = conn.execute(
-                    "INSERT INTO manual_asset_override(cm_id, field_name, override_value, reason, approval_status, valid_from, valid_to, created_by, created_at) VALUES (?, ?, ?, ?, 'DRAFT', ?, ?, ?, datetime('now'))",
+                    "INSERT INTO manual_asset_override(cm_id, field_name, override_value, reason, approval_status, valid_from, valid_to, created_by, created_at) VALUES (?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?)",
                     (
                         payload["cm_id"], payload["field_name"], payload.get("override_value"),
                         payload["reason"], payload.get("valid_from"), payload.get("valid_to"), user,
+                        datetime.now().isoformat(),
                     ),
                 )
-                repo.audit(user, "CREATE", "manual_asset_override", str(cur.lastrowid), payload["reason"], {}, payload)
+                repo.audit(user, "CREATE", "manual_asset_override", str(cur.lastrowid), payload["reason"], {}, payload, module_id=MODULE_ID)
                 return jsonify({"success": True, "id": cur.lastrowid})
             override_id = int(payload["id"])
             before = conn.execute("SELECT * FROM manual_asset_override WHERE id=?", (override_id,)).fetchone()
@@ -537,7 +542,7 @@ def create_admin_blueprint(cfg: AppConfig, manager: SQLiteManager) -> Blueprint:
                 "UPDATE manual_asset_override SET override_value=?, reason=?, valid_from=?, valid_to=? WHERE id=? AND approval_status IN ('DRAFT','REJECTED')",
                 (payload.get("override_value"), payload["reason"], payload.get("valid_from"), payload.get("valid_to"), override_id),
             )
-            repo.audit(user, "UPDATE", "manual_asset_override", str(override_id), payload["reason"], dict(before) if before else {}, payload)
+            repo.audit(user, "UPDATE", "manual_asset_override", str(override_id), payload["reason"], dict(before) if before else {}, payload, module_id=MODULE_ID)
             return jsonify({"success": True})
 
     def approve(override_id: int, status: str) -> Any:
@@ -549,10 +554,10 @@ def create_admin_blueprint(cfg: AppConfig, manager: SQLiteManager) -> Blueprint:
             if not before:
                 return jsonify({"error": "대상이 없습니다."}), 404
             conn.execute(
-                "UPDATE manual_asset_override SET approval_status=?, approved_by=?, approved_at=datetime('now') WHERE id=?",
-                (status, user, override_id),
+                "UPDATE manual_asset_override SET approval_status=?, approved_by=?, approved_at=? WHERE id=?",
+                (status, user, datetime.now().isoformat(), override_id),
             )
-            repo.audit(user, status, "manual_asset_override", str(override_id), payload.get("reason"), dict(before), {"approval_status": status})
+            repo.audit(user, status, "manual_asset_override", str(override_id), payload.get("reason"), dict(before), {"approval_status": status}, module_id=MODULE_ID)
         return jsonify({"success": True})
 
     @bp.route("/api/admin/manual-overrides/<int:override_id>/approve", methods=["POST"])
@@ -568,10 +573,28 @@ def create_admin_blueprint(cfg: AppConfig, manager: SQLiteManager) -> Blueprint:
     @bp.route("/api/admin/audit-log")
     @admin_required
     def audit_log() -> Any:
+        limit = min(int(request.args.get("limit", 1000)), 10000)
+        module_filter = str(request.args.get("module_id") or "").strip().lower()
+        with manager.connect() as conn:
+            if module_filter:
+                rows = conn.execute(
+                    "SELECT * FROM audit_log WHERE module_id=? ORDER BY created_at DESC LIMIT ?",
+                    (module_filter, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM audit_log ORDER BY created_at DESC LIMIT ?", (limit,)
+                ).fetchall()
+            return jsonify([dict(row) for row in rows])
+
+    @bp.route("/api/admin/audit-log/modules")
+    @admin_required
+    def audit_log_modules() -> Any:
+        """감사로그에 기록을 남긴 모듈 목록. 여러 WAS 가 쓰기 시작하면 필터가 필요하다."""
         with manager.connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM audit_log ORDER BY created_at DESC LIMIT ?",
-                (min(int(request.args.get("limit", 1000)), 10000),),
+                "SELECT module_id, COUNT(*) AS cnt, MAX(created_at) AS last_at"
+                " FROM audit_log GROUP BY module_id ORDER BY cnt DESC"
             ).fetchall()
             return jsonify([dict(row) for row in rows])
 

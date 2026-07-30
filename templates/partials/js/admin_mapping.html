@@ -1,0 +1,204 @@
+{# 매핑 관리 · 시트-VM 매핑 스크립트 #}
+<script>
+// ── 매핑 관리 ──
+async function loadMenus() {
+  const data = await fetch('/api/mappings').then(r=>r.json());
+  state.menus = data.menus;
+  // 보고서 메뉴 셀렉트 업데이트
+  const sel = document.getElementById('menu-select');
+  if(sel) sel.innerHTML = data.menus.map(m=>`<option value="${m.id}">${m.name}</option>`).join('');
+
+  const container = document.getElementById('menu-list');
+  if(!container) return;
+  container.innerHTML = data.menus.map(m=>`
+    <div class="card" style="position:relative">
+      <div class="flex justify-between items-center mb-4">
+        <div>
+          <div style="font-size:15px;font-weight:700">${m.name}</div>
+          <div class="text-xs text-muted mono mt-4">ID: ${m.id}</div>
+        </div>
+        <div class="flex gap-2">
+          <button class="btn btn-secondary btn-sm" onclick="openSheetVmModal('${m.id}')">🗂️ 시트-VM 매핑</button>
+          <button class="btn btn-secondary btn-sm" onclick="openEditMenuModal('${m.id}')">✏️ 수정</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteMenu('${m.id}')">삭제</button>
+        </div>
+      </div>
+      <div class="grid-2" style="font-size:12px;gap:16px">
+        <div style="background:var(--surface2);padding:12px;border-radius:8px">
+          <div style="color:var(--accent);font-weight:700;margin-bottom:8px">📥 AS-IS 설정</div>
+          <div>헤더 행: <span class="mono">${m.asis_header_row}행</span></div>
+          <div>VM명 열: <span class="mono">${m.asis_col_vm}</span> | CPU MAX: <span class="mono">${m.asis_col_cpu_max}</span> | CPU AVG: <span class="mono">${m.asis_col_cpu_avg}</span></div>
+          <div>MEM MAX: <span class="mono">${m.asis_col_mem_max}</span> | MEM AVG: <span class="mono">${m.asis_col_mem_avg}</span></div>
+        </div>
+        <div style="background:var(--surface2);padding:12px;border-radius:8px">
+          <div style="color:var(--accent2);font-weight:700;margin-bottom:8px">📤 TO-BE 설정</div>
+          <div>데이터 시작: <span class="mono">${m.tobe_data_start_row}행</span> | 대수표시: <span class="mono">${m.tobe_count_row}행</span></div>
+          <div>VM명 열: <span class="mono">${m.tobe_col_vm}</span> | CPU MAX: <span class="mono">${m.tobe_col_cpu_max}</span> | CPU AVG: <span class="mono">${m.tobe_col_cpu_avg}</span></div>
+          <div>MEM MAX: <span class="mono">${m.tobe_col_mem_max}</span> | MEM AVG: <span class="mono">${m.tobe_col_mem_avg}</span></div>
+        </div>
+      </div>
+      <div class="mt-4">
+        <span class="text-xs text-muted">시트-VM 매핑: </span>
+        <span class="badge badge-purple">${m.sheet_vm_mappings?m.sheet_vm_mappings.length:0}개 시트 설정됨</span>
+      </div>
+    </div>`).join('') || '<div class="card" style="text-align:center;color:var(--text-muted);padding:40px">메뉴가 없습니다. 상단의 [+ 메뉴 추가]를 클릭하세요.</div>';
+}
+
+function openAddMenuModal() {
+  document.getElementById('modal-menu-title').textContent = '메뉴 추가';
+  document.getElementById('edit-menu-id').value = '';
+  document.getElementById('menu-name').value = '';
+  ['asis-header-row','asis-col-vm','asis-col-cpu-max','asis-col-cpu-avg','asis-col-mem-max','asis-col-mem-avg',
+   'tobe-data-start-row','tobe-count-row','tobe-col-vm','tobe-col-cpu-max','tobe-col-cpu-avg','tobe-col-mem-max','tobe-col-mem-avg']
+  .forEach(id => {
+    const defaults = {'asis-header-row':'1','asis-col-vm':'A','asis-col-cpu-max':'B','asis-col-cpu-avg':'C','asis-col-mem-max':'D','asis-col-mem-avg':'E','tobe-data-start-row':'7','tobe-count-row':'3','tobe-col-vm':'B','tobe-col-cpu-max':'E','tobe-col-cpu-avg':'F','tobe-col-mem-max':'G','tobe-col-mem-avg':'H'};
+    document.getElementById(id).value = defaults[id] || '';
+  });
+  showModalMenu();
+}
+
+function openEditMenuModal(menuId) {
+  const m = state.menus.find(x=>x.id===menuId);
+  if(!m) return;
+  document.getElementById('modal-menu-title').textContent = '메뉴 수정';
+  document.getElementById('edit-menu-id').value = m.id;
+  document.getElementById('menu-name').value = m.name;
+  document.getElementById('asis-header-row').value = m.asis_header_row;
+  document.getElementById('asis-col-vm').value = m.asis_col_vm;
+  document.getElementById('asis-col-cpu-max').value = m.asis_col_cpu_max;
+  document.getElementById('asis-col-cpu-avg').value = m.asis_col_cpu_avg;
+  document.getElementById('asis-col-mem-max').value = m.asis_col_mem_max;
+  document.getElementById('asis-col-mem-avg').value = m.asis_col_mem_avg;
+  document.getElementById('tobe-data-start-row').value = m.tobe_data_start_row;
+  document.getElementById('tobe-count-row').value = m.tobe_count_row;
+  document.getElementById('tobe-col-vm').value = m.tobe_col_vm;
+  document.getElementById('tobe-col-cpu-max').value = m.tobe_col_cpu_max;
+  document.getElementById('tobe-col-cpu-avg').value = m.tobe_col_cpu_avg;
+  document.getElementById('tobe-col-mem-max').value = m.tobe_col_mem_max;
+  document.getElementById('tobe-col-mem-avg').value = m.tobe_col_mem_avg;
+  showModalMenu();
+}
+
+function showModalMenu() {
+  document.getElementById('modal-sheet-vm').style.display='none';
+  document.getElementById('modal-user').style.display='none';
+  document.getElementById('modal-menu').style.display='block';
+  document.getElementById('modal-overlay').classList.add('show');
+}
+
+async function saveMenu() {
+  const editId = document.getElementById('edit-menu-id').value;
+  const payload = {
+    name: document.getElementById('menu-name').value,
+    asis_header_row: parseInt(document.getElementById('asis-header-row').value),
+    asis_col_vm: document.getElementById('asis-col-vm').value.toUpperCase(),
+    asis_col_cpu_max: document.getElementById('asis-col-cpu-max').value.toUpperCase(),
+    asis_col_cpu_avg: document.getElementById('asis-col-cpu-avg').value.toUpperCase(),
+    asis_col_mem_max: document.getElementById('asis-col-mem-max').value.toUpperCase(),
+    asis_col_mem_avg: document.getElementById('asis-col-mem-avg').value.toUpperCase(),
+    tobe_data_start_row: parseInt(document.getElementById('tobe-data-start-row').value),
+    tobe_count_row: parseInt(document.getElementById('tobe-count-row').value),
+    tobe_col_vm: document.getElementById('tobe-col-vm').value.toUpperCase(),
+    tobe_col_cpu_max: document.getElementById('tobe-col-cpu-max').value.toUpperCase(),
+    tobe_col_cpu_avg: document.getElementById('tobe-col-cpu-avg').value.toUpperCase(),
+    tobe_col_mem_max: document.getElementById('tobe-col-mem-max').value.toUpperCase(),
+    tobe_col_mem_avg: document.getElementById('tobe-col-mem-avg').value.toUpperCase(),
+  };
+  if(editId) {
+    await fetch(`/api/mappings/menu/${editId}`, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+  } else {
+    payload.id = 'menu_' + Date.now();
+    await fetch('/api/mappings/menu', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+  }
+  closeModalDirect(); loadMenus();
+}
+
+async function deleteMenu(menuId) {
+  if(!confirm('이 메뉴를 삭제하시겠습니까?')) return;
+  await fetch(`/api/mappings/menu/${menuId}`, {method:'DELETE'});
+  loadMenus();
+}
+
+// ── 시트-VM 매핑 ──
+function openSheetVmModal(menuId) {
+  const m = state.menus.find(x=>x.id===menuId);
+  if(!m) return;
+  document.getElementById('svm-menu-id').value = menuId;
+
+  // TO-BE 이력에서 시트 목록 가져오기 (없으면 기존 매핑에서)
+  const existingMappings = m.sheet_vm_mappings || [];
+  const existingSheets = existingMappings.map(s=>s.sheet_name);
+
+  // 기존 시트 목록 + 새 시트 추가 입력
+  const listEl = document.getElementById('sheet-vm-list');
+  listEl.innerHTML = '';
+
+  if(existingSheets.length === 0) {
+    listEl.innerHTML = `
+      <div class="alert alert-warning">아직 시트 매핑이 없습니다. TO-BE 파일을 먼저 업로드하고 아래에서 시트명을 추가하세요.</div>`;
+  }
+
+  existingMappings.forEach(svm => {
+    addSheetVmRow(listEl, svm.sheet_name, svm.vm_list.join('\n'));
+  });
+
+  // 새 시트 추가 버튼
+  listEl.innerHTML += `
+    <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+      <div class="form-label">새 시트 추가</div>
+      <div class="flex gap-2">
+        <input type="text" class="form-input" id="new-sheet-name" placeholder="시트명 (예: Windows 통합기 #1)">
+        <button class="btn btn-secondary" onclick="addNewSheetRow()">추가</button>
+      </div>
+    </div>`;
+
+  document.getElementById('modal-menu').style.display='none';
+  document.getElementById('modal-user').style.display='none';
+  document.getElementById('modal-sheet-vm').style.display='block';
+  document.getElementById('modal-overlay').classList.add('show');
+}
+
+function addSheetVmRow(container, sheetName, vmText='') {
+  const div = document.createElement('div');
+  div.className = 'card';
+  div.style.marginBottom = '12px';
+  div.dataset.sheet = sheetName;
+  div.innerHTML = `
+    <div class="flex justify-between items-center mb-4">
+      <div style="font-size:13px;font-weight:700">${sheetName}</div>
+      <button class="btn btn-danger btn-sm" onclick="this.closest('[data-sheet]').remove()">삭제</button>
+    </div>
+    <div class="form-label">VM 목록 (한 줄에 하나씩, AS-IS의 VMName과 정확히 일치해야 함)</div>
+    <textarea class="form-input vm-list-input" placeholder="designfile&#10;esbtest01&#10;hli-mobileapp1">${vmText}</textarea>`;
+  const existingCards = container.querySelectorAll('[data-sheet]');
+  if(existingCards.length > 0) {
+    container.insertBefore(div, existingCards[existingCards.length-1].nextSibling);
+  } else {
+    container.insertBefore(div, container.firstChild?.nextSibling || null);
+  }
+}
+
+function addNewSheetRow() {
+  const name = document.getElementById('new-sheet-name').value.trim();
+  if(!name) return;
+  const listEl = document.getElementById('sheet-vm-list');
+  addSheetVmRow(listEl, name);
+  document.getElementById('new-sheet-name').value = '';
+}
+
+async function saveSheetVmAll() {
+  const menuId = document.getElementById('svm-menu-id').value;
+  const rows = document.querySelectorAll('#sheet-vm-list [data-sheet]');
+  for(const row of rows) {
+    const sheetName = row.dataset.sheet;
+    const vmText = row.querySelector('textarea').value;
+    const vmList = vmText.split('\n').map(v=>v.trim()).filter(v=>v);
+    await fetch('/api/mappings/sheet-vm', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({menu_id:menuId, sheet_name:sheetName, vm_list:vmList})
+    });
+  }
+  closeModalDirect(); loadMenus();
+}
+
+</script>

@@ -1,0 +1,189 @@
+{# 자동 분할된 파일입니다. 이 화면을 담당하는 팀이 이 파일만 수정하면 됩니다. #}
+{# 관리자 전용 화면. 분할 전에는 하나의 if 블록이 여러 화면을 감싸고 있었다. #}
+<!-- ====== 관리 - 외부 연동 설정 ====== -->
+{% if user.role == 'admin' %}
+<div class="page {% if page=='integration_settings' %}active{% endif %}" id="page-integration_settings">
+  <div class="topbar">
+    <div>
+      <div class="topbar-title">연동정보 관리</div>
+      <div class="topbar-sub">Oracle 직접조회와 PowerCLI vCenter 자동수집 정보를 등록하며 다음 일일 배치부터 적용됩니다</div>
+    </div>
+    <div class="flex gap-2">
+      <button class="btn btn-secondary btn-sm" id="btn-reload-modules" onclick="reloadModuleRegistry()">대메뉴 다시 읽기</button>
+      <button class="btn btn-secondary btn-sm" id="btn-reload-integrations" onclick="loadIntegrationSettings(true)">저장값 다시 불러오기</button>
+    </div>
+  </div>
+  <div class="content">
+    <div id="integration-settings-alert"></div>
+    <div class="alert alert-warning">⚠️ 운영 기본은 Oracle 직접조회와 PowerCLI vCenter 직접수집입니다. FILE_ONLY는 장애분석용 보조 모드이며, 작업 스케줄러는 서버에서 1회 등록합니다.</div>
+
+    <div class="card">
+      <div class="integration-card-head">
+        <div>
+          <div class="card-title" style="margin-bottom:4px"><span class="icon">🗄️</span> Oracle ITSM</div>
+          <div class="text-xs text-muted">Oracle 설정 저장과 연결 테스트는 vCenter 설정과 완전히 분리되어 실행됩니다.</div>
+        </div>
+        <div class="integration-card-actions">
+          <button type="button" class="btn btn-secondary btn-sm" id="btn-test-oracle-connection" onclick="testOracleIntegration('CONNECTION')">접속 테스트</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="btn-test-oracle" onclick="testOracleIntegration('ASSET_QUERY')">자산 조회 테스트</button>
+          <button type="button" class="btn btn-primary btn-sm" id="btn-save-oracle" onclick="saveOracleSettings()">Oracle 설정 저장</button>
+        </div>
+      </div>
+      <div id="oracle-action-result" class="action-result" aria-live="polite"></div>
+      <div class="alert alert-info" style="margin-bottom:16px">
+        <strong>서비스명</strong>은 Oracle 서버명이나 IP가 아니라 DBA가 제공하는 <code>SERVICE_NAME</code>입니다.
+        일반적으로 tnsnames.ora의 <code>SERVICE_NAME</code> 값이며, 예시는 <code>ORCLPDB1</code> 형태입니다.
+      </div>
+      <div class="grid-3">
+        <div class="form-group"><label class="form-label">Host 또는 VIP <span class="text-danger">*</span></label><input class="form-input" id="int-oracle-host" placeholder="Oracle 접속 IP 또는 VIP"></div>
+        <div class="form-group"><label class="form-label">Port <span class="text-danger">*</span></label><input class="form-input" id="int-oracle-port" value="1521" placeholder="1521"></div>
+        <div class="form-group"><label class="form-label">Oracle 서비스명 <span class="text-danger">*</span></label><input class="form-input" id="int-oracle-service" placeholder="DBA에게 확인한 SERVICE_NAME"></div>
+        <div class="form-group"><label class="form-label">조회 계정 <span class="text-danger">*</span></label><input class="form-input" id="int-oracle-user" placeholder="읽기 전용 Oracle 계정"></div>
+        <div class="form-group"><label class="form-label">비밀번호 <span class="text-danger">*</span></label><input type="password" class="form-input" id="int-oracle-password" placeholder="비워두면 저장된 값 유지"></div>
+      </div>
+      <details style="margin-top:14px">
+        <summary class="text-sm" style="cursor:pointer;font-weight:700">고급 연결 옵션 · 일반적으로 입력하지 않음</summary>
+        <div class="grid-3" style="margin-top:14px">
+          <div class="form-group"><label class="form-label">DSN</label><input class="form-input" id="int-oracle-dsn" placeholder="RAC/이중화에서 DBA가 DSN을 제공한 경우"></div>
+          <div class="form-group"><label class="form-label">SID</label><input class="form-input" id="int-oracle-sid" placeholder="Service Name 대신 SID를 사용하는 경우"></div>
+          <div class="form-group"><label class="form-label">접속 방식</label><select class="form-select" id="int-oracle-mode"><option value="thin">Thin · 기본</option><option value="thick">Thick · Instant Client 사용</option></select></div>
+          <div class="form-group"><label class="form-label">Oracle Client 경로</label><input class="form-input" id="int-oracle-client" placeholder="Thick 방식에서만 입력"></div>
+        </div>
+      </details>
+      <div class="text-xs text-muted" style="margin-top:12px">자산 조회 SQL과 파일 경로는 서버 내부 설정으로 관리합니다. 조회 대상 Table/View는 아래 [자산 테이블 찾기]에서 선택합니다.</div>
+    </div>
+
+    <div class="card">
+      <div class="integration-card-head">
+        <div>
+          <div class="card-title" style="margin-bottom:4px"><span class="icon">🔎</span> Oracle 자산 테이블 찾기</div>
+          <div class="text-xs text-muted">접속한 DB에서 조회 계정이 볼 수 있는 테이블/뷰를 확인하고 자산 원본으로 지정합니다.</div>
+        </div>
+        <div class="integration-card-actions">
+          <button type="button" class="btn btn-secondary btn-sm" id="btn-oracle-suggest" onclick="suggestOracleAssetSource()">자산 테이블 추천</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="btn-oracle-tables" onclick="loadOracleTables()">테이블 목록 조회</button>
+        </div>
+      </div>
+      <div id="oracle-catalog-result" class="action-result" aria-live="polite"></div>
+      <div class="alert alert-info" style="margin-bottom:16px">
+        자산 조회가 <code>ORA-00942</code>(테이블 없음)로 실패하면 여기에서 실제 테이블을 찾아 <strong>자산 원본으로 적용</strong>하세요.
+        선택한 테이블의 컬럼에 맞춰 조회 SQL이 자동 생성되며, 없는 컬럼은 <code>NULL</code>로 채워 필수 컬럼 검증을 통과시킵니다.
+      </div>
+      <div class="text-xs text-muted" style="margin-bottom:10px">현재 자산 원본: <span class="mono" id="oracle-current-asset-source">미지정</span></div>
+      <div class="grid-3">
+        <div class="form-group"><label class="form-label">테이블명 검색어</label><input class="form-input" id="int-oracle-table-keyword" placeholder="예: ASSET, CMDB, SERVER" onkeydown="if(event.key==='Enter'){event.preventDefault();loadOracleTables();}"></div>
+        <div class="form-group"><label class="form-label">소유자(스키마)</label><input class="form-input" id="int-oracle-table-owner" placeholder="비워두면 접근 가능한 전체 스키마"></div>
+        <div class="form-group"><label class="form-label">조회 건수</label><input class="form-input" id="int-oracle-table-limit" value="200" placeholder="200"></div>
+      </div>
+      <div class="table-wrap" style="margin-top:8px;max-height:320px;overflow-y:auto">
+        <table><thead><tr><th>소유자</th><th>테이블/뷰</th><th>유형</th><th>행수(통계)</th><th>설명</th><th>선택</th></tr></thead>
+        <tbody id="oracle-table-body"><tr><td colspan="6" style="text-align:center" class="text-muted">테이블 목록 조회 또는 자산 테이블 추천을 실행하세요.</td></tr></tbody></table>
+      </div>
+      <div id="oracle-table-detail" style="margin-top:16px"></div>
+    </div>
+
+    <div class="card">
+      <div class="integration-card-head">
+        <div>
+          <div class="card-title" style="margin-bottom:4px"><span class="icon">🛰️</span> vCenter 연결 관리</div>
+          <div class="text-xs text-muted">vCenter마다 접속 주소와 조회 계정을 등록합니다. PowerCLI 실행경로와 파일 보관경로는 서버 내부 설정을 사용합니다.</div>
+        </div>
+        <div class="integration-card-actions">
+          <button type="button" class="btn btn-secondary btn-sm" onclick="toggleVCenterBulkPanel()">일괄 등록</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="btn-test-vcenters" onclick="testAllVCenterIntegrations()">전체 연결 테스트</button>
+          <button type="button" class="btn btn-primary btn-sm" id="btn-save-vcenters" onclick="saveVCenterSettings()">목록 전체 저장</button>
+        </div>
+      </div>
+      <div id="vcenter-action-result" class="action-result" aria-live="polite"></div>
+
+      <div class="alert alert-info" style="margin-bottom:16px">
+        기본 입력은 <strong>표시명, vCenter IP/FQDN, 조회계정, 비밀번호</strong>입니다.
+        저장 전에도 연결 테스트를 실행할 수 있으며 TCP 443, PowerCLI 모듈, 로그인, VM 조회까지 확인합니다.
+      </div>
+
+      <!-- PowerCLI 실행경로·스크립트·보관폴더는 운영자가 입력하지 않습니다.
+           기존 서버 설정을 유지하기 위한 비표시 값입니다. -->
+      <div style="display:none" aria-hidden="true">
+        <select id="int-rv-mode"><option value="POWERCLI">POWERCLI</option><option value="DEMO">DEMO</option><option value="FILE_ONLY">FILE_ONLY</option></select>
+        <input id="int-rv-executable" value="powershell.exe">
+        <input id="int-rv-script" value="scripts/collect_vcenter_inventory.ps1">
+        <input id="int-rv-snapshot" value="data/archive/vcenter">
+        <input id="int-rv-incoming" value="data/temp/powercli">
+        <select id="int-rv-export-xlsx"><option value="true">true</option><option value="false">false</option></select>
+        <input id="int-rv-default-port" value="443">
+        <input id="int-rv-suffixes" value="">
+        <input id="int-rv-timeout" value="1800">
+        <input id="int-rv-retry" value="1">
+        <select id="int-rv-default-auth"><option value="CREDENTIAL">CREDENTIAL</option><option value="PASS_THROUGH">PASS_THROUGH</option></select>
+        <input id="int-rv-default-user" value="">
+        <input type="password" id="int-rv-default-password" value="">
+        <select id="int-rv-default-ssl"><option value="false">false</option><option value="true">true</option></select>
+      </div>
+
+      <div class="vc-settings-grid">
+        <div class="vc-editor-panel">
+          <div class="vc-panel-title"><span>vCenter 등록·수정</span><button type="button" class="btn btn-secondary btn-sm" onclick="resetVCenterEditor()">새 vCenter</button></div>
+          <input type="hidden" id="vc-editor-index" value="-1">
+          <input type="hidden" id="vc-edit-id" value="">
+          <input type="hidden" id="vc-edit-profile" value="CUSTOM">
+
+          <div class="grid-2">
+            <div class="form-group"><label class="form-label">표시명 <span class="text-danger">*</span></label><input class="form-input" id="vc-edit-name" placeholder="예: 운영 vCenter"></div>
+            <div class="form-group"><label class="form-label">vCenter IP / FQDN <span class="text-danger">*</span></label><input class="form-input" id="vc-edit-server" placeholder="vCenter 관리 IP 또는 FQDN"></div>
+            <div class="form-group"><label class="form-label">조회 계정 <span class="text-danger">*</span></label><input class="form-input" id="vc-edit-user" placeholder="PowerCLI 조회 전용 계정" oninput="promoteVCenterToCustomAuth()"></div>
+            <div class="form-group"><label class="form-label">비밀번호 <span class="text-danger">*</span></label><input type="password" class="form-input" id="vc-edit-password" placeholder="등록 또는 변경할 때 입력" oninput="promoteVCenterToCustomAuth()"></div>
+          </div>
+
+          <details style="margin-top:4px">
+            <summary class="text-sm" style="cursor:pointer;font-weight:700">고급 연결 옵션 · 일반적으로 변경하지 않음</summary>
+            <div class="grid-2" style="margin-top:14px">
+              <div class="form-group"><label class="form-label">HTTPS Port</label><input type="number" class="form-input" id="vc-edit-port" value="443"></div>
+              <div class="form-group"><label class="form-label">사이트 구분</label><input class="form-input" id="vc-edit-site" placeholder="예: PROD / DR"></div>
+              <div class="form-group"><label class="form-label">인증방식</label><select class="form-select" id="vc-edit-auth" onchange="updateVCenterEditorAuthFields()"><option value="CREDENTIAL">vCenter 계정</option><option value="PASS_THROUGH">Windows 실행계정 사용</option></select></div>
+              <div class="form-group"><label class="form-label">인증서 검사</label><select class="form-select" id="vc-edit-ssl"><option value="false">정상 검사</option><option value="true">내부 인증서 검사 제외</option></select></div>
+              <div class="form-group"><label class="form-label">자동수집 사용</label><select class="form-select" id="vc-edit-enabled"><option value="true">사용</option><option value="false">사용 안 함</option></select></div>
+            </div>
+          </details>
+
+          <div id="vcenter-editor-status" class="vc-inline-status">정보를 입력한 뒤 <strong>연결 테스트</strong> 또는 <strong>vCenter 저장</strong>을 선택하세요.</div>
+          <div class="vc-editor-actions">
+            <button type="button" class="btn btn-primary" id="btn-apply-vcenter-editor" onclick="saveCurrentVCenter()">vCenter 저장</button>
+            <button type="button" class="btn btn-secondary" id="btn-test-vcenter-editor" onclick="testVCenterEditor()">연결 테스트</button>
+            <button type="button" class="btn btn-secondary" onclick="resetVCenterEditor()">입력 초기화</button>
+          </div>
+        </div>
+
+        <div class="vc-list-panel">
+          <div class="vc-panel-title"><span>등록된 vCenter <span id="vcenter-count" class="badge badge-blue">0</span></span><div class="flex gap-2"><button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('vcenter-csv-file').click()">CSV</button><input type="file" id="vcenter-csv-file" accept=".csv,.txt" style="display:none" onchange="importVCenterFile(this)"></div></div>
+          <div id="integration-vcenter-list" class="vc-list"></div>
+        </div>
+      </div>
+
+      <div id="vcenter-bulk-panel" class="card" style="display:none;background:var(--surface2);margin-top:16px;margin-bottom:0">
+        <div class="card-title">vCenter 목록 일괄 등록</div>
+        <div class="text-xs text-muted mb-4">표시명, 주소, 사이트(선택) 순서로 입력합니다. 보안상 비밀번호는 일괄 입력하지 않으며, 등록 후 각 항목에서 계정을 입력합니다.</div>
+        <textarea class="form-input mono" id="vcenter-bulk-text" rows="6" placeholder="운영 vCenter 1,&lt;VCENTER_ADDRESS_001&gt;,PROD
+DR vCenter,&lt;VCENTER_ADDRESS_002&gt;,DR"></textarea>
+        <div class="flex gap-2 mt-4"><button type="button" class="btn btn-primary btn-sm" onclick="applyVCenterBulkText()">목록에 추가</button><button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('vcenter-bulk-text').value=''">초기화</button></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="integration-card-head">
+        <div>
+          <div class="card-title" style="margin-bottom:4px"><span class="icon">⏰</span> 일일 실행 및 로그</div>
+          <div class="text-xs text-muted">작업 스케줄 시간과 로그 마스킹 설정만 별도로 저장합니다.</div>
+        </div>
+        <div class="integration-card-actions"><button type="button" class="btn btn-primary btn-sm" id="btn-save-runtime" onclick="saveRuntimeSettings()">실행 설정 저장</button></div>
+      </div>
+      <div id="runtime-action-result" class="action-result" aria-live="polite"></div>
+      <div class="grid-3">
+        <div class="form-group"><label class="form-label">매일 실행 시각</label><input type="time" class="form-input" id="int-schedule-time" value="07:00"></div>
+        <div class="form-group"><label class="form-label">작업명</label><input class="form-input" id="int-schedule-name" value="AssetDailyCollection"></div>
+        <div class="form-group"><label class="form-label">로그 마스킹</label><select class="form-select" id="int-mask-logs"><option value="true">사용</option><option value="false">사용 안 함</option></select></div>
+      </div>
+      <div class="alert alert-info">오전 7시 작업은 Windows 작업 스케줄러가 run_daily_batch.bat를 호출합니다. 관리자 PowerShell에서 <span class="mono">scripts\register_daily_task.ps1 -RunTime "07:00" -RunAsUser "&lt;TASK_SCHEDULER_SERVICE_ACCOUNT&gt;"</span>로 1회 등록합니다.</div>
+    </div>
+  </div>
+</div>
+{% endif %}

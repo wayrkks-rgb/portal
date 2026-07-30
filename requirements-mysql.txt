@@ -1,0 +1,3 @@
+-r requirements.txt
+# 순수 파이썬 드라이버라 폐쇄망에 wheel 하나만 반입하면 되고 컴파일러가 필요 없다.
+PyMySQL>=1.1,<2

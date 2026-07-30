@@ -1,0 +1,18 @@
+{# 파일 이력 스크립트 #}
+<script>
+// ── 파일 이력 ──
+async function loadHistory() {
+  const hist = await fetch('/api/history').then(r=>r.json());
+  const tbody = document.getElementById('history-table-body');
+  if(!hist.length){tbody.innerHTML='<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:32px">이력이 없습니다</td></tr>';return;}
+  tbody.innerHTML = hist.map(h=>`
+    <tr>
+      <td class="mono" style="font-size:12px">${h.filename}</td>
+      <td><span class="badge ${h.type==='asis'?'badge-blue':'badge-green'}">${h.type.toUpperCase()}</span></td>
+      <td class="text-sm">${h.row_count?h.row_count+'개 VM':h.sheet_count?h.sheet_count+'개 시트':'-'}</td>
+      <td style="font-size:12px">${new Date(h.uploaded_at).toLocaleString('ko-KR')}</td>
+      <td>${h.uploaded_by}</td>
+    </tr>`).join('');
+}
+
+</script>

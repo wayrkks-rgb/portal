@@ -16,6 +16,8 @@ class AppConfig:
     timezone: str = "Asia/Seoul"
     sqlite_path: Path = Path("data/asset_history.db")
     log_level: str = "INFO"
+    database: dict[str, Any] = field(default_factory=dict)
+    modules: dict[str, Any] = field(default_factory=dict)
     oracle: dict[str, Any] = field(default_factory=dict)
     itsm: dict[str, Any] = field(default_factory=dict)
     rvtools: dict[str, Any] = field(default_factory=dict)
@@ -52,6 +54,36 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         raise ValueError(f"YAML 최상위 값은 객체여야 합니다: {path}")
     return loaded
+
+
+def load_module_registry_files(root: Path) -> list[dict[str, Any]]:
+    """``config/modules/<id>.yaml`` 을 모아 대메뉴 정의 목록으로 돌려준다.
+
+    담당자마다 ``config/app_config.yaml`` 의 ``modules.registry`` 를 고치면 branch
+    병합에서 매번 같은 목록에서 충돌한다. 그래서 각자 파일 하나만 추가한다.
+
+    ``<id>.local.yaml`` 은 같은 모듈에 대한 배포 환경별 덮어쓰기다(주로 ``base_url``).
+    git 에 올리지 않으므로 담당자의 개발 주소가 저장소에 섞이지 않는다.
+    """
+    directory = root / "config" / "modules"
+    if not directory.is_dir():
+        return []
+    definitions: list[dict[str, Any]] = []
+    for path in sorted(directory.glob("*.yaml")):
+        if path.name.startswith("_") or path.name.endswith(".local.yaml"):
+            continue
+        module_id = path.stem
+        item = _load_yaml(path)
+        item = _deep_merge(item, _load_yaml(directory / f"{module_id}.local.yaml"))
+        declared = str(item.get("id") or "").strip()
+        if declared and declared != module_id:
+            raise ValueError(
+                f"{path.name}: id 가 파일 이름과 다릅니다 ({declared!r} != {module_id!r}). "
+                "파일 하나가 대메뉴 하나이므로 이름을 맞춰야 어느 파일이 무엇인지 알 수 있습니다."
+            )
+        item["id"] = module_id
+        definitions.append(item)
+    return definitions
 
 
 def _load_dotenv(path: Path) -> dict[str, str]:
@@ -99,6 +131,46 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             "timezone": "Asia/Seoul",
             "sqlite_path": "data/asset_history.db",
             "log_level": "INFO",
+        },
+        "database": {
+            # sqlite: 단일 호스트/데모용. mysql: 여러 WAS가 하나의 DB를 공유할 때.
+            "engine": "sqlite",
+            "mysql": {
+                "host": "",
+                "port": 3306,
+                "database": "",
+                "user": "",
+                "password": "",
+                "charset": "utf8mb4",
+                "connect_timeout_seconds": 10,
+            },
+        },
+        "modules": {
+            # 통합 웹이 각 도메인 WAS 를 호출할 때 쓰는 공통값
+            "request_timeout_seconds": 5,
+            "retry_count": 1,
+            "dashboard_budget_seconds": 12,
+            "max_response_bytes": 4 * 1024 * 1024,
+            "verify_tls": True,
+            "auth": {
+                # 각 WAS 가 같은 값을 갖고 토큰을 검증한다. 비워두면 토큰을 붙이지 않는다.
+                "shared_secret": "",
+                "token_ttl_seconds": 60,
+                "header": "X-Portal-Token",
+            },
+            # 대메뉴 정의. base_url 이 비어 있으면 통합 웹 내부 모듈이다.
+            "registry": [
+                {
+                    "id": "asset_sync",
+                    "name": "자산 정합성",
+                    "icon": "🔗",
+                    "base_url": "",
+                    "enabled": True,
+                    "required_role": "user",
+                    "menu_section": "운영",
+                    "page": "asset_sync",
+                },
+            ],
         },
         "oracle": {
             "enabled": True,
@@ -234,6 +306,37 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         if env.get(env_key):
             oracle[config_key] = env[env_key]
 
+    database = merged.setdefault("database", {})
+    mysql_cfg = database.setdefault("mysql", {})
+    if env.get("ASSET_DB_ENGINE"):
+        database["engine"] = env["ASSET_DB_ENGINE"].strip().lower()
+    mysql_env = {
+        "host": "MYSQL_HOST",
+        "port": "MYSQL_PORT",
+        "database": "MYSQL_DATABASE",
+        "user": "MYSQL_USER",
+        "password": "MYSQL_PASSWORD",
+        "charset": "MYSQL_CHARSET",
+    }
+    for config_key, env_key in mysql_env.items():
+        if env.get(env_key):
+            mysql_cfg[config_key] = env[env_key]
+
+    modules_cfg = merged.setdefault("modules", {})
+    modules_auth = modules_cfg.setdefault("auth", {})
+    if env.get("MODULE_SHARED_SECRET"):
+        modules_auth["shared_secret"] = env["MODULE_SHARED_SECRET"]
+
+    # 대메뉴는 config/modules/<id>.yaml 로도 추가할 수 있다. 같은 id 가 양쪽에 있으면
+    # 파일 쪽이 이긴다. app_config.yaml 의 목록은 기존 항목 호환을 위해 남겨 둔다.
+    file_modules = load_module_registry_files(root)
+    if file_modules:
+        existing = [item for item in (modules_cfg.get("registry") or []) if isinstance(item, Mapping)]
+        from_files = {str(item.get("id") or "").strip() for item in file_modules}
+        modules_cfg["registry"] = [
+            item for item in existing if str(item.get("id") or "").strip() not in from_files
+        ] + file_modules
+
     if env.get("ASSET_DEMO_MODE", "0") == "1":
         merged.setdefault("itsm", {})["collection_mode"] = "DEMO"
         merged.setdefault("vcenter", {})["collection_mode"] = "DEMO"
@@ -244,6 +347,8 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         timezone=str(app_cfg["timezone"]),
         sqlite_path=Path(app_cfg["sqlite_path"]),
         log_level=str(app_cfg["log_level"]),
+        database=merged["database"],
+        modules=merged["modules"],
         oracle=merged["oracle"],
         itsm=merged["itsm"],
         # Internal field name is retained to avoid a database/service migration.

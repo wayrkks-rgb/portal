@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from asset_sync.config import load_config
-from asset_sync.db.sqlite_manager import SQLiteManager
+from asset_sync.db.manager import create_manager
 from asset_sync.quality.seed_rules import seed_default_rules
 from asset_sync.repositories import AssetRepository
 
@@ -18,11 +18,11 @@ def main() -> None:
     example_query = config.root_dir / "config" / "oracle_query.example.sql"
     if not local_query.exists() and example_query.exists():
         local_query.write_text(example_query.read_text(encoding="utf-8"), encoding="utf-8")
-    manager = SQLiteManager(config.database_path)
+    manager = create_manager(config)
     manager.initialize()
     with manager.connect() as connection:
         seed_default_rules(AssetRepository(connection), config)
-    print(f"SQLite initialized: {config.database_path}")
+    print(f"database initialized: {manager.describe()}")
 
 
 if __name__ == "__main__":

@@ -212,6 +212,8 @@ CREATE TABLE IF NOT EXISTS data_quality_exception (
 
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- 여러 WAS 가 같은 테이블에 쓰므로 어느 모듈 기록인지 구분해야 한다.
+    module_id TEXT NOT NULL DEFAULT 'portal',
     user_id TEXT NOT NULL,
     action TEXT NOT NULL,
     target_type TEXT NOT NULL,
@@ -222,6 +224,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(created_at DESC);
+-- idx_audit_module 은 migrations.py 가 만든다. 기존 DB 에는 module_id 컬럼이 아직
+-- 없으므로 이 파일에서 인덱스를 만들면 스키마 적용 자체가 실패한다.
+-- 대메뉴별 테이블은 이 파일에 넣지 않는다. asset_sync/db/modules/README.md 참고.
 
 CREATE TABLE IF NOT EXISTS daily_batch_run (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -354,3 +359,38 @@ CREATE INDEX IF NOT EXISTS idx_vm_resource_usage_period ON vm_resource_usage_dai
 CREATE INDEX IF NOT EXISTS idx_vm_resource_usage_uuid ON vm_resource_usage_daily(vm_uuid, stat_date DESC);
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_vm_resource_usage_daily ON vm_resource_usage_daily(run_id, vcenter_id, vm_name, IFNULL(vm_uuid,''));
+
+-- Cross-WAS mutual exclusion for the daily batch. Mirrored in schema_mysql.sql.
+CREATE TABLE IF NOT EXISTS process_lock (
+    lock_name TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    acquired_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+
+-- 통합 웹 로그인 계정. 여러 WAS가 같은 계정을 보게 하려면 파일이 아니라 DB에 있어야 한다.
+CREATE TABLE IF NOT EXISTS app_user (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    name TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT,
+    last_login_at TEXT,
+    password_updated_at TEXT
+);
+
+-- 대메뉴별 사용자 권한. 대메뉴마다 담당자가 다르므로 admin/user 2단계로는 부족하다.
+-- 명시 부여가 없으면 모듈의 required_role 로 판정한다(기존 동작 유지).
+CREATE TABLE IF NOT EXISTS user_module_permission (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+    module_id TEXT NOT NULL,
+    permission TEXT NOT NULL DEFAULT 'VIEW',
+    granted_by TEXT,
+    granted_at TEXT NOT NULL,
+    UNIQUE(user_id, module_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_module_permission_module ON user_module_permission(module_id, permission);

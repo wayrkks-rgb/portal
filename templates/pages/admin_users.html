@@ -1,0 +1,24 @@
+{# 자동 분할된 파일입니다. 이 화면을 담당하는 팀이 이 파일만 수정하면 됩니다. #}
+{# 관리자 전용 화면. 분할 전에는 하나의 if 블록이 여러 화면을 감싸고 있었다. #}
+{% if user.role == 'admin' %}
+<!-- ====== 관리 - 사용자 관리 ====== -->
+<div class="page {% if page=='admin_users' %}active{% endif %}" id="page-admin_users">
+  <div class="topbar">
+    <div>
+      <div class="topbar-title">사용자 관리</div>
+      <div class="topbar-sub">계정은 공유 DB에 저장되어 모든 WAS에서 동일하게 적용됩니다</div>
+    </div>
+    <button class="btn btn-primary btn-sm" onclick="openAddUserModal()">+ 사용자 추가</button>
+  </div>
+  <div class="content">
+    <div class="card">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>이름</th><th>아이디</th><th>권한</th><th>대메뉴 권한</th><th>상태</th><th>최근 로그인</th><th>작업</th></tr></thead>
+          <tbody id="users-table-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}

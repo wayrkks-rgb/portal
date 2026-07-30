@@ -1,0 +1,129 @@
+{# 사용자 관리 스크립트 #}
+<script>
+// ── 사용자 관리 ──
+async function loadUsers() {
+  const users = await fetch('/api/users').then(r=>r.json());
+  const tbody = document.getElementById('users-table-body');
+  tbody.innerHTML = users.map(u=>`
+    <tr${u.enabled?'':' style="opacity:.55"'}>
+      <td>${escapeHtml(u.name)}</td>
+      <td class="mono">${escapeHtml(u.username)}</td>
+      <td><span class="badge ${u.role==='admin'?'badge-purple':'badge-blue'}">${u.role==='admin'?'관리자':'일반사용자'}</span></td>
+      <td>${u.role==='admin'?'<span class="badge badge-purple">전체</span>':`<button class="btn btn-secondary btn-sm" onclick="openUserModules(${u.id},'${escapeHtml(u.username)}')">권한 설정</button>`}</td>
+      <td>${u.enabled?'<span class="badge badge-green">사용</span>':'<span class="badge">중지</span>'}</td>
+      <td class="text-xs text-muted">${u.last_login_at?escapeHtml(String(u.last_login_at).slice(0,19).replace('T',' ')):'-'}</td>
+      <td class="flex gap-2">
+        <button class="btn btn-secondary btn-sm" onclick="resetUserPassword(${u.id},'${escapeHtml(u.username)}')">비밀번호 변경</button>
+        <button class="btn btn-secondary btn-sm" onclick="toggleUserEnabled(${u.id},${u.enabled?0:1})">${u.enabled?'사용 중지':'사용 재개'}</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id})">삭제</button>
+      </td>
+    </tr>`).join('');
+}
+
+async function userAction(url, options, okMessage) {
+  const res = await fetch(url, options);
+  let body = {};
+  try { body = await res.json(); } catch (_) { body = {}; }
+  if (!res.ok || body.success === false) {
+    alert(body.error || `요청이 실패했습니다 (HTTP ${res.status})`);
+    return false;
+  }
+  if (okMessage) alert(okMessage);
+  loadUsers();
+  return true;
+}
+
+async function resetUserPassword(uid, username) {
+  const password = prompt(`${username} 계정의 새 비밀번호를 입력하세요 (6자 이상)`);
+  if (!password) return;
+  await userAction(`/api/users/${uid}`, {
+    method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({password})
+  }, '비밀번호를 변경했습니다.');
+}
+
+async function toggleUserEnabled(uid, enabled) {
+  await userAction(`/api/users/${uid}`, {
+    method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled: Boolean(enabled)})
+  });
+}
+
+function openAddUserModal() {
+  document.getElementById('modal-menu').style.display='none';
+  document.getElementById('modal-sheet-vm').style.display='none';
+  document.getElementById('modal-user').style.display='block';
+  document.getElementById('modal-overlay').classList.add('show');
+}
+
+async function addUser() {
+  const payload = {
+    name: document.getElementById('new-user-name').value,
+    username: document.getElementById('new-user-id').value,
+    password: document.getElementById('new-user-pw').value,
+    role: document.getElementById('new-user-role').value
+  };
+  const ok = await userAction('/api/users', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)
+  });
+  if (ok) closeModalDirect();
+}
+
+async function deleteUser(uid) {
+  if(!confirm('이 사용자를 삭제하시겠습니까?')) return;
+  await userAction(`/api/users/${uid}`, {method:'DELETE'});
+}
+
+
+// ── 대메뉴 권한 ──
+let permTargetUserId = null;
+
+async function openUserModules(uid, username) {
+  permTargetUserId = uid;
+  document.getElementById('perm-username').textContent = username;
+  const body = document.getElementById('perm-table-body');
+  body.innerHTML = '<tr><td colspan="4" style="text-align:center" class="text-muted"><span class="loading"></span> 불러오는 중...</td></tr>';
+  document.querySelectorAll('#modal-overlay .modal').forEach(m => m.style.display = 'none');
+  document.getElementById('modal-user-modules').style.display = 'block';
+  document.getElementById('modal-overlay').classList.add('show');
+
+  const res = await fetch(`/api/users/${uid}/modules`).then(r => r.json()).catch(() => null);
+  if (!res || !res.modules) {
+    body.innerHTML = '<tr><td colspan="4" class="text-error">권한 정보를 불러오지 못했습니다.</td></tr>';
+    return;
+  }
+  const label = {MANAGE: '변경', VIEW: '조회', NONE: '접근 불가'};
+  body.innerHTML = res.modules.map(m => {
+    const options = ['', 'VIEW', 'MANAGE'].map(value => {
+      const text = value === '' ? '지정 없음' : label[value];
+      return `<option value="${value}"${(m.granted || '') === value ? ' selected' : ''}>${text}</option>`;
+    }).join('');
+    return `<tr>
+      <td>${escapeHtml(m.icon)} ${escapeHtml(m.name)}</td>
+      <td class="text-xs text-muted">${m.location === 'LOCAL' ? '내부' : '연계 WAS'} · ${m.access === 'explicit' ? '지정 필요' : '등급 판정'}</td>
+      <td><select class="form-select" data-module="${escapeHtml(m.id)}">${options}</select></td>
+      <td><span class="badge ${m.effective === 'MANAGE' ? 'badge-purple' : m.effective === 'VIEW' ? 'badge-blue' : 'badge-red'}">${label[m.effective] || m.effective}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+async function saveUserModules() {
+  if (permTargetUserId === null) return;
+  const permissions = {};
+  document.querySelectorAll('#perm-table-body select[data-module]').forEach(select => {
+    permissions[select.dataset.module] = select.value;
+  });
+  setButtonBusy('btn-save-user-modules', true, '저장 중', '권한 저장');
+  const res = await fetch(`/api/users/${permTargetUserId}/modules`, {
+    method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({permissions})
+  });
+  setButtonBusy('btn-save-user-modules', false, '', '권한 저장');
+  let payload = {};
+  try { payload = await res.json(); } catch (_) { payload = {}; }
+  if (!res.ok || payload.success === false) {
+    alert(payload.error || `권한 저장에 실패했습니다 (HTTP ${res.status})`);
+    return;
+  }
+  integrationToast('대메뉴 권한을 저장했습니다. 해당 사용자가 다시 로그인하거나 화면을 새로 열면 메뉴에 반영됩니다.', 'success', 6000);
+  closeModalDirect();
+  loadUsers();
+}
+</script>
