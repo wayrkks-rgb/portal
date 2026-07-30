@@ -8,6 +8,7 @@ from flask import Flask
 from application.accounts import ensure_accounts
 from application.db import database_manager
 from application.local_panels import register_all as register_local_panels
+from application.module_assets import discover_module_templates, register_local_modules
 from application.modules import ModuleClient, ModuleRegistry, create_modules_blueprint
 from application.settings import BASE_DIR, USERS_FILE, initialize_legacy_data
 from asset_sync.config import load_config as load_asset_sync_config
@@ -43,9 +44,17 @@ def create_app() -> Flask:
     registry = ModuleRegistry.from_config(asset_config.modules)
     client = ModuleClient(registry)
     register_local_panels()
+    # 내부 모듈은 application/modules_local/<id>/ 에 파일을 두면 등록된다.
+    # 목록을 코드에 두면 담당자가 늘 때마다 이 파일에서 병합 충돌이 난다.
+    register_local_modules(app, BASE_DIR)
     app.register_blueprint(create_modules_blueprint(registry, client))
     app.extensions["module_registry"] = registry
     app.extensions["module_client"] = client
+
+    # 모듈별 화면 파일도 마찬가지로 있으면 쓰인다. main.html 은 이 목록을 보고
+    # include 하므로 담당자가 통합 웹 화면 파일을 고칠 일이 없다.
+    module_templates = discover_module_templates(BASE_DIR / "templates")
+    app.extensions["module_templates"] = module_templates
 
     @app.context_processor
     def inject_modules() -> dict:
@@ -55,12 +64,19 @@ def create_app() -> Flask:
 
         user = current_user()
         if not user:
-            return {"portal_modules": []}
+            return {"portal_modules": [], "module_templates": {}}
         pairs = registry.accessible(user, granted_permissions(user))
         return {
             "portal_modules": [
                 {**module.public(), "permission": permission} for module, permission in pairs
-            ]
+            ],
+            # 권한이 있는 모듈의 템플릿만 내려보낸다. 화면 파일이 있다고 해서
+            # 권한 없는 사용자에게 렌더링되면 안 된다.
+            "module_templates": {
+                module.id: module_templates[module.id]
+                for module, _ in pairs
+                if module.id in module_templates
+            },
         }
 
     # 계정은 공유 DB에 둔다. 레거시 users.json 이 남아 있으면 최초 기동 때 이관한다.

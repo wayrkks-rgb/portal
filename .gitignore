@@ -16,3 +16,4 @@ logs/
 uploads/
 outputs/
 data/temp/
+config/modules/*.local.yaml

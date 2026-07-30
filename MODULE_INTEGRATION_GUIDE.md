@@ -18,8 +18,36 @@
 
 ## 1. 통합 웹에 대메뉴 등록
 
-`config/app_config.local.yaml` 의 `modules.registry` 에 항목을 추가한다.
-**통합 웹 소스는 고치지 않는다.**
+**`config/modules/<module_id>.yaml` 파일 하나를 추가한다.** 공용 파일은 고치지 않는다.
+여러 담당자가 `app_config.yaml` 의 목록을 고치면 branch 를 병합할 때마다 같은 줄에서
+충돌하기 때문이다.
+
+```yaml
+# config/modules/capacity.yaml   ← 파일 이름이 모듈 ID (소문자/숫자/밑줄)
+name: 용량 관리                  # 메뉴에 표시되는 이름
+icon: 📦
+base_url: http://was-capacity:5301
+enabled: true
+required_role: user             # user | admin
+menu_section: 운영
+health_path: /api/health
+panel_path: /api/dashboard/panel
+allowed_prefixes: ['/api/']     # 프록시 허용 경로
+timeout_seconds: 8              # 이 모듈만 다르게 줄 때
+access: role                    # role | explicit
+```
+
+배포 환경마다 주소가 다르면 `config/modules/capacity.local.yaml` 에 그 값만 적는다.
+git 에 올라가지 않으므로 개발 장비 주소가 저장소에 섞이지 않는다.
+
+```yaml
+# config/modules/capacity.local.yaml
+base_url: http://127.0.0.1:8081
+```
+
+필드 표와 예시는 `config/modules/README.md` 에 있다.
+
+공통 설정(모든 모듈에 함께 적용)은 `config/app_config.local.yaml` 에 둔다.
 
 ```yaml
 modules:
@@ -31,18 +59,6 @@ modules:
   auth:
     token_ttl_seconds: 60
     header: X-Portal-Token
-  registry:
-    - id: capacity                # 소문자/숫자/밑줄
-      name: 용량 관리              # 메뉴에 표시되는 이름
-      icon: 📦
-      base_url: http://was-capacity:5301
-      enabled: true
-      required_role: user         # user | admin
-      menu_section: 운영
-      health_path: /api/health
-      panel_path: /api/dashboard/panel
-      allowed_prefixes: ['/api/']  # 프록시 허용 경로
-      timeout_seconds: 8           # 이 모듈만 다르게 줄 때
 ```
 
 | 항목 | 의미 |
@@ -240,22 +256,53 @@ if request.method != "GET" and payload.get("perm") != "MANAGE":
 
 ```text
 templates/
-  base.html                 공통 셸: 스타일, 사이드바, 공통 스크립트
-  main.html                 통합 웹 화면 · 통합 대시보드(모듈 조합)
-  pages/<name>.html         통합 웹이 직접 담당하는 화면
-  modules/_generic.html     등록된 원격 모듈의 기본 화면(패널 렌더링)
-  partials/modals.html      공용 모달
-  partials/js/<name>.html   화면별 스크립트
+  base.html                        공통 셸: 스타일, 사이드바, 공통 스크립트
+  main.html                        통합 웹 화면 · 통합 대시보드(모듈 조합)
+  pages/<name>.html                통합 웹이 직접 담당하는 화면
+  modules/_generic.html            원격 모듈의 기본 화면(패널 렌더링)
+  modules/<module_id>/page.html    담당자가 만든 대메뉴 화면
+  modules/<module_id>/scripts.html 그 화면용 <script>
+  modules/<module_id>/widget.html  통합 대시보드에 넣을 축소 위젯
+  partials/modals.html             공용 모달
+  partials/js/<name>.html          화면별 스크립트
 ```
+
+**담당자는 `main.html` 을 고치지 않는다.** `modules/<module_id>/` 에 파일을 두면
+기동할 때 발견되어 자동으로 include 된다. 세 파일 모두 선택이고, 있는 것만 쓰인다.
+
+| 파일 | 어디에 그려지나 |
+| --- | --- |
+| `page.html` | 대메뉴 화면. 없으면 `_generic.html` 이 패널 스펙으로 그린다 |
+| `scripts.html` | 공통 스크립트 뒤에 온다. `callModule()` 등을 그대로 쓸 수 있다 |
+| `widget.html` | 통합 대시보드의 축소 위젯 영역 |
 
 - **통합 대시보드는 `main.html` 에 남겨 두었다.** 여러 모듈을 조합해 보여주는
   화면이므로 통합 웹의 책임이다.
-- 새 대메뉴는 기본적으로 `modules/_generic.html` 이 패널 스펙만으로 그린다.
-  모듈 고유 화면이 필요하면 `templates/modules/<module_id>.html` 을 만들고
-  `main.html` 의 include 를 바꾼다. **다른 팀 파일을 건드리지 않는다.**
+- **화면 파일이 있다는 것이 접근 권한을 주지는 않는다.** 권한 있는 사용자에게만
+  include 된다(8장). `access: explicit` 인 모듈은 부여받지 않은 사용자에게 markup
+  자체가 내려가지 않는다.
+- `page.html` 의 최상위 요소는 `<div class="page" id="page-<page 키>">` 로 둔다.
+  사이드바가 그 id 로 화면을 전환한다.
 - 공통 헬퍼(`escapeHtml`, `integrationFetch`, `setActionResult`, `setButtonBusy`,
   `integrationToast`, 모달 제어)는 `partials/js/common.html` 에 있다. 화면
   스크립트에서 그대로 호출한다.
+- CSS 는 `base.html` 의 전역 스타일을 공유한다. 새 클래스 이름은 `capacity-` 처럼
+  모듈 접두어를 붙여 다른 팀 화면에 영향을 주지 않게 한다.
+
+### 9.1 내부 모듈 코드
+
+담당 WAS 를 따로 두지 않고 통합 웹 안에서 돌리는 경우, 파일 위치만 맞추면 등록된다.
+
+```text
+application/modules_local/<module_id>/routes.py   bp (Blueprint) 를 노출
+application/modules_local/<module_id>/panel.py    panel(user, params) 를 노출
+```
+
+`routes.py` 의 `bp` 는 `create_app()` 이 자동으로 `register_blueprint` 하고,
+`panel.py` 의 `panel` 은 통합 대시보드 패널 제공자로 등록된다. 한 모듈의 import 가
+실패하면 그 모듈만 건너뛰고 로그에 남는다 — 통합 웹은 정상 기동한다.
+
+패널 스펙의 참조 구현은 `application/local_panels.py` 를 본다.
 
 ## 10. 공유 감사로그
 
@@ -334,15 +381,38 @@ asset_sync/db/modules/<module_id>_migrations.py  이미 배포된 DB 를 바꾸�
 모듈 간 순서는 보장하지 않는다. 다른 모듈의 테이블에 의존하는 단계는 두지 않는다.
 공용 테이블(`app_user`, `audit_log` 등)은 1번에서 만들어지므로 참조해도 된다.
 
-## 12. 아직 남은 것
+## 12. 담당자가 추가하는 파일 한눈에
+
+전부 **새 파일 추가**다. 통합 웹의 공용 파일을 고칠 일이 없으므로 branch 를 병합할 때
+충돌하지 않는다.
+
+| 필요한 것 | 파일 |
+| --- | --- |
+| 대메뉴 등록 | `config/modules/<id>.yaml` |
+| 환경별 주소 | `config/modules/<id>.local.yaml` (git 제외) |
+| 대메뉴 화면 | `templates/modules/<id>/page.html` |
+| 화면 스크립트 | `templates/modules/<id>/scripts.html` |
+| 통합 대시보드 위젯 | `templates/modules/<id>/widget.html` |
+| DB 테이블 | `asset_sync/db/modules/<id>.sql` + `<id>.mysql.sql` |
+| DB 변경 이력 | `asset_sync/db/modules/<id>_migrations.py` |
+| 내부 모듈 라우트 | `application/modules_local/<id>/routes.py` |
+| 내부 모듈 패널 | `application/modules_local/<id>/panel.py` |
+
+담당 WAS 를 따로 두는 경우 마지막 두 개는 필요 없다. 그 대신 WAS 가 2장의 두
+엔드포인트를 제공한다.
+
+## 13. 아직 남은 것
 
 - **권한 변경이 메뉴에 즉시 반영되지 않는다.** 화면을 새로 열 때 갱신된다.
   세션에 캐시하지 않고 매 요청 조회하므로 API 는 즉시 반영된다.
-- **모듈이 자기 HTML 을 직접 제공할 수는 없다.** 지금은 패널 스펙(JSON)만 통합
-  웹이 렌더링한다. 모듈 고유 화면이 필요하면 `templates/modules/<id>.html` 을
-  통합 웹 저장소에 추가해야 한다.
+- **WAS 응답으로 HTML 을 받아 그릴 수는 없다.** 패널 스펙(JSON)만 렌더링한다.
+  모듈 고유 markup 이 필요하면 위 표의 템플릿 파일로 제공한다.
+- **위젯 크기를 지정할 수 없다.** 통합 대시보드는 지금 모든 패널·위젯을 같은 크기
+  격자에 넣는다. 담당자별 폭·높이 지정은 아직 없다.
+- **소메뉴(2단 메뉴)가 없다.** 대메뉴 하나가 화면 하나에 대응한다. 소메뉴는 지금은
+  `page.html` 안에서 탭으로 만든다.
 - **프록시는 대용량 파일에 맞지 않다.** 요청 본문을 메모리에 모두 읽고 응답은
   `max_response_bytes`(기본 4MB)로 제한된다. 대용량 업로드·다운로드가 필요하면
   별도 설계가 필요하다.
-- **레지스트리는 기동 시 1회 읽는다.** 대메뉴를 추가하면 통합 웹을 재시작해야
-  한다.
+- **레지스트리·화면 파일은 기동 시 1회 읽는다.** 대메뉴를 추가하면 통합 웹을
+  재시작해야 한다.

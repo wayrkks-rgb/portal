@@ -3,6 +3,9 @@
 여러 모듈을 조합해 보여주는 통합 대시보드는 이 파일에 그대로 둔다. 개별 대메뉴
 화면은 templates/pages/ 와 templates/modules/ 로 분리되어 있어 담당 팀이 자기
 파일만 고치면 된다.
+
+담당자는 이 파일을 고치지 않는다. templates/modules/<module_id>/ 에 page.html /
+scripts.html / widget.html 을 두면 자동으로 include 된다(module_templates).
 #}
 {% extends "base.html" %}
 
@@ -20,6 +23,15 @@
   <div class="content">
     <div id="module-panels-status"></div>
     <div id="module-panels" class="module-panel-grid"></div>
+    {# 담당자가 직접 만든 축소 위젯. 패널 스펙(JSON)으로 부족할 때 쓴다. #}
+    {% set module_widgets = module_templates | default({}) %}
+    {% if module_widgets.values() | selectattr('widget') | list %}
+    <div class="module-panel-grid" id="module-widgets">
+      {% for module in portal_modules | default([]) if module_widgets.get(module.id) and module_widgets[module.id].widget %}
+      {% include module_widgets[module.id].widget %}
+      {% endfor %}
+    </div>
+    {% endif %}
     <div id="dashboard-alert"></div>
     <div class="card">
       <div class="dashboard-section-head">
@@ -104,7 +116,11 @@
 {% include "pages/integration_settings.html" %}
 {% include "pages/admin_mapping.html" %}
 
-{# ── 연계 모듈 화면: 등록된 대메뉴마다 렌더링 (권한 있는 사용자 모두) ── #}
+{# ── 연계 모듈 화면 ──
+   담당자가 만든 page.html 이 있으면 그것을, 없으면 공통 화면을 쓴다. #}
+{% for module in portal_modules | default([]) if module_templates.get(module.id) and module_templates[module.id].page %}
+{% include module_templates[module.id].page %}
+{% endfor %}
 {% include "modules/_generic.html" %}
 
 {% include "pages/admin_users.html" %}
@@ -120,4 +136,8 @@
 {% include "partials/js/history.html" %}
 {% include "partials/js/admin_mapping.html" %}
 {% include "partials/js/admin_users.html" %}
+{# 모듈이 제공한 스크립트는 공통 함수(callModule 등) 뒤에 온다. #}
+{% for module in portal_modules | default([]) if module_templates.get(module.id) and module_templates[module.id].scripts %}
+{% include module_templates[module.id].scripts %}
+{% endfor %}
 {% endblock %}

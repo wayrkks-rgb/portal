@@ -56,6 +56,36 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return loaded
 
 
+def load_module_registry_files(root: Path) -> list[dict[str, Any]]:
+    """``config/modules/<id>.yaml`` 을 모아 대메뉴 정의 목록으로 돌려준다.
+
+    담당자마다 ``config/app_config.yaml`` 의 ``modules.registry`` 를 고치면 branch
+    병합에서 매번 같은 목록에서 충돌한다. 그래서 각자 파일 하나만 추가한다.
+
+    ``<id>.local.yaml`` 은 같은 모듈에 대한 배포 환경별 덮어쓰기다(주로 ``base_url``).
+    git 에 올리지 않으므로 담당자의 개발 주소가 저장소에 섞이지 않는다.
+    """
+    directory = root / "config" / "modules"
+    if not directory.is_dir():
+        return []
+    definitions: list[dict[str, Any]] = []
+    for path in sorted(directory.glob("*.yaml")):
+        if path.name.startswith("_") or path.name.endswith(".local.yaml"):
+            continue
+        module_id = path.stem
+        item = _load_yaml(path)
+        item = _deep_merge(item, _load_yaml(directory / f"{module_id}.local.yaml"))
+        declared = str(item.get("id") or "").strip()
+        if declared and declared != module_id:
+            raise ValueError(
+                f"{path.name}: id 가 파일 이름과 다릅니다 ({declared!r} != {module_id!r}). "
+                "파일 하나가 대메뉴 하나이므로 이름을 맞춰야 어느 파일이 무엇인지 알 수 있습니다."
+            )
+        item["id"] = module_id
+        definitions.append(item)
+    return definitions
+
+
 def _load_dotenv(path: Path) -> dict[str, str]:
     """Small .env reader to avoid an additional dependency in the closed network."""
     values: dict[str, str] = {}
@@ -296,6 +326,16 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     modules_auth = modules_cfg.setdefault("auth", {})
     if env.get("MODULE_SHARED_SECRET"):
         modules_auth["shared_secret"] = env["MODULE_SHARED_SECRET"]
+
+    # 대메뉴는 config/modules/<id>.yaml 로도 추가할 수 있다. 같은 id 가 양쪽에 있으면
+    # 파일 쪽이 이긴다. app_config.yaml 의 목록은 기존 항목 호환을 위해 남겨 둔다.
+    file_modules = load_module_registry_files(root)
+    if file_modules:
+        existing = [item for item in (modules_cfg.get("registry") or []) if isinstance(item, Mapping)]
+        from_files = {str(item.get("id") or "").strip() for item in file_modules}
+        modules_cfg["registry"] = [
+            item for item in existing if str(item.get("id") or "").strip() not in from_files
+        ] + file_modules
 
     if env.get("ASSET_DEMO_MODE", "0") == "1":
         merged.setdefault("itsm", {})["collection_mode"] = "DEMO"
