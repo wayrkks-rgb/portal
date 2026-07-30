@@ -9,6 +9,11 @@ that several WAS instances will use.
 ``--check`` only reports row counts so the source and target can be compared
 before anything is written. Tables are copied parent-first so foreign keys hold,
 and the target must be empty unless ``--truncate`` is given.
+
+``TABLE_ORDER`` lists the shared portal tables only. A module owner who adds
+tables through ``asset_sync/db/modules/<id>.sql`` and needs that data carried over
+appends their own table names here as well; the target schema is created by
+``initialize()`` either way.
 """
 
 from __future__ import annotations
@@ -53,7 +58,9 @@ TABLE_ORDER = [
 GENERATED_COLUMNS = {"active_cm_id", "active_vm_uuid", "active_key", "dedup_key"}
 
 # Schema metadata, not data: initialize() already seeded it in the target.
-SKIP_COPY = {"schema_version"}
+# schema_migration is deliberately absent from TABLE_ORDER for the same reason —
+# the target records what it applied itself.
+SKIP_COPY = {"schema_version", "schema_migration"}
 
 BATCH_SIZE = 500
 

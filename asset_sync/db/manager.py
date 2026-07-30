@@ -24,6 +24,17 @@ class DatabaseError(RuntimeError):
     pass
 
 
+def _apply_module_schemas(conn: Any, engine: str) -> None:
+    """대메뉴별 스키마 파일을 공용 스키마 뒤에 적용한다.
+
+    담당자마다 ``schema.sql`` 을 고치면 branch 병합에서 매번 충돌하므로 각자
+    ``db/modules/<id>.sql`` 을 추가한다. 계약은 그 폴더의 README.md 를 본다.
+    """
+    from .module_schema import apply_module_schemas
+
+    apply_module_schemas(conn, engine)
+
+
 class DatabaseManager:
     """Common interface: create the schema, then hand out transactions."""
 
@@ -58,6 +69,7 @@ class SQLiteManager(DatabaseManager):
         with self.connect() as conn:
             conn.executescript(schema)
             conn.execute("INSERT OR IGNORE INTO schema_version(version) VALUES (1)")
+            _apply_module_schemas(conn, self.engine)
         self._apply_migrations()
 
     def _apply_migrations(self) -> None:
@@ -155,6 +167,7 @@ class MySQLManager(DatabaseManager):
         with self.connect() as conn:
             conn.executescript(schema)
             conn.execute("INSERT IGNORE INTO schema_version(version) VALUES (1)")
+            _apply_module_schemas(conn, self.engine)
         self._apply_migrations()
 
     def _apply_migrations(self) -> None:

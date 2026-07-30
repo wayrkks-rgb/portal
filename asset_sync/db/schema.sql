@@ -226,6 +226,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(created_at DESC);
 -- idx_audit_module 은 migrations.py 가 만든다. 기존 DB 에는 module_id 컬럼이 아직
 -- 없으므로 이 파일에서 인덱스를 만들면 스키마 적용 자체가 실패한다.
+-- 대메뉴별 테이블은 이 파일에 넣지 않는다. asset_sync/db/modules/README.md 참고.
 
 CREATE TABLE IF NOT EXISTS daily_batch_run (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -253,6 +253,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     after_json LONGTEXT,
     created_at VARCHAR(32) NOT NULL,
     -- idx_audit_module 은 migrations.py 가 만든다 (기존 DB 호환)
+    -- 대메뉴별 테이블은 이 파일이 아니라 db/modules/<id>.mysql.sql 로 간다.
     KEY idx_audit_time (created_at DESC)
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

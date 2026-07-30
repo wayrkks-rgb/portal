@@ -287,15 +287,52 @@ GET /api/admin/audit-log/modules           모듈별 건수와 마지막 기록 
 
 ## 11. 스키마 변경 규칙
 
-`schema_version` 기반 마이그레이션이 있다. `asset_sync/db/migrations.py` 의
-`MIGRATIONS` 에 단계를 추가하면 모든 진입점(웹·배치·스크립트)이 기동 시 적용한다.
+### 11.1 담당자는 공용 파일을 고치지 않는다
 
-**기존 테이블에 컬럼을 추가할 때 그 컬럼을 참조하는 인덱스를 `schema.sql` 에
-넣으면 안 된다.** 기존 DB 에서는 `CREATE TABLE IF NOT EXISTS` 가 no-op 이라 컬럼
-없이 인덱스를 만들려 해 스키마 적용 자체가 실패한다. 컬럼은 `CREATE TABLE` 에
-두고 인덱스는 마이그레이션에서 만든다.
+각자 자기 파일만 추가한다. 공용 `schema.sql` / `migrations.py` 를 여러 명이 고치면
+branch 를 병합할 때마다 같은 줄에서 충돌한다.
 
-각 단계는 적용 여부를 스스로 확인하므로 여러 WAS 가 동시에 기동해도 안전하다.
+```text
+asset_sync/db/modules/<module_id>.sql            SQLite 용 테이블·인덱스
+asset_sync/db/modules/<module_id>.mysql.sql      MySQL 용 같은 것
+asset_sync/db/modules/<module_id>_migrations.py  이미 배포된 DB 를 바꾸는 단계 (선택)
+```
+
+두 SQL 파일은 짝으로 둔다(한쪽만 있으면 기동 시 실패한다). 만드는 객체 이름은
+`<module_id>_` 로 시작해야 한다 — 하나의 DB 를 공유하므로 이름이 겹치면 서로의
+테이블을 덮어쓴다. 규칙을 어기면 무엇이 잘못됐는지 알려주며 멈춘다.
+
+전체 계약과 예시는 **`asset_sync/db/modules/README.md`** 에 있다.
+
+### 11.2 마이그레이션 이름은 숫자가 아니다
+
+이력은 `schema_migration.name` 에 `capacity/add_memory_column` 형태로 남는다.
+버전 숫자를 쓰면 담당자 A 와 B 가 각자 branch 에서 같은 번호를 쓰고, 병합에서 한쪽만
+남거나 **이미 그 번호가 찍힌 DB 에서 다른 쪽이 오류 없이 영구히 스킵된다.** 이름은
+서로 겹치지 않으므로 그런 일이 없다. 한 번 배포한 이름은 바꾸지 않는다(바꾸면 다시
+실행된다).
+
+### 11.3 기존 DB 를 깨지 않는 두 가지
+
+**기존 테이블에 컬럼을 추가할 때 그 컬럼을 참조하는 인덱스를 `.sql` 파일에 넣으면
+안 된다.** 기존 DB 에서는 `CREATE TABLE IF NOT EXISTS` 가 no-op 이라 컬럼 없이
+인덱스를 만들려 해 스키마 적용 자체가 실패한다. 컬럼은 `CREATE TABLE` 에 두고
+인덱스는 마이그레이션에서 만든다.
+
+**각 마이그레이션 단계는 적용 여부를 스스로 확인한다.** 새로 만든 DB 는 최신 스키마를
+이미 갖고 있고, 여러 WAS 가 동시에 기동해 같은 DDL 을 돌릴 수도 있다.
+`column_exists`, `table_exists`, `apply_step` 이 그 용도로 있다.
+
+### 11.4 적용 순서
+
+기동할 때 `DatabaseManager.initialize()` 가 이 순서로 돈다.
+
+1. 공용 `schema.sql` (또는 `schema_mysql.sql`)
+2. `db/modules/` 의 모듈 SQL — 모듈 ID 사전순
+3. 미적용 마이그레이션 — 코어 먼저, 그 뒤 모듈 파일 이름순
+
+모듈 간 순서는 보장하지 않는다. 다른 모듈의 테이블에 의존하는 단계는 두지 않는다.
+공용 테이블(`app_user`, `audit_log` 등)은 1번에서 만들어지므로 참조해도 된다.
 
 ## 12. 아직 남은 것
 
