@@ -17,6 +17,7 @@ class AppConfig:
     sqlite_path: Path = Path("data/asset_history.db")
     log_level: str = "INFO"
     database: dict[str, Any] = field(default_factory=dict)
+    modules: dict[str, Any] = field(default_factory=dict)
     oracle: dict[str, Any] = field(default_factory=dict)
     itsm: dict[str, Any] = field(default_factory=dict)
     rvtools: dict[str, Any] = field(default_factory=dict)
@@ -113,6 +114,33 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                 "charset": "utf8mb4",
                 "connect_timeout_seconds": 10,
             },
+        },
+        "modules": {
+            # 통합 웹이 각 도메인 WAS 를 호출할 때 쓰는 공통값
+            "request_timeout_seconds": 5,
+            "retry_count": 1,
+            "dashboard_budget_seconds": 12,
+            "max_response_bytes": 4 * 1024 * 1024,
+            "verify_tls": True,
+            "auth": {
+                # 각 WAS 가 같은 값을 갖고 토큰을 검증한다. 비워두면 토큰을 붙이지 않는다.
+                "shared_secret": "",
+                "token_ttl_seconds": 60,
+                "header": "X-Portal-Token",
+            },
+            # 대메뉴 정의. base_url 이 비어 있으면 통합 웹 내부 모듈이다.
+            "registry": [
+                {
+                    "id": "asset_sync",
+                    "name": "자산 정합성",
+                    "icon": "🔗",
+                    "base_url": "",
+                    "enabled": True,
+                    "required_role": "user",
+                    "menu_section": "운영",
+                    "page": "asset_sync",
+                },
+            ],
         },
         "oracle": {
             "enabled": True,
@@ -264,6 +292,11 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         if env.get(env_key):
             mysql_cfg[config_key] = env[env_key]
 
+    modules_cfg = merged.setdefault("modules", {})
+    modules_auth = modules_cfg.setdefault("auth", {})
+    if env.get("MODULE_SHARED_SECRET"):
+        modules_auth["shared_secret"] = env["MODULE_SHARED_SECRET"]
+
     if env.get("ASSET_DEMO_MODE", "0") == "1":
         merged.setdefault("itsm", {})["collection_mode"] = "DEMO"
         merged.setdefault("vcenter", {})["collection_mode"] = "DEMO"
@@ -275,6 +308,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         sqlite_path=Path(app_cfg["sqlite_path"]),
         log_level=str(app_cfg["log_level"]),
         database=merged["database"],
+        modules=merged["modules"],
         oracle=merged["oracle"],
         itsm=merged["itsm"],
         # Internal field name is retained to avoid a database/service migration.

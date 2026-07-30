@@ -316,6 +316,18 @@ tr:hover td{background:#f4f6fa;color:var(--text)}
 .badge-blue{background:#e6ecf5;color:#132a44}
 .progress-fill,.bar-fill{background:linear-gradient(90deg,#284566,#5b82b0)}
 .donut-chart{box-shadow:inset 0 0 0 1px #dbe3ed}
+.module-panel-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:16px;margin-bottom:20px}
+.module-panel{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px}
+.module-panel-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px}
+.module-panel-title{font-size:14px;font-weight:700;display:flex;align-items:center;gap:7px}
+.module-panel-metrics{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:10px;margin-bottom:12px}
+.module-metric{background:var(--surface2);border-radius:9px;padding:10px 12px}
+.module-metric-value{font-size:19px;font-weight:800;line-height:1.2}
+.module-metric-label{font-size:11px;color:var(--text-muted);margin-top:3px}
+.module-metric.success .module-metric-value{color:var(--success)}
+.module-metric.warning .module-metric-value{color:var(--warning)}
+.module-metric.error .module-metric-value{color:var(--error)}
+.module-panel.failed{border-color:rgba(178,58,52,.45);background:rgba(178,58,52,.04)}
 .resource-filter-grid{display:grid;grid-template-columns:repeat(5,minmax(140px,1fr));gap:12px;align-items:end}
 .resource-summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:16px 0}
 .resource-table-title{font-size:13px;font-weight:800;color:#1b3350;margin:18px 0 10px}
@@ -346,6 +358,17 @@ tr:hover td{background:#f4f6fa;color:var(--text)}
         <span class="icon">📝</span> 보고서
       </a>
     </div>
+    {% set remote_modules = portal_modules | default([]) | selectattr('location', 'equalto', 'REMOTE') | selectattr('show_in_menu') | list %}
+    {% if remote_modules %}
+    <div class="nav-section">
+      <div class="nav-section-label">연계 모듈</div>
+      {% for module in remote_modules %}
+      <a class="nav-item {% if page==module.page %}active{% endif %}" onclick="showModulePage('{{ module.id }}')">
+        <span class="icon">{{ module.icon }}</span> {{ module.name }}
+      </a>
+      {% endfor %}
+    </div>
+    {% endif %}
     {% if user.role == 'admin' %}
     <div class="nav-section">
       <div class="nav-section-label">설정</div>
@@ -375,11 +398,14 @@ tr:hover td{background:#f4f6fa;color:var(--text)}
 <div class="page {% if page=='dashboard' %}active{% endif %}" id="page-dashboard">
   <div class="topbar">
     <div>
-      <div class="topbar-title">자산 자동화 대시보드</div>
-      <div class="topbar-sub">매일 07:00 자동수집·변경비교·ITSM/vCenter 정합성 분석 결과 · <span id="today-date"></span></div>
+      <div class="topbar-title">통합 대시보드</div>
+      <div class="topbar-sub">각 모듈이 제공하는 현황을 한 화면에서 조회합니다 · <span id="today-date"></span></div>
     </div>
+    <button type="button" class="btn btn-secondary btn-sm" id="btn-refresh-panels" onclick="loadModulePanels()">모듈 현황 새로고침</button>
   </div>
   <div class="content">
+    <div id="module-panels-status"></div>
+    <div id="module-panels" class="module-panel-grid"></div>
     <div id="dashboard-alert"></div>
     <div class="card">
       <div class="dashboard-section-head">
@@ -978,6 +1004,23 @@ DR vCenter,&lt;VCENTER_ADDRESS_002&gt;,DR"></textarea>
   </div>
 </div>
 
+<!-- ====== 연계 모듈 화면 (레지스트리 기반) ====== -->
+{% for module in portal_modules | default([]) if module.location == 'REMOTE' %}
+<div class="page {% if page==module.page %}active{% endif %}" id="page-{{ module.page }}">
+  <div class="topbar">
+    <div>
+      <div class="topbar-title">{{ module.icon }} {{ module.name }}</div>
+      <div class="topbar-sub">담당 WAS 를 통합 웹이 서버에서 호출해 표시합니다</div>
+    </div>
+    <button type="button" class="btn btn-secondary btn-sm" onclick="loadModulePage('{{ module.id }}')">새로고침</button>
+  </div>
+  <div class="content">
+    <div id="module-page-status-{{ module.id }}"></div>
+    <div id="module-page-body-{{ module.id }}" class="module-panel-grid"></div>
+  </div>
+</div>
+{% endfor %}
+
 <!-- ====== 관리 - 사용자 관리 ====== -->
 <div class="page" id="page-admin_users">
   <div class="topbar">
@@ -1097,6 +1140,93 @@ function showPage(id) {
   if (id === 'dashboard') loadDashboard();
   if (id === 'report') loadResourceUsage();
   if (id === 'asset_sync') loadAssetSyncDashboard();
+  if (id === 'dashboard') loadModulePanels();
+}
+
+// ── 연계 모듈 (BFF 호출) ──
+// 통합 웹이 서버에서 각 WAS 를 호출하므로 브라우저는 항상 통합 웹만 바라본다.
+const PORTAL_MODULES = {{ portal_modules | default([]) | tojson }};
+
+function moduleById(id){ return PORTAL_MODULES.find(m => m.id === id) || null; }
+
+function showModulePage(moduleId){
+  const module = moduleById(moduleId);
+  if(!module) return;
+  showPage(module.page);
+  loadModulePage(moduleId);
+}
+
+function renderPanelCard(entry){
+  const failed = entry.status !== 'SUCCESS';
+  const panel = entry.panel || {};
+  const statusBadge = {
+    SUCCESS:'<span class="badge badge-green">정상</span>',
+    TIMEOUT:'<span class="badge badge-yellow">응답 지연</span>',
+    UNREACHABLE:'<span class="badge badge-red">연결 실패</span>',
+    SKIPPED:'<span class="badge">미제공</span>'
+  }[entry.status] || '<span class="badge badge-red">오류</span>';
+  const metrics = (panel.metrics || []).map(m=>`
+    <div class="module-metric ${escapeHtml(m.state||'info')}">
+      <div class="module-metric-value">${m.value===null||m.value===undefined?'-':escapeHtml(typeof m.value==='number'?fmtNumber(m.value):m.value)}${m.unit?`<span style="font-size:11px;font-weight:600"> ${escapeHtml(m.unit)}</span>`:''}</div>
+      <div class="module-metric-label">${escapeHtml(m.label)}</div>
+    </div>`).join('');
+  const table = panel.table && panel.table.columns && panel.table.columns.length ? `
+    <div class="table-wrap" style="max-height:220px;overflow:auto">
+      <table><thead><tr>${panel.table.columns.map(c=>`<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>
+      <tbody>${(panel.table.rows||[]).map(r=>`<tr>${r.map(v=>`<td class="mono">${v===null||v===undefined?'-':escapeHtml(typeof v==='number'?fmtNumber(v):v)}</td>`).join('')}</tr>`).join('')
+        || `<tr><td colspan="${panel.table.columns.length}" style="text-align:center" class="text-muted">데이터가 없습니다.</td></tr>`}</tbody></table>
+    </div>` : '';
+  return `
+    <div class="module-panel${failed?' failed':''}">
+      <div class="module-panel-head">
+        <div class="module-panel-title"><span>${escapeHtml(entry.icon||'🧩')}</span>${escapeHtml(panel.title || entry.module_name)}</div>
+        <div class="flex gap-2" style="align-items:center">${statusBadge}<span class="text-xs text-muted">${entry.elapsed_ms||0}ms</span></div>
+      </div>
+      ${failed
+        ? `<div class="alert alert-error" style="margin:0">${escapeHtml(entry.error || '모듈 응답을 받지 못했습니다.')}</div>`
+        : `${metrics?`<div class="module-panel-metrics">${metrics}</div>`:''}${table}
+           ${panel.note?`<div class="text-xs text-muted" style="margin-top:10px">${escapeHtml(panel.note)}</div>`:''}`}
+    </div>`;
+}
+
+async function loadModulePanels(){
+  const container = document.getElementById('module-panels');
+  const statusEl = document.getElementById('module-panels-status');
+  if(!container) return;
+  setButtonBusy('btn-refresh-panels', true, '조회 중', '모듈 현황 새로고침');
+  container.innerHTML = '<div class="text-sm text-muted"><span class="loading"></span> 모듈 현황을 불러오는 중...</div>';
+  const res = await integrationFetch('/api/modules/dashboard');
+  setButtonBusy('btn-refresh-panels', false, '', '모듈 현황 새로고침');
+  if(res.error && !res.panels){
+    statusEl.innerHTML = `<div class="alert alert-error">모듈 현황 조회 실패: ${escapeHtml(res.error)}</div>`;
+    container.innerHTML = '';
+    return;
+  }
+  const panels = res.panels || [];
+  const counts = res.counts || {};
+  // 일부 모듈이 실패해도 나머지 패널은 그대로 보여준다.
+  statusEl.innerHTML = panels.length
+    ? (res.degraded
+        ? `<div class="alert alert-warning">모듈 ${counts.total}개 중 ${counts.success}개 정상 · 실패 ${counts.failed||0} · 미제공 ${counts.skipped||0} (${res.elapsed_ms||0}ms)</div>`
+        : `<div class="alert alert-success">모듈 ${counts.total}개 전부 정상 (${res.elapsed_ms||0}ms)</div>`)
+    : '<div class="alert alert-info">등록된 연계 모듈이 없습니다. 관리자가 모듈 레지스트리에 대메뉴를 추가하면 여기에 표시됩니다.</div>';
+  container.innerHTML = panels.map(renderPanelCard).join('');
+}
+
+async function loadModulePage(moduleId){
+  const statusEl = document.getElementById(`module-page-status-${moduleId}`);
+  const bodyEl = document.getElementById(`module-page-body-${moduleId}`);
+  if(!bodyEl) return;
+  bodyEl.innerHTML = '<div class="text-sm text-muted"><span class="loading"></span> 모듈 데이터를 불러오는 중...</div>';
+  const res = await integrationFetch(`/api/modules/dashboard?modules=${encodeURIComponent(moduleId)}`);
+  const panels = (res.panels || []);
+  if(!panels.length){
+    statusEl.innerHTML = `<div class="alert alert-error">${escapeHtml(res.error || '모듈 응답을 받지 못했습니다.')}</div>`;
+    bodyEl.innerHTML = '';
+    return;
+  }
+  statusEl.innerHTML = '';
+  bodyEl.innerHTML = panels.map(renderPanelCard).join('');
 }
 
 // ── 대시보드 ──
@@ -2830,12 +2960,15 @@ window.addEventListener('load', () => {
   initAutoReportDates();
   initResourceUsageDates();
   loadDashboard();
+  loadModulePanels();
   const page = '{{ page }}';
   if(page === 'history') loadHistory();
   if(page === 'admin') { loadMenus(); }
   if(page === 'asset_sync') { loadAssetSyncDashboard(); }
   if(page === 'integration_settings') { loadIntegrationSettings(); }
   if(page === 'report') { loadResourceUsage(); }
+  const openModule = PORTAL_MODULES.find(m => m.location === 'REMOTE' && m.page === page);
+  if(openModule) loadModulePage(openModule.id);
 });
 </script>
 </body>
