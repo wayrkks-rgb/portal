@@ -10,10 +10,11 @@ that several WAS instances will use.
 before anything is written. Tables are copied parent-first so foreign keys hold,
 and the target must be empty unless ``--truncate`` is given.
 
-``TABLE_ORDER`` lists the shared portal tables only. A module owner who adds
-tables through ``asset_sync/db/modules/<id>.sql`` and needs that data carried over
-appends their own table names here as well; the target schema is created by
-``initialize()`` either way.
+Every table in the source database is copied. ``TABLE_ORDER`` fixes the order for
+the shared portal tables so foreign keys hold; anything else found in the source
+(a module owner's ``asset_sync/db/modules/<id>.sql`` tables) is appended after
+them. Nothing is skipped silently — ``NEVER_COPY`` names the exceptions and the
+run prints them.
 """
 
 from __future__ import annotations
@@ -32,6 +33,8 @@ from asset_sync.db.manager import MySQLManager, SQLiteManager
 # Parent tables first: every child references a table listed above it.
 TABLE_ORDER = [
     "schema_version",
+    "app_user",
+    "user_module_permission",
     "collection_run",
     "snapshot",
     "itsm_asset_snapshot",
@@ -58,11 +61,33 @@ TABLE_ORDER = [
 GENERATED_COLUMNS = {"active_cm_id", "active_vm_uuid", "active_key", "dedup_key"}
 
 # Schema metadata, not data: initialize() already seeded it in the target.
-# schema_migration is deliberately absent from TABLE_ORDER for the same reason —
-# the target records what it applied itself.
 SKIP_COPY = {"schema_version", "schema_migration"}
 
+# Tables that must not be carried over, with the reason. Runtime state belongs to
+# the host that produced it; schema bookkeeping belongs to the target.
+NEVER_COPY = {
+    "schema_version": "대상이 스스로 기록한다",
+    "schema_migration": "대상이 스스로 기록한다",
+    "process_lock": "실행 중 상태값이라 옮기면 배치가 잠긴 것처럼 보인다",
+    "sqlite_sequence": "SQLite 내부 테이블",
+}
+
 BATCH_SIZE = 500
+
+
+def _plan(source_tables: set[str]) -> list[str]:
+    """실제 원본 테이블을 보고 이관 순서를 정한다.
+
+    목록에 없는 테이블을 조용히 건너뛰면 데이터가 사라진 것을 나중에야 알게 된다.
+    대메뉴 담당자가 추가한 테이블(db/modules/<id>.sql)은 이름을 알 수 없으므로
+    코어 테이블 뒤에 사전순으로 붙인다. 서로를 참조하는 모듈 테이블이 있으면
+    외래키 오류가 나고, 그때는 TABLE_ORDER 에 직접 순서를 적으면 된다.
+    """
+    known = [table for table in TABLE_ORDER if table in source_tables]
+    extra = sorted(source_tables - set(TABLE_ORDER) - set(NEVER_COPY))
+    if extra:
+        print(f"[INFO] 목록에 없는 테이블을 뒤에 붙여 이관합니다: {', '.join(extra)}", file=sys.stderr)
+    return known + extra
 
 
 def _sqlite_columns(conn, table: str) -> list[str]:
@@ -100,13 +125,24 @@ def main() -> None:
     report: dict[str, dict[str, int]] = {}
 
     with source.connect() as src, target.connect() as dst:
+        source_tables = {
+            str(row["name"])
+            for row in src.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        tables = _plan(source_tables)
+        for table, reason in NEVER_COPY.items():
+            if table in source_tables:
+                print(f"[SKIP] {table}: {reason}", file=sys.stderr)
+
         if args.check:
-            for table in TABLE_ORDER:
+            for table in tables:
                 report[table] = {"sqlite": _count(src, table), "mysql": _count(dst, table)}
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return
 
-        existing = {table: _count(dst, table) for table in TABLE_ORDER}
+        existing = {table: _count(dst, table) for table in tables}
         occupied = {table: count for table, count in existing.items() if count and table != "schema_version"}
         if occupied and not args.truncate:
             raise SystemExit(
@@ -115,12 +151,12 @@ def main() -> None:
             )
         if occupied:
             dst.execute("SET FOREIGN_KEY_CHECKS=0")
-            for table in reversed(TABLE_ORDER):
+            for table in reversed(tables):
                 if table not in SKIP_COPY:
                     dst.execute(f"DELETE FROM {table}")
             dst.execute("SET FOREIGN_KEY_CHECKS=1")
 
-        for table in TABLE_ORDER:
+        for table in tables:
             if table in SKIP_COPY:
                 continue
             source_columns = _sqlite_columns(src, table)
@@ -147,7 +183,7 @@ def main() -> None:
 
         # AUTO_INCREMENT continues from the copied ids automatically for InnoDB,
         # but verifying the counts here is what proves the migration succeeded.
-        for table in TABLE_ORDER:
+        for table in tables:
             if table in SKIP_COPY:
                 continue
             copied = report[table]["copied"]

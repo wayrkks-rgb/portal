@@ -76,6 +76,28 @@ GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, INDEX, REFERENCES ON assetdb.* TO 
 
 `--check`는 쓰기 없이 양쪽 건수만 비교한다. 본 실행은 외래키 순서대로 복사하고 끝에 건수를 재확인하며, 대상에 데이터가 있으면 중단한다(`--truncate`로 강제 가능). 이관 후 다시 `--check`로 모든 테이블이 일치하는지 확인한다.
 
+**원본 DB의 모든 테이블을 옮긴다.** 계정(`app_user`)과 대메뉴 권한
+(`user_module_permission`)도 포함되므로 이관 후 **기존 비밀번호로 그대로 로그인**된다.
+대메뉴 담당자가 추가한 테이블(`asset_sync/db/modules/<id>.sql`)도 이름을 몰라도
+자동으로 뒤에 붙여 옮기고, 무엇이 붙었는지 실행할 때 알려준다.
+
+옮기지 않는 것은 넷뿐이고 실행할 때 이유와 함께 출력된다.
+
+| 테이블 | 이유 |
+| --- | --- |
+| `schema_version` · `schema_migration` | 대상이 스스로 기록한다 |
+| `process_lock` | 실행 중 상태값이라 옮기면 배치가 잠긴 것처럼 보인다 |
+| `sqlite_sequence` | SQLite 내부 테이블 |
+
+이관 결과는 다음으로 확인한다.
+
+```bat
+.venv\Scripts\python.exe scripts\migrate_sqlite_to_mysql.py --check
+```
+
+건수가 모두 일치하면 `database.engine`을 `mysql`로 바꾸고 기동해, 로그인과
+`관리 → 사용자·권한`에서 계정·권한이 그대로인지 본다.
+
 ## 5. SQLite와 MySQL의 차이 (이미 처리된 항목)
 
 애플리케이션 SQL은 SQLite 표기(`?` 파라미터, `INSERT OR IGNORE`)로 한 번만 작성하고 `asset_sync/db/dialects.py`가 실행 시점에 변환한다. 스키마는 두 파일로 분리되어 있다.
