@@ -9,7 +9,11 @@ from application.accounts import ensure_accounts
 from application.db import database_manager
 from application.local_panels import register_all as register_local_panels
 from application.menu import build_sidebar
-from application.module_assets import discover_module_templates, register_local_modules
+from application.module_assets import (
+    ModuleScopedLoader,
+    discover_module_templates,
+    register_local_modules,
+)
 from application.modules import ModuleClient, ModuleRegistry, create_modules_blueprint
 from application.settings import BASE_DIR, USERS_FILE, initialize_legacy_data
 from asset_sync.config import load_config as load_asset_sync_config
@@ -56,6 +60,13 @@ def create_app() -> Flask:
     # include 하므로 담당자가 통합 웹 화면 파일을 고칠 일이 없다.
     module_templates = discover_module_templates(BASE_DIR / "templates")
     app.extensions["module_templates"] = module_templates
+
+    # 모듈 화면의 <style> 은 그 화면 안으로 가둔다. 전역 스타일을 공유하므로
+    # 담당자가 .card 를 재정의하면 다른 팀 화면까지 바뀌기 때문이다.
+    app.jinja_env.loader = ModuleScopedLoader(
+        str(BASE_DIR / "templates"),
+        page_of={module.id: module.page or module.id for module in registry.all()},
+    )
 
     @app.context_processor
     def inject_modules() -> dict:

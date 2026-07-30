@@ -128,4 +128,19 @@ python -c "from asset_sync.config import load_config; \
 print([m['id'] for m in load_config().modules['registry']])"
 ```
 
-레지스트리는 기동할 때 한 번 읽는다. 파일을 추가했으면 통합 웹을 재시작한다.
+파일을 추가한 뒤에는 다시 읽어야 반영된다. 재시작 없이 할 수 있다.
+
+```text
+관리 → 연계 설정 → [대메뉴 다시 읽기]
+POST /api/modules/reload        (관리자 전용)
+```
+
+## push 하기 전에
+
+```bash
+python scripts/check_module_contract.py --module <module_id>          # 파일만
+python scripts/check_module_contract.py --module <module_id> --live   # WAS 까지
+```
+
+설정·스키마·마이그레이션·화면·CSS 를 한 번에 확인한다. CI 가 push 마다 같은 것을
+돌리므로, 여기서 통과하면 병합 후에 깨지지 않는다.

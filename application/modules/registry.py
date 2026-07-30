@@ -241,9 +241,8 @@ class ModuleRegistry:
             self._modules[module.id] = module
         self.settings: dict[str, Any] = dict(settings or {})
 
-    @classmethod
-    def from_config(cls, modules_cfg: Mapping[str, Any] | None) -> "ModuleRegistry":
-        settings = dict(modules_cfg or {})
+    @staticmethod
+    def _build_all(settings: Mapping[str, Any]) -> list[ModuleDefinition]:
         built: list[ModuleDefinition] = []
         for item in settings.get("registry") or []:
             if not isinstance(item, Mapping):
@@ -254,7 +253,29 @@ class ModuleRegistry:
             except ModuleConfigError:
                 # 한 모듈의 설정 오류로 통합 웹 전체가 기동하지 못하면 안 된다.
                 LOGGER.exception("모듈 정의를 건너뜁니다: %r", item.get("id"))
-        return cls(built, settings)
+        return built
+
+    @classmethod
+    def from_config(cls, modules_cfg: Mapping[str, Any] | None) -> "ModuleRegistry":
+        settings = dict(modules_cfg or {})
+        return cls(cls._build_all(settings), settings)
+
+    def reload_from_config(self, modules_cfg: Mapping[str, Any] | None) -> list[str]:
+        """같은 객체의 내용만 바꾼다.
+
+        클라이언트·블루프린트·컨텍스트 프로세서가 이 인스턴스를 참조하고 있으므로
+        새 객체로 갈아끼울 수 없다. 내용을 교체해야 재기동 없이 반영된다.
+        새 정의를 다 만든 뒤에 바꾸므로, 도중에 실패해도 기존 목록은 그대로다.
+        """
+        settings = dict(modules_cfg or {})
+        rebuilt: dict[str, ModuleDefinition] = {}
+        for module in self._build_all(settings):
+            if module.id in rebuilt:
+                raise ModuleConfigError(f"모듈 id 가 중복되었습니다: {module.id}")
+            rebuilt[module.id] = module
+        self._modules = rebuilt
+        self.settings = settings
+        return list(rebuilt)
 
     def __len__(self) -> int:
         return len(self._modules)

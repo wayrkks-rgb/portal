@@ -25,10 +25,17 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from jinja2 import FileSystemLoader
+
+from application.module_styles import scope_template
+
 LOGGER = logging.getLogger(__name__)
 
 TEMPLATE_ROLES = ("page", "scripts", "widget")
 LOCAL_PACKAGE = "application.modules_local"
+
+#: ``<style>`` 을 가둘 범위. scripts.html 은 대상이 아니다(JS 에는 범위가 없다).
+STYLE_SCOPES = {"page": "#page-{page}", "widget": "#module-widget-{module_id}"}
 
 
 class ModuleAssets:
@@ -71,6 +78,39 @@ def discover_module_templates(templates_dir: Path) -> dict[str, ModuleAssets]:
                 "templates/modules/%s 에 page.html / scripts.html / widget.html 이 없습니다.", module_id
             )
     return found
+
+
+class ModuleScopedLoader(FileSystemLoader):
+    """모듈 화면의 ``<style>`` 을 그 화면 안으로 가둔 뒤 Jinja 에 넘긴다.
+
+    템플릿을 읽는 시점에 한 번만 처리된다(Jinja 가 컴파일 결과를 캐시한다).
+    담당자가 `.card` 를 재정의해도 다른 팀 화면에는 영향이 없다.
+    """
+
+    def __init__(self, searchpath: Any, page_of: dict[str, str] | None = None) -> None:
+        super().__init__(searchpath)
+        #: 모듈 ID → page 키. 대메뉴 화면의 범위 선택자를 만들 때 쓴다.
+        self.page_of: dict[str, str] = dict(page_of or {})
+
+    def _scope_for(self, template: str) -> tuple[str, str] | None:
+        parts = template.replace("\\", "/").split("/")
+        if len(parts) != 3 or parts[0] != "modules":
+            return None
+        module_id, filename = parts[1], parts[2]
+        role = filename[:-5] if filename.endswith(".html") else filename
+        pattern = STYLE_SCOPES.get(role)
+        if pattern is None:
+            return None
+        return module_id, pattern.format(
+            module_id=module_id, page=self.page_of.get(module_id, module_id)
+        )
+
+    def get_source(self, environment: Any, template: str):  # type: ignore[override]
+        source, filename, uptodate = super().get_source(environment, template)
+        scope = self._scope_for(template)
+        if scope is None or "<style" not in source.lower():
+            return source, filename, uptodate
+        return scope_template(source, scope[1], name=template), filename, uptodate
 
 
 def _local_module_dirs(root: Path) -> list[Path]:
