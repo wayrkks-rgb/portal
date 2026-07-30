@@ -10,7 +10,10 @@ function syncBadge(status) {
 async function loadAssetSyncDashboard() {
   const alertEl = document.getElementById('asset-sync-alert');
   try {
-    const summary = await fetch('/api/asset-sync/dashboard').then(r=>r.json());
+    // /api/asset-sync/dashboard 는 통합 대시보드용 형태(as_of·asset_status·automation)를
+    // 돌려준다. 이 화면이 쓰는 latest_itsm/latest_rvtools/reconciliation_counts 는
+    // /legacy 쪽에 있다. 잘못 부르면 오류 없이 지표만 비어 보인다.
+    const summary = await fetch('/api/asset-sync/dashboard/legacy').then(r=>r.json());
     const itsm = summary.latest_itsm, rv = summary.latest_rvtools;
     document.getElementById('sync-itsm-count').textContent = itsm ? Number(itsm.record_count).toLocaleString() : '-';
     document.getElementById('sync-rv-count').textContent = rv ? Number(rv.record_count).toLocaleString() : '-';
