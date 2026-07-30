@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from datetime import datetime
 from typing import Any, Iterable
 
@@ -11,7 +10,7 @@ from .utils.hashing import canonical_json
 class AssetRepository:
     """Persistence facade for collection, snapshot, event and reconciliation data."""
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(self, connection: Any) -> None:
         self.conn = connection
 
     def start_collection_run(self, source: str, started_at: str) -> int:
@@ -72,7 +71,7 @@ class AssetRepository:
         )
         return int(cur.lastrowid)
 
-    def latest_snapshot(self, source: str, before_snapshot_id: int | None = None) -> sqlite3.Row | None:
+    def latest_snapshot(self, source: str, before_snapshot_id: int | None = None) -> Any | None:
         sql = "SELECT * FROM snapshot WHERE source=? AND status IN ('SUCCESS','PARTIAL_SUCCESS')"
         params: list[Any] = [source]
         if before_snapshot_id is not None:
@@ -81,7 +80,7 @@ class AssetRepository:
         sql += " ORDER BY collected_at DESC, id DESC LIMIT 1"
         return self.conn.execute(sql, params).fetchone()
 
-    def previous_day_snapshot(self, source: str, current_snapshot_date: str) -> sqlite3.Row | None:
+    def previous_day_snapshot(self, source: str, current_snapshot_date: str) -> Any | None:
         """Return the latest usable snapshot from a calendar date before the current snapshot date."""
         return self.conn.execute(
             """
@@ -96,7 +95,7 @@ class AssetRepository:
             (source, current_snapshot_date),
         ).fetchone()
 
-    def snapshot_by_id(self, snapshot_id: int) -> sqlite3.Row | None:
+    def snapshot_by_id(self, snapshot_id: int) -> Any | None:
         return self.conn.execute("SELECT * FROM snapshot WHERE id=?", (snapshot_id,)).fetchone()
 
     def insert_itsm_records(self, snapshot_id: int, records: list[dict[str, Any]]) -> None:
@@ -197,7 +196,7 @@ class AssetRepository:
         return {row["asset_key"]: self._row_to_record(row) for row in rows}
 
     @staticmethod
-    def _row_to_record(row: sqlite3.Row) -> dict[str, Any]:
+    def _row_to_record(row: Any) -> dict[str, Any]:
         record = dict(row)
         record["raw"] = json.loads(record.pop("raw_json"))
         if "ip_json" in record:
@@ -289,9 +288,9 @@ class AssetRepository:
             """
             INSERT OR IGNORE INTO identity_map(
                 cm_id, vm_uuid, active_yn, approved_by, approved_at, note
-            ) VALUES (?, ?, 1, 'AUTO', datetime('now'), ?)
+            ) VALUES (?, ?, 1, 'AUTO', ?, ?)
             """,
-            (cm_id, vm_uuid, f"AUTO:{method}"),
+            (cm_id, vm_uuid, datetime.now().isoformat(), f"AUTO:{method}"),
         )
         return cursor.rowcount > 0
 

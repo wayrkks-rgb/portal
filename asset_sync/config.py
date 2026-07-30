@@ -16,6 +16,7 @@ class AppConfig:
     timezone: str = "Asia/Seoul"
     sqlite_path: Path = Path("data/asset_history.db")
     log_level: str = "INFO"
+    database: dict[str, Any] = field(default_factory=dict)
     oracle: dict[str, Any] = field(default_factory=dict)
     itsm: dict[str, Any] = field(default_factory=dict)
     rvtools: dict[str, Any] = field(default_factory=dict)
@@ -99,6 +100,19 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             "timezone": "Asia/Seoul",
             "sqlite_path": "data/asset_history.db",
             "log_level": "INFO",
+        },
+        "database": {
+            # sqlite: 단일 호스트/데모용. mysql: 여러 WAS가 하나의 DB를 공유할 때.
+            "engine": "sqlite",
+            "mysql": {
+                "host": "",
+                "port": 3306,
+                "database": "",
+                "user": "",
+                "password": "",
+                "charset": "utf8mb4",
+                "connect_timeout_seconds": 10,
+            },
         },
         "oracle": {
             "enabled": True,
@@ -234,6 +248,22 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         if env.get(env_key):
             oracle[config_key] = env[env_key]
 
+    database = merged.setdefault("database", {})
+    mysql_cfg = database.setdefault("mysql", {})
+    if env.get("ASSET_DB_ENGINE"):
+        database["engine"] = env["ASSET_DB_ENGINE"].strip().lower()
+    mysql_env = {
+        "host": "MYSQL_HOST",
+        "port": "MYSQL_PORT",
+        "database": "MYSQL_DATABASE",
+        "user": "MYSQL_USER",
+        "password": "MYSQL_PASSWORD",
+        "charset": "MYSQL_CHARSET",
+    }
+    for config_key, env_key in mysql_env.items():
+        if env.get(env_key):
+            mysql_cfg[config_key] = env[env_key]
+
     if env.get("ASSET_DEMO_MODE", "0") == "1":
         merged.setdefault("itsm", {})["collection_mode"] = "DEMO"
         merged.setdefault("vcenter", {})["collection_mode"] = "DEMO"
@@ -244,6 +274,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         timezone=str(app_cfg["timezone"]),
         sqlite_path=Path(app_cfg["sqlite_path"]),
         log_level=str(app_cfg["log_level"]),
+        database=merged["database"],
         oracle=merged["oracle"],
         itsm=merged["itsm"],
         # Internal field name is retained to avoid a database/service migration.

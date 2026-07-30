@@ -5,14 +5,14 @@ from typing import Any
 from flask import Blueprint, jsonify, request
 
 from ..config import load_config
-from ..db.sqlite_manager import SQLiteManager
+from ..db.manager import create_manager
 from ..services import CollectionService
 from ..web_common import admin_required
 
 
 def _service() -> CollectionService:
     cfg = load_config()
-    manager = SQLiteManager(cfg.database_path)
+    manager = create_manager(cfg)
     manager.initialize()
     return CollectionService(cfg, manager)
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -10,29 +9,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from asset_sync.config import load_config
-from asset_sync.db.sqlite_manager import SQLiteManager
+from asset_sync.db.locks import DEFAULT_LEASE_SECONDS, DatabaseLock, LockNotAcquired
+from asset_sync.db.manager import create_manager
 from asset_sync.logging_config import configure_logging
 from asset_sync.services.collection_service import CollectionService
-
-
-class FileLock:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.handle: int | None = None
-
-    def __enter__(self) -> "FileLock":
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            self.handle = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(self.handle, str(os.getpid()).encode())
-        except FileExistsError as exc:
-            raise RuntimeError(f"다른 배치가 실행 중입니다: {self.path}") from exc
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]
-        if self.handle is not None:
-            os.close(self.handle)
-        self.path.unlink(missing_ok=True)
 
 
 def main() -> None:
@@ -41,10 +21,17 @@ def main() -> None:
     args = parser.parse_args()
     config = load_config()
     configure_logging(config.resolve("logs"), config.log_level, config)
-    manager = SQLiteManager(config.database_path)
+    manager = create_manager(config)
     manager.initialize()
-    with FileLock(config.resolve("data/daily_batch.lock")):
-        result = CollectionService(config, manager).run_daily(demo=args.demo)
+    # 파일 잠금은 같은 호스트만 보호한다. 여러 WAS가 하나의 DB를 공유하면
+    # 공유 DB에 잠금을 두어야 07:00 배치가 한 번만 실행된다.
+    lock_seconds = int(config.scheduler.get("batch_lock_seconds", DEFAULT_LEASE_SECONDS))
+    try:
+        with DatabaseLock(manager, "daily_batch", lease_seconds=lock_seconds):
+            result = CollectionService(config, manager).run_daily(demo=args.demo)
+    except LockNotAcquired as exc:
+        print(json.dumps({"status": "SKIPPED", "reason": str(exc)}, ensure_ascii=False))
+        raise SystemExit(0)
     summary = {
         "batch_id": result.get("batch_id"),
         "status": result.get("status"),

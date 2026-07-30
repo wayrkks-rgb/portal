@@ -22,7 +22,7 @@ RVTools 프로그램은 사용하지 않는다. vCenter 수집은 PowerShell의 
 - ITSM: `ORACLE`
 - vCenter: `POWERCLI`
 - Python: 3.13
-- DB: SQLite
+- DB: SQLite (단일 호스트) / MySQL (여러 WAS가 하나의 DB를 공유할 때)
 - 기본 실행 시각: 07:00
 
 `DEMO`는 설치 확인용이며 `FILE_ONLY`는 장애 분석이나 과거 스냅샷 재처리용 보조 모드다.
@@ -64,3 +64,4 @@ data/archive/vcenter/YYYYMMDD/       날짜별 vCenter XLSX
 9. 작업 스케줄러 등록
 
 상세 절차는 `BEGINNER_RUN_AND_VALIDATION_GUIDE.md`와 `CONNECTION_SETUP_GUIDE.md`를 참고한다.
+여러 WAS를 붙여 운영하려면 `MULTI_WAS_MYSQL_GUIDE.md`를 함께 본다.

@@ -12,7 +12,7 @@ from openpyxl import load_workbook
 from flask import Blueprint, jsonify, render_template, request, send_file, session
 
 from ..config import AppConfig
-from ..db.sqlite_manager import SQLiteManager
+from ..db.manager import DatabaseManager
 from ..repositories import AssetRepository
 from ..services import (
     AutomatedReportService, ChangeSyncService, DailyComparisonService, DashboardService, ExportService,
@@ -22,7 +22,7 @@ from ..services import (
 from ..web_common import admin_required, login_required
 
 
-def create_core_blueprint(cfg: AppConfig, manager: SQLiteManager) -> Blueprint:
+def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint:
     bp = Blueprint("asset_sync_core", __name__)
 
     @bp.route("/asset-sync")
@@ -37,7 +37,11 @@ def create_core_blueprint(cfg: AppConfig, manager: SQLiteManager) -> Blueprint:
         try:
             with manager.connect() as conn:
                 conn.execute("SELECT 1").fetchone()
-            return jsonify({"status": "UP", "database": str(cfg.database_path)})
+            return jsonify({
+                "status": "UP",
+                "engine": manager.engine,
+                "database": manager.describe(),
+            })
         except Exception as exc:
             return jsonify({"status": "DOWN", "error": str(exc)}), 500
 

@@ -2,6 +2,17 @@ app:
   timezone: Asia/Seoul
   sqlite_path: data/asset_history.db
   log_level: INFO
+database:
+  # sqlite: 단일 호스트/데모. mysql: 여러 WAS가 하나의 DB를 공유할 때.
+  engine: sqlite
+  mysql:
+    host: ''
+    port: 3306
+    database: ''
+    user: ''
+    password: ''
+    charset: utf8mb4
+    connect_timeout_seconds: 10
 oracle:
   enabled: true
   mode: thin

@@ -15,7 +15,7 @@ from ..collectors import (
     VCenterSnapshotFileCollector,
 )
 from ..config import AppConfig
-from ..db.sqlite_manager import SQLiteManager
+from ..db.manager import DatabaseManager
 from ..repositories import AssetRepository
 from .diff_service import DiffService
 from .quality_service import DataQualityService
@@ -29,7 +29,7 @@ LOGGER = logging.getLogger(__name__)
 class CollectionService:
     """Orchestrate lightweight collection, snapshots, diffs and reconciliation."""
 
-    def __init__(self, config: AppConfig, manager: SQLiteManager) -> None:
+    def __init__(self, config: AppConfig, manager: DatabaseManager) -> None:
         self.config = config
         self.manager = manager
 

@@ -4,6 +4,7 @@ import copy
 import json
 import logging
 import socket
+from datetime import datetime
 from typing import Any
 
 from flask import Blueprint, jsonify, render_template, request, session
@@ -20,7 +21,7 @@ from ..collectors import (
     oracle_connection,
 )
 from ..config import AppConfig, load_config
-from ..db.sqlite_manager import SQLiteManager
+from ..db.manager import DatabaseManager
 from ..repositories import AssetRepository
 from ..settings_store import LocalSettingsStore, SettingsValidationError
 from ..web_common import admin_required
@@ -28,7 +29,7 @@ from ..web_common import admin_required
 LOGGER = logging.getLogger(__name__)
 
 
-def create_admin_blueprint(cfg: AppConfig, manager: SQLiteManager) -> Blueprint:
+def create_admin_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint:
     bp = Blueprint("asset_sync_admin", __name__)
     settings_store = LocalSettingsStore(cfg.root_dir)
 
@@ -523,10 +524,11 @@ def create_admin_blueprint(cfg: AppConfig, manager: SQLiteManager) -> Blueprint:
             user = str(session["user"].get("id") or session["user"].get("username"))
             if request.method == "POST":
                 cur = conn.execute(
-                    "INSERT INTO manual_asset_override(cm_id, field_name, override_value, reason, approval_status, valid_from, valid_to, created_by, created_at) VALUES (?, ?, ?, ?, 'DRAFT', ?, ?, ?, datetime('now'))",
+                    "INSERT INTO manual_asset_override(cm_id, field_name, override_value, reason, approval_status, valid_from, valid_to, created_by, created_at) VALUES (?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?)",
                     (
                         payload["cm_id"], payload["field_name"], payload.get("override_value"),
                         payload["reason"], payload.get("valid_from"), payload.get("valid_to"), user,
+                        datetime.now().isoformat(),
                     ),
                 )
                 repo.audit(user, "CREATE", "manual_asset_override", str(cur.lastrowid), payload["reason"], {}, payload)
@@ -549,8 +551,8 @@ def create_admin_blueprint(cfg: AppConfig, manager: SQLiteManager) -> Blueprint:
             if not before:
                 return jsonify({"error": "대상이 없습니다."}), 404
             conn.execute(
-                "UPDATE manual_asset_override SET approval_status=?, approved_by=?, approved_at=datetime('now') WHERE id=?",
-                (status, user, override_id),
+                "UPDATE manual_asset_override SET approval_status=?, approved_by=?, approved_at=? WHERE id=?",
+                (status, user, datetime.now().isoformat(), override_id),
             )
             repo.audit(user, status, "manual_asset_override", str(override_id), payload.get("reason"), dict(before), {"approval_status": status})
         return jsonify({"success": True})

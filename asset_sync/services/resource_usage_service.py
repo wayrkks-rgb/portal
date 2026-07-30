@@ -494,11 +494,18 @@ class VMResourceUsageExportService:
             })
         return result
 
+    def _distinct(self, column: str, where: str = "") -> list[str]:
+        # 컬럼명으로 읽는다. MySQL 커서는 dict 를 돌려주므로 위치 색인은 쓸 수 없다.
+        rows = self.repo.conn.execute(
+            f"SELECT DISTINCT {column} AS value FROM host_resource_usage_daily {where} ORDER BY {column}"
+        ).fetchall()
+        return [str(row["value"]) for row in rows if row["value"]]
+
     def _available_filters(self) -> dict[str, list[str]]:
         return {
-            "vcenters": [r[0] for r in self.repo.conn.execute("SELECT DISTINCT vcenter_id FROM host_resource_usage_daily ORDER BY vcenter_id") if r[0]],
-            "clusters": [r[0] for r in self.repo.conn.execute("SELECT DISTINCT cluster_name FROM host_resource_usage_daily WHERE cluster_name IS NOT NULL ORDER BY cluster_name") if r[0]],
-            "hosts": [r[0] for r in self.repo.conn.execute("SELECT DISTINCT esxi_host FROM host_resource_usage_daily ORDER BY esxi_host") if r[0]],
+            "vcenters": self._distinct("vcenter_id"),
+            "clusters": self._distinct("cluster_name", "WHERE cluster_name IS NOT NULL"),
+            "hosts": self._distinct("esxi_host"),
         }
 
     def _normalize(self, raw: dict[str, Any]) -> dict[str, Any]:

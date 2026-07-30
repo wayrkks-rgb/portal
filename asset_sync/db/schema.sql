@@ -354,3 +354,11 @@ CREATE INDEX IF NOT EXISTS idx_vm_resource_usage_period ON vm_resource_usage_dai
 CREATE INDEX IF NOT EXISTS idx_vm_resource_usage_uuid ON vm_resource_usage_daily(vm_uuid, stat_date DESC);
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_vm_resource_usage_daily ON vm_resource_usage_daily(run_id, vcenter_id, vm_name, IFNULL(vm_uuid,''));
+
+-- Cross-WAS mutual exclusion for the daily batch. Mirrored in schema_mysql.sql.
+CREATE TABLE IF NOT EXISTS process_lock (
+    lock_name TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    acquired_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
