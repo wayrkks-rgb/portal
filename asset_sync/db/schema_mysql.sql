@@ -400,10 +400,14 @@ CREATE TABLE IF NOT EXISTS vm_resource_usage_daily (
     collection_status VARCHAR(32) NOT NULL DEFAULT 'SUCCESS',
     raw_json LONGTEXT,
     created_at VARCHAR(32) NOT NULL,
+    -- SQLite 는 UNIQUE(run_id, vcenter_id, vm_name, IFNULL(vm_uuid,'')) 로 쓴다.
+    -- MySQL 은 표현식 인덱스가 없어 생성 컬럼으로 흉내내는데, run_id 를 이 식에 넣으면
+    -- 아래 FK 의 ON DELETE CASCADE 가 거부된다(MySQL 8: 생성 컬럼이 참조하는 컬럼에는
+    -- CASCADE/SET NULL 을 걸 수 없다). run_id 는 식에서 빼고 인덱스 선두에 둔다.
     dedup_key VARCHAR(700) GENERATED ALWAYS AS (
-        CONCAT(run_id, '\n', vcenter_id, '\n', vm_name, '\n', IFNULL(vm_uuid, ''))
+        CONCAT(vcenter_id, '\n', vm_name, '\n', IFNULL(vm_uuid, ''))
     ) STORED,
-    UNIQUE KEY uq_vm_resource_usage_daily (dedup_key),
+    UNIQUE KEY uq_vm_resource_usage_daily (run_id, dedup_key),
     KEY idx_vm_resource_usage_period (stat_date DESC, vcenter_id, esxi_host, vm_name),
     KEY idx_vm_resource_usage_uuid (vm_uuid, stat_date DESC),
     CONSTRAINT fk_vm_usage_run FOREIGN KEY (run_id) REFERENCES resource_usage_run(id) ON DELETE CASCADE
