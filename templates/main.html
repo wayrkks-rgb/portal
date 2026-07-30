@@ -983,7 +983,7 @@ DR vCenter,&lt;VCENTER_ADDRESS_002&gt;,DR"></textarea>
   <div class="topbar">
     <div>
       <div class="topbar-title">사용자 관리</div>
-      <div class="topbar-sub">관리자 및 일반사용자 계정을 관리합니다</div>
+      <div class="topbar-sub">계정은 공유 DB에 저장되어 모든 WAS에서 동일하게 적용됩니다</div>
     </div>
     <button class="btn btn-primary btn-sm" onclick="openAddUserModal()">+ 사용자 추가</button>
   </div>
@@ -991,7 +991,7 @@ DR vCenter,&lt;VCENTER_ADDRESS_002&gt;,DR"></textarea>
     <div class="card">
       <div class="table-wrap">
         <table>
-          <thead><tr><th>이름</th><th>아이디</th><th>권한</th><th>작업</th></tr></thead>
+          <thead><tr><th>이름</th><th>아이디</th><th>권한</th><th>상태</th><th>최근 로그인</th><th>작업</th></tr></thead>
           <tbody id="users-table-body"></tbody>
         </table>
       </div>
@@ -2751,12 +2751,45 @@ async function loadUsers() {
   const users = await fetch('/api/users').then(r=>r.json());
   const tbody = document.getElementById('users-table-body');
   tbody.innerHTML = users.map(u=>`
-    <tr>
-      <td>${u.name}</td>
-      <td class="mono">${u.username}</td>
+    <tr${u.enabled?'':' style="opacity:.55"'}>
+      <td>${escapeHtml(u.name)}</td>
+      <td class="mono">${escapeHtml(u.username)}</td>
       <td><span class="badge ${u.role==='admin'?'badge-purple':'badge-blue'}">${u.role==='admin'?'관리자':'일반사용자'}</span></td>
-      <td><button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id})">삭제</button></td>
+      <td>${u.enabled?'<span class="badge badge-green">사용</span>':'<span class="badge">중지</span>'}</td>
+      <td class="text-xs text-muted">${u.last_login_at?escapeHtml(String(u.last_login_at).slice(0,19).replace('T',' ')):'-'}</td>
+      <td class="flex gap-2">
+        <button class="btn btn-secondary btn-sm" onclick="resetUserPassword(${u.id},'${escapeHtml(u.username)}')">비밀번호 변경</button>
+        <button class="btn btn-secondary btn-sm" onclick="toggleUserEnabled(${u.id},${u.enabled?0:1})">${u.enabled?'사용 중지':'사용 재개'}</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id})">삭제</button>
+      </td>
     </tr>`).join('');
+}
+
+async function userAction(url, options, okMessage) {
+  const res = await fetch(url, options);
+  let body = {};
+  try { body = await res.json(); } catch (_) { body = {}; }
+  if (!res.ok || body.success === false) {
+    alert(body.error || `요청이 실패했습니다 (HTTP ${res.status})`);
+    return false;
+  }
+  if (okMessage) alert(okMessage);
+  loadUsers();
+  return true;
+}
+
+async function resetUserPassword(uid, username) {
+  const password = prompt(`${username} 계정의 새 비밀번호를 입력하세요 (6자 이상)`);
+  if (!password) return;
+  await userAction(`/api/users/${uid}`, {
+    method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({password})
+  }, '비밀번호를 변경했습니다.');
+}
+
+async function toggleUserEnabled(uid, enabled) {
+  await userAction(`/api/users/${uid}`, {
+    method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled: Boolean(enabled)})
+  });
 }
 
 function openAddUserModal() {
@@ -2773,14 +2806,15 @@ async function addUser() {
     password: document.getElementById('new-user-pw').value,
     role: document.getElementById('new-user-role').value
   };
-  await fetch('/api/users', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-  closeModalDirect(); loadUsers();
+  const ok = await userAction('/api/users', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)
+  });
+  if (ok) closeModalDirect();
 }
 
 async function deleteUser(uid) {
   if(!confirm('이 사용자를 삭제하시겠습니까?')) return;
-  await fetch(`/api/users/${uid}`, {method:'DELETE'});
-  loadUsers();
+  await userAction(`/api/users/${uid}`, {method:'DELETE'});
 }
 
 // ── 모달 ──

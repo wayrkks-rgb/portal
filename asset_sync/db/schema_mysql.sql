@@ -412,3 +412,18 @@ CREATE TABLE IF NOT EXISTS process_lock (
     acquired_at VARCHAR(32) NOT NULL,
     expires_at VARCHAR(32) NOT NULL
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 통합 웹 로그인 계정. 여러 WAS가 같은 계정을 보게 하려면 파일이 아니라 DB에 있어야 한다.
+CREATE TABLE IF NOT EXISTS app_user (
+    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(191) NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    name VARCHAR(128) NOT NULL,
+    role VARCHAR(32) NOT NULL DEFAULT 'user',
+    enabled TINYINT NOT NULL DEFAULT 1,
+    created_at VARCHAR(32) NOT NULL,
+    updated_at VARCHAR(32),
+    last_login_at VARCHAR(32),
+    password_updated_at VARCHAR(32),
+    UNIQUE KEY uq_app_user_username (username)
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from flask import Blueprint, jsonify, redirect, render_template, request, session, url_for
-from werkzeug.security import check_password_hash, generate_password_hash
 
-from application.common import load_json, require_login, save_json
-from application.settings import USERS_FILE
+from application.accounts import AccountError, UserRepository
+from application.common import require_login
+from application.db import database_manager
 
 bp = Blueprint("auth", __name__)
 
@@ -17,26 +17,14 @@ def index():
 @bp.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == 'POST':
-        data = request.get_json()
-        users = load_json(USERS_FILE)
-        user = None
-        for candidate in users:
-            if candidate.get('username') != data.get('username'):
-                continue
-            stored = str(candidate.get('password', ''))
-            supplied = str(data.get('password', ''))
-            try:
-                valid = check_password_hash(stored, supplied) if ':' in stored else stored == supplied
-            except ValueError:
-                valid = stored == supplied
-            if valid:
-                user = candidate
-                if ':' not in stored:
-                    candidate['password'] = generate_password_hash(supplied)
-                    save_json(USERS_FILE, users)
-                break
+        data = request.get_json(silent=True) or {}
+        try:
+            with database_manager().connect() as conn:
+                user = UserRepository(conn).verify(data.get('username'), data.get('password'))
+        except AccountError as exc:
+            return jsonify({'success': False, 'message': str(exc)}), 403
         if user:
-            session['user'] = {k: v for k, v in user.items() if k != 'password'}
+            session['user'] = user
             return jsonify({'success': True, 'role': user['role']})
         return jsonify({'success': False, 'message': '아이디 또는 비밀번호가 올바르지 않습니다.'})
     return render_template('login.html')

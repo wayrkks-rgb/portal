@@ -3,10 +3,12 @@ from __future__ import annotations
 from datetime import datetime
 
 from flask import Blueprint, jsonify, redirect, render_template, request, session, url_for
-from werkzeug.security import generate_password_hash
 
+from application.accounts import AccountError, UserRepository
 from application.common import load_json, require_admin, require_login, save_json
-from application.settings import MAPPINGS_FILE, USERS_FILE
+from application.db import database_manager
+from asset_sync.repositories import AssetRepository
+from application.settings import MAPPINGS_FILE
 
 bp = Blueprint("admin", __name__)
 
@@ -96,33 +98,74 @@ def save_sheet_vm_mapping():
     save_json(MAPPINGS_FILE, mappings)
     return jsonify({'success': True})
 
+def _audit_account(conn, action: str, target_id: str, before, after) -> None:
+    """Account changes are security relevant, so they go to the shared audit log."""
+    AssetRepository(conn).audit(
+        str(session['user'].get('username') or session['user'].get('id')),
+        action, 'app_user', target_id, None, before or {}, after or {},
+    )
+
+
 @bp.route("/api/users", methods=["GET"])
 @require_admin
 def get_users():
-    users = load_json(USERS_FILE)
-    return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in users])
+    with database_manager().connect() as conn:
+        return jsonify(UserRepository(conn).list_users())
 
 @bp.route("/api/users", methods=["POST"])
 @require_admin
 def add_user():
-    data = request.get_json()
-    users = load_json(USERS_FILE)
-    new_id = max((u['id'] for u in users), default=0) + 1
-    users.append({
-        'id': new_id,
-        'username': data['username'],
-        'password': generate_password_hash(data['password']),
-        'role': data.get('role', 'user'),
-        'name': data.get('name', data['username'])
-    })
-    save_json(USERS_FILE, users)
-    return jsonify({'success': True})
+    data = request.get_json(silent=True) or {}
+    try:
+        with database_manager().connect() as conn:
+            repo = UserRepository(conn)
+            user_id = repo.create(
+                username=data.get('username'),
+                password=data.get('password'),
+                name=data.get('name') or '',
+                role=data.get('role') or 'user',
+            )
+            created = repo.find_by_id(user_id) or {}
+            _audit_account(conn, 'CREATE', str(user_id), {}, {k: created.get(k) for k in ('username', 'name', 'role')})
+        return jsonify({'success': True, 'id': user_id})
+    except AccountError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+
+@bp.route("/api/users/<int:uid>", methods=["PUT"])
+@require_admin
+def update_user(uid):
+    data = request.get_json(silent=True) or {}
+    try:
+        with database_manager().connect() as conn:
+            repo = UserRepository(conn)
+            before = repo.find_by_id(uid)
+            if not before:
+                return jsonify({'success': False, 'error': '대상 계정을 찾을 수 없습니다.'}), 404
+            updated = repo.update(
+                uid,
+                name=data.get('name'),
+                role=data.get('role'),
+                enabled=data.get('enabled'),
+                password=data.get('password') or None,
+            )
+            _audit_account(
+                conn, 'UPDATE', str(uid),
+                {k: before.get(k) for k in ('name', 'role', 'enabled')},
+                {**{k: updated.get(k) for k in ('name', 'role', 'enabled')},
+                 'password_changed': bool(data.get('password'))},
+            )
+        return jsonify({'success': True, 'user': updated})
+    except AccountError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
 
 @bp.route("/api/users/<int:uid>", methods=["DELETE"])
 @require_admin
 def delete_user(uid):
-    users = load_json(USERS_FILE)
-    users = [u for u in users if u['id'] != uid]
-    save_json(USERS_FILE, users)
-    return jsonify({'success': True})
+    try:
+        with database_manager().connect() as conn:
+            removed = UserRepository(conn).delete(uid)
+            _audit_account(conn, 'DELETE', str(uid), {k: removed.get(k) for k in ('username', 'name', 'role')}, {})
+        return jsonify({'success': True})
+    except AccountError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
 

@@ -362,3 +362,17 @@ CREATE TABLE IF NOT EXISTS process_lock (
     acquired_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
 );
+
+-- 통합 웹 로그인 계정. 여러 WAS가 같은 계정을 보게 하려면 파일이 아니라 DB에 있어야 한다.
+CREATE TABLE IF NOT EXISTS app_user (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    name TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT,
+    last_login_at TEXT,
+    password_updated_at TEXT
+);

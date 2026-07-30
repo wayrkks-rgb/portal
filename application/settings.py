@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from werkzeug.security import generate_password_hash
-
 BASE_DIR = Path(__file__).resolve().parents[1]
 UPLOAD_DIR = BASE_DIR / "uploads"
 OUTPUT_DIR = BASE_DIR / "outputs"
@@ -16,22 +14,13 @@ HISTORY_FILE = DATA_DIR / "history.json"
 
 
 def initialize_legacy_data() -> None:
-    """Create the small JSON stores used by the existing report UI."""
+    """Create the small JSON stores used by the existing report UI.
+
+    Accounts are no longer created here: they live in the shared database so every
+    WAS sees the same list. An existing USERS_FILE is only read once, to import it.
+    """
     for directory in (UPLOAD_DIR, OUTPUT_DIR, DATA_DIR):
         directory.mkdir(parents=True, exist_ok=True)
-
-    if not USERS_FILE.exists():
-        USERS_FILE.write_text(
-            json.dumps(
-                [
-                    {"id": 1, "username": "admin", "password": generate_password_hash("admin123"), "role": "admin", "name": "관리자"},
-                    {"id": 2, "username": "user", "password": generate_password_hash("user123"), "role": "user", "name": "일반사용자"},
-                ],
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
 
     if not MAPPINGS_FILE.exists():
         MAPPINGS_FILE.write_text(
