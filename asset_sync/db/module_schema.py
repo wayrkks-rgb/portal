@@ -187,7 +187,15 @@ def apply_module_schemas(conn: Any, engine: str, *, directory: Path | None = Non
     applied: list[str] = []
     for schema in discover_module_schemas(engine, directory=directory):
         for statement in schema.statements:
-            conn.execute(statement)
+            try:
+                conn.execute(statement)
+            except Exception as exc:
+                # 어느 파일의 어느 문장인지 알려주지 않으면 담당자가 찾을 수 없다.
+                head = " ".join(statement.split())
+                raise type(exc)(
+                    f"{exc}\n  ↳ {schema.path.name} 의 문장: "
+                    f"{head if len(head) <= 160 else head[:157] + '...'}"
+                ) from exc
         applied.append(schema.module_id)
         LOGGER.info("모듈 스키마 적용: %s (%d 문장)", schema.module_id, len(schema.statements))
     return applied

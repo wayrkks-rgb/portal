@@ -17,6 +17,12 @@ from .dialects import Dialect
 LOGGER = logging.getLogger(__name__)
 
 
+def _first_line(statement: str) -> str:
+    """Identify a failing DDL statement without dumping the whole table body."""
+    head = " ".join(statement.split())
+    return head if len(head) <= 160 else head[:157] + "..."
+
+
 class ManagedConnection:
     """Thin wrapper exposing the small sqlite3-like API the project relies on."""
 
@@ -72,7 +78,12 @@ class ManagedConnection:
             return
         cursor = self._cursor()
         for statement in self._dialect.split_script(script):
-            cursor.execute(self._dialect.translate(statement))
+            try:
+                cursor.execute(self._dialect.translate(statement))
+            except Exception as exc:
+                # 드라이버 메시지만으로는 어느 테이블인지 알 수 없다. 스키마 파일에
+                # 문장이 수십 개라 이것이 없으면 담당자가 찾아낼 수단이 없다.
+                raise type(exc)(f"{exc}\n  ↳ 실패한 문장: {_first_line(statement)}") from exc
 
     def commit(self) -> None:
         self._raw.commit()

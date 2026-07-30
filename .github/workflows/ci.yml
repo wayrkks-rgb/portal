@@ -8,6 +8,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# 같은 branch 에 연달아 push 하면 앞선 실행은 의미가 없다. 취소해 대기열을 비운다.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
