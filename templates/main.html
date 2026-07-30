@@ -22,16 +22,21 @@ scripts.html / widget.html 을 두면 자동으로 include 된다(module_templat
   </div>
   <div class="content">
     <div id="module-panels-status"></div>
-    <div id="module-panels" class="module-panel-grid"></div>
-    {# 담당자가 직접 만든 축소 위젯. 패널 스펙(JSON)으로 부족할 때 쓴다. #}
+    {# 패널(WAS 가 보낸 스펙)과 위젯(담당자가 만든 HTML)을 한 격자에 함께 놓는다.
+       크기는 config/modules/<id>.yaml 의 dashboard.width 로 정하므로 담당자가
+       격자 CSS 를 알 필요가 없다. #}
     {% set module_widgets = module_templates | default({}) %}
-    {% if module_widgets.values() | selectattr('widget') | list %}
-    <div class="module-panel-grid" id="module-widgets">
-      {% for module in portal_modules | default([]) if module_widgets.get(module.id) and module_widgets[module.id].widget %}
-      {% include module_widgets[module.id].widget %}
-      {% endfor %}
+    <div class="module-panel-grid" id="module-dashboard-grid">
+      <div id="module-panels" class="dash-contents"></div>
+      <div id="module-widgets" class="dash-contents">
+        {% for module in portal_modules | default([]) if module_widgets.get(module.id) and module_widgets[module.id].widget %}
+        <div class="module-widget dash-w-{{ module.dashboard_width }}{% if module.dashboard_height > 1 %} dash-h-{{ module.dashboard_height }}{% endif %}"
+             id="module-widget-{{ module.id }}">
+          {% include module_widgets[module.id].widget %}
+        </div>
+        {% endfor %}
+      </div>
     </div>
-    {% endif %}
     <div id="dashboard-alert"></div>
     <div class="card">
       <div class="dashboard-section-head">

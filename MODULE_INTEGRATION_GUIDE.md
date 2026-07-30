@@ -35,6 +35,17 @@ panel_path: /api/dashboard/panel
 allowed_prefixes: ['/api/']     # 프록시 허용 경로
 timeout_seconds: 8              # 이 모듈만 다르게 줄 때
 access: role                    # role | explicit
+dashboard:                      # 통합 대시보드에서 차지할 크기 (전체 12칸)
+  width: 4                      #   4 = 1/3 폭
+  height: 1
+children:                       # 소메뉴. 있으면 사이드바가 2단이 된다
+- id: trend
+  name: 사용률 추이
+  icon: 📈
+- id: plan
+  name: 증설 계획
+  icon: 🧮
+  required_role: admin          # 관리자에게만 보이는 소메뉴
 ```
 
 배포 환경마다 주소가 다르면 `config/modules/capacity.local.yaml` 에 그 값만 적는다.
@@ -113,6 +124,18 @@ MODULE_SHARED_SECRET=<모든 WAS 가 같은 값>
 - 모든 항목은 생략 가능하다. 지표만, 표만 돌려줘도 된다.
 
 참조 구현은 `application/local_panels.py` 의 `asset_sync_panel` 이다.
+
+**소메뉴가 있으면 `?menu=<소메뉴 id>` 가 함께 온다.** 같은 엔드포인트에서 갈라 주면
+소메뉴별 화면이 완성된다. 통합 대시보드에서 부를 때는 `menu` 가 없다.
+
+```python
+@app.get("/api/dashboard/panel")
+def panel():
+    menu = request.args.get("menu", "")      # '' = 통합 대시보드용 요약
+    if menu == "trend":
+        return jsonify({"title": "사용률 추이", "table": {...}})
+    return jsonify({"title": "용량 요약", "metrics": [...]})
+```
 
 ### 2-3. 그 외 API
 
@@ -250,7 +273,58 @@ if request.method != "GET" and payload.get("perm") != "MANAGE":
     return jsonify({"error": "forbidden"}), 403
 ```
 
-## 9. 화면 파일 구조
+## 9. 메뉴와 통합 대시보드 배치
+
+### 9.0 사이드바
+
+메뉴는 `application/menu.py` 한 곳에서 만든다. 통합 웹 자신의 화면(`PORTAL_MENU`)과
+모듈 레지스트리를 같은 형태로 합치므로, 대메뉴를 추가할 때 `base.html` 을 고치지 않는다.
+
+```text
+운영            ← PORTAL_MENU (통합 웹 화면)
+  🏠 통합 대시보드
+  📝 보고서
+자산 관리        ← menu_section 이 같은 모듈이 이 묶음에 들어온다
+  🔗 자산 정합성
+    📋 정합성 현황        ← children (소메뉴)
+    🔍 ITSM↔vCenter 비교
+    🗃️ 수집 이력
+연계 모듈
+  📊 용량 관리
+    📈 사용률 추이
+    🧮 증설 계획          ← required_role: admin 이면 관리자에게만
+설정
+  ⚙️ 관리
+```
+
+- 묶음 이름은 `menu_section` 이다. 같은 이름을 쓰면 한 묶음으로 합쳐진다.
+  순서는 `menu.py` 의 `SECTION_ORDER`, 거기 없는 이름은 뒤에 사전순으로 붙는다.
+- 소메뉴가 가리키는 화면이 없으면 대메뉴 공통 화면에서 `?menu=<id>` 로 패널을 다시
+  받아 그린다(2-2 참고). 그래서 **화면 파일 없이 WAS 코드만으로도 소메뉴가 된다.**
+- 대메뉴 권한이 없으면 소메뉴도 통째로 사라진다(8장).
+
+### 9.1 통합 대시보드 배치
+
+통합 대시보드는 **12칸 격자**다. 담당자는 `dashboard.width` 로 자기 몫을 정한다.
+
+| `width` | 폭 | 쓰임 |
+| --- | --- | --- |
+| 3 | 1/4 | 지표 2~3개짜리 작은 위젯 |
+| 4 | 1/3 | 기본값. 지표 + 짧은 표 |
+| 6 | 1/2 | 표가 넓을 때 |
+| 12 | 전체 | 한 줄 전부 |
+
+`height` 는 세로 칸(최대 4)이고, 표가 길어 아래로 넘칠 때만 쓴다.
+`dashboard.enabled: false` 로 두면 대메뉴 화면에만 나오고 통합 대시보드에서 빠진다.
+
+화면이 좁아지면(1280px 이하) 1/2 미만 위젯은 반폭으로, 760px 이하에서는 전부 전체
+폭으로 접힌다. **담당자가 격자 CSS 를 다룰 일은 없다** — 패널 스펙이든
+`widget.html` 이든 통합 웹이 설정값으로 span 을 씌운다.
+
+대메뉴 화면(소메뉴 포함)에서는 패널을 전체 폭으로 그린다. 축소는 통합 대시보드에서만
+일어난다.
+
+### 9.2 화면 파일 구조
 
 대메뉴가 늘어도 팀별로 파일이 갈리도록 템플릿을 분할했다.
 
@@ -289,7 +363,7 @@ templates/
 - CSS 는 `base.html` 의 전역 스타일을 공유한다. 새 클래스 이름은 `capacity-` 처럼
   모듈 접두어를 붙여 다른 팀 화면에 영향을 주지 않게 한다.
 
-### 9.1 내부 모듈 코드
+### 9.3 내부 모듈 코드
 
 담당 WAS 를 따로 두지 않고 통합 웹 안에서 돌리는 경우, 파일 위치만 맞추면 등록된다.
 
@@ -388,7 +462,7 @@ asset_sync/db/modules/<module_id>_migrations.py  이미 배포된 DB 를 바꾸�
 
 | 필요한 것 | 파일 |
 | --- | --- |
-| 대메뉴 등록 | `config/modules/<id>.yaml` |
+| 대메뉴 등록 · 소메뉴 · 위젯 크기 | `config/modules/<id>.yaml` |
 | 환경별 주소 | `config/modules/<id>.local.yaml` (git 제외) |
 | 대메뉴 화면 | `templates/modules/<id>/page.html` |
 | 화면 스크립트 | `templates/modules/<id>/scripts.html` |
@@ -406,11 +480,11 @@ asset_sync/db/modules/<module_id>_migrations.py  이미 배포된 DB 를 바꾸�
 - **권한 변경이 메뉴에 즉시 반영되지 않는다.** 화면을 새로 열 때 갱신된다.
   세션에 캐시하지 않고 매 요청 조회하므로 API 는 즉시 반영된다.
 - **WAS 응답으로 HTML 을 받아 그릴 수는 없다.** 패널 스펙(JSON)만 렌더링한다.
-  모듈 고유 markup 이 필요하면 위 표의 템플릿 파일로 제공한다.
-- **위젯 크기를 지정할 수 없다.** 통합 대시보드는 지금 모든 패널·위젯을 같은 크기
-  격자에 넣는다. 담당자별 폭·높이 지정은 아직 없다.
-- **소메뉴(2단 메뉴)가 없다.** 대메뉴 하나가 화면 하나에 대응한다. 소메뉴는 지금은
-  `page.html` 안에서 탭으로 만든다.
+  모듈 고유 markup 이 필요하면 위 표의 템플릿 파일로 제공한다. 남의 WAS 가 보낸
+  HTML 을 그대로 넣으면 통합 웹 전체가 그 코드의 실행 범위가 되기 때문이다.
+- **메뉴는 2단까지다.** 3단이 필요하면 `page.html` 안에서 탭으로 만든다.
+- **격자 배치는 순서대로만 채운다.** "3열 2행의 이 자리" 처럼 좌표를 지정할 수는
+  없다. 순서는 레지스트리 등록 순서(= 파일 이름 사전순)를 따른다.
 - **프록시는 대용량 파일에 맞지 않다.** 요청 본문을 메모리에 모두 읽고 응답은
   `max_response_bytes`(기본 4MB)로 제한된다. 대용량 업로드·다운로드가 필요하면
   별도 설계가 필요하다.

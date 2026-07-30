@@ -95,6 +95,9 @@ def _panel_envelope(module: ModuleDefinition, status: str, **extra: Any) -> dict
         "panel": None,
         "error": None,
         "elapsed_ms": 0,
+        # 통합 대시보드 12칸 격자에서 차지할 크기. 화면이 이 값으로 span 을 준다.
+        "dashboard_width": module.dashboard_width,
+        "dashboard_height": module.dashboard_height,
     }
     envelope.update(extra)
     return envelope
@@ -163,6 +166,9 @@ class PanelAggregator:
         if module_ids:
             wanted = {str(item).strip().lower() for item in module_ids}
             pairs = [pair for pair in pairs if pair[0].id in wanted]
+        else:
+            # 통합 대시보드 전체 조회. 대메뉴 화면에만 쓰는 모듈은 여기서 빠진다.
+            pairs = [pair for pair in pairs if pair[0].show_in_dashboard]
         modules = [module for module, _ in pairs]
         permissions = {module.id: permission for module, permission in pairs}
         if not modules:

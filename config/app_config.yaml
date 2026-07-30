@@ -25,6 +25,8 @@ modules:
     shared_secret: ''
     token_ttl_seconds: 60
     header: X-Portal-Token
+  # 새 대메뉴는 config/modules/<id>.yaml 로 추가한다. 여기 목록은 통합 웹이
+  # 직접 갖고 있는 대메뉴만 둔다. 자세한 내용은 config/modules/README.md 참고.
   registry:
   - id: asset_sync
     name: 자산 정합성
@@ -32,10 +34,28 @@ modules:
     base_url: ''
     enabled: true
     required_role: user
-    menu_section: 운영
+    menu_section: 자산 관리
     page: asset_sync
     # role: required_role 로 판정(기본) · explicit: 사용자별 명시 부여가 있어야 접근
     access: role
+    # 통합 대시보드 12칸 격자에서 차지할 크기
+    dashboard:
+      width: 4
+      height: 1
+    # 소메뉴. page 는 통합 웹이 이미 갖고 있는 화면 id 다.
+    children:
+    - id: asset_sync_status
+      name: 정합성 현황
+      icon: 📋
+      page: asset_sync
+    - id: asset_sync_compare
+      name: ITSM↔vCenter 비교
+      icon: 🔍
+      page: compare
+    - id: asset_sync_history
+      name: 수집 이력
+      icon: 🗃️
+      page: history
 oracle:
   enabled: true
   mode: thin

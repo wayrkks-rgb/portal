@@ -8,6 +8,7 @@ from flask import Flask
 from application.accounts import ensure_accounts
 from application.db import database_manager
 from application.local_panels import register_all as register_local_panels
+from application.menu import build_sidebar
 from application.module_assets import discover_module_templates, register_local_modules
 from application.modules import ModuleClient, ModuleRegistry, create_modules_blueprint
 from application.settings import BASE_DIR, USERS_FILE, initialize_legacy_data
@@ -64,12 +65,11 @@ def create_app() -> Flask:
 
         user = current_user()
         if not user:
-            return {"portal_modules": [], "module_templates": {}}
+            return {"portal_modules": [], "module_templates": {}, "portal_sidebar": []}
         pairs = registry.accessible(user, granted_permissions(user))
+        visible = [{**module.public(), "permission": permission} for module, permission in pairs]
         return {
-            "portal_modules": [
-                {**module.public(), "permission": permission} for module, permission in pairs
-            ],
+            "portal_modules": visible,
             # 권한이 있는 모듈의 템플릿만 내려보낸다. 화면 파일이 있다고 해서
             # 권한 없는 사용자에게 렌더링되면 안 된다.
             "module_templates": {
@@ -77,6 +77,8 @@ def create_app() -> Flask:
                 for module, _ in pairs
                 if module.id in module_templates
             },
+            # 사이드바는 통합 웹 화면과 모듈을 같은 방식으로 그린다(소메뉴 포함).
+            "portal_sidebar": build_sidebar(visible, str(user.get("role") or "user")),
         }
 
     # 계정은 공유 DB에 둔다. 레거시 users.json 이 남아 있으면 최초 기동 때 이관한다.

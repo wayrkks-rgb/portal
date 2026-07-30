@@ -39,7 +39,27 @@ function showModulePage(moduleId){
   loadModulePage(moduleId);
 }
 
-function renderPanelCard(entry){
+// 소메뉴 클릭. 담당자가 자기 화면(page-<child.page>)을 제공했으면 그 화면으로
+// 전환하고, 없으면 공통 화면에서 해당 소메뉴의 패널을 다시 받아 그린다.
+function showModuleMenu(moduleId, childId){
+  const module = moduleById(moduleId);
+  if(!module) return;
+  const child = (module.children || []).find(c => c.id === childId);
+  const ownPage = child && document.getElementById(`page-${child.page}`);
+  if(ownPage){ showPage(child.page); return; }
+  showPage(module.page);
+  loadModulePage(moduleId, childId);
+}
+
+// 12칸 격자에서 이 패널이 차지할 칸. 대메뉴 화면에서는 하나만 그리므로 전체 폭.
+function panelSpanClass(entry, full){
+  if(full) return 'dash-w-12';
+  const width = Math.min(12, Math.max(1, Number(entry.dashboard_width) || 4));
+  const height = Math.min(4, Math.max(1, Number(entry.dashboard_height) || 1));
+  return `dash-w-${width}${height > 1 ? ` dash-h-${height}` : ''}`;
+}
+
+function renderPanelCard(entry, full){
   const failed = entry.status !== 'SUCCESS';
   const panel = entry.panel || {};
   const statusBadge = {
@@ -60,7 +80,7 @@ function renderPanelCard(entry){
         || `<tr><td colspan="${panel.table.columns.length}" style="text-align:center" class="text-muted">데이터가 없습니다.</td></tr>`}</tbody></table>
     </div>` : '';
   return `
-    <div class="module-panel${failed?' failed':''}">
+    <div class="module-panel${failed?' failed':''} ${panelSpanClass(entry, full)}">
       <div class="module-panel-head">
         <div class="module-panel-title"><span>${escapeHtml(entry.icon||'🧩')}</span>${escapeHtml(panel.title || entry.module_name)}</div>
         <div class="flex gap-2" style="align-items:center">${statusBadge}<span class="text-xs text-muted">${entry.elapsed_ms||0}ms</span></div>
@@ -77,7 +97,8 @@ async function loadModulePanels(){
   const statusEl = document.getElementById('module-panels-status');
   if(!container) return;
   setButtonBusy('btn-refresh-panels', true, '조회 중', '모듈 현황 새로고침');
-  container.innerHTML = '<div class="text-sm text-muted"><span class="loading"></span> 모듈 현황을 불러오는 중...</div>';
+  // 격자 안이므로 칸 수를 준다. 클래스가 없으면 1칸으로 찌그러진다.
+  container.innerHTML = '<div class="text-sm text-muted dash-w-12"><span class="loading"></span> 모듈 현황을 불러오는 중...</div>';
   const res = await integrationFetch('/api/modules/dashboard');
   setButtonBusy('btn-refresh-panels', false, '', '모듈 현황 새로고침');
   if(res.error && !res.panels){
@@ -93,15 +114,18 @@ async function loadModulePanels(){
         ? `<div class="alert alert-warning">모듈 ${counts.total}개 중 ${counts.success}개 정상 · 실패 ${counts.failed||0} · 미제공 ${counts.skipped||0} (${res.elapsed_ms||0}ms)</div>`
         : `<div class="alert alert-success">모듈 ${counts.total}개 전부 정상 (${res.elapsed_ms||0}ms)</div>`)
     : '<div class="alert alert-info">등록된 연계 모듈이 없습니다. 관리자가 모듈 레지스트리에 대메뉴를 추가하면 여기에 표시됩니다.</div>';
-  container.innerHTML = panels.map(renderPanelCard).join('');
+  // map 의 2번째 인자(index)가 full 로 넘어가지 않도록 명시적으로 감싼다.
+  container.innerHTML = panels.map(entry => renderPanelCard(entry, false)).join('');
 }
 
-async function loadModulePage(moduleId){
+async function loadModulePage(moduleId, menu){
   const statusEl = document.getElementById(`module-page-status-${moduleId}`);
   const bodyEl = document.getElementById(`module-page-body-${moduleId}`);
   if(!bodyEl) return;
-  bodyEl.innerHTML = '<div class="text-sm text-muted"><span class="loading"></span> 모듈 데이터를 불러오는 중...</div>';
-  const res = await integrationFetch(`/api/modules/dashboard?modules=${encodeURIComponent(moduleId)}`);
+  bodyEl.innerHTML = '<div class="text-sm text-muted dash-w-12"><span class="loading"></span> 모듈 데이터를 불러오는 중...</div>';
+  // menu 는 그대로 WAS 의 panel_path 질의로 전달된다. 소메뉴별 화면은 WAS 가 정한다.
+  const query = `modules=${encodeURIComponent(moduleId)}${menu ? `&menu=${encodeURIComponent(menu)}` : ''}`;
+  const res = await integrationFetch(`/api/modules/dashboard?${query}`);
   const panels = (res.panels || []);
   if(!panels.length){
     statusEl.innerHTML = `<div class="alert alert-error">${escapeHtml(res.error || '모듈 응답을 받지 못했습니다.')}</div>`;
@@ -109,7 +133,8 @@ async function loadModulePage(moduleId){
     return;
   }
   statusEl.innerHTML = '';
-  bodyEl.innerHTML = panels.map(renderPanelCard).join('');
+  // 대메뉴 화면은 패널 하나를 전체 폭으로 그린다. 축소는 통합 대시보드에서만 한다.
+  bodyEl.innerHTML = panels.map(entry => renderPanelCard(entry, true)).join('');
 }
 
 // ── 대시보드 ──

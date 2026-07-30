@@ -32,6 +32,19 @@ allowed_prefixes:
 - /api/
 timeout_seconds: 5
 show_in_menu: true
+# 통합 대시보드에서 차지할 크기. 전체가 12칸이므로 4 는 1/3 이다.
+dashboard:
+  width: 4
+  height: 1
+# 소메뉴. 있으면 사이드바가 2단으로 그려진다.
+children:
+- id: trend
+  name: 사용률 추이
+  icon: 📈
+- id: plan
+  name: 증설 계획
+  icon: 🧮
+  required_role: admin
 ```
 
 ```yaml
@@ -57,6 +70,39 @@ base_url: http://127.0.0.1:8081
 | `allowed_prefixes` | `['/api/']` | 프록시 허용 접두어 |
 | `show_in_menu` | `true` | 대시보드에만 넣고 메뉴에서 감출 때 `false` |
 | `access` | `role` | `explicit` 이면 관리자가 사용자별로 부여해야 보인다 |
+| `dashboard.width` | `4` | 통합 대시보드에서 차지할 칸(전체 12칸). 범위 밖 값은 잘린다 |
+| `dashboard.height` | `1` | 세로 칸(최대 4). 표가 긴 위젯에 쓴다 |
+| `dashboard.enabled` | `true` | `false` 면 대메뉴 화면에만 나오고 통합 대시보드에서 빠진다 |
+| `children` | 없음 | 소메뉴 목록 |
+
+### 소메뉴 (`children`)
+
+| 필드 | 기본값 | 설명 |
+| --- | --- | --- |
+| `id` | (필수) | 소문자/숫자/밑줄. 대메뉴 안에서 고유해야 한다 |
+| `name` | 소메뉴 ID | 사이드바에 표시되는 이름 |
+| `icon` | `•` | 소메뉴 아이콘 |
+| `page` | 소메뉴 ID | 화면 키. 통합 웹이 이미 갖고 있는 화면에 붙일 때만 따로 적는다 |
+| `required_role` | `user` | `admin` 이면 관리자에게만 보인다 |
+| `enabled` | `true` | `false` 면 메뉴에서 빠진다 |
+
+소메뉴를 누르면 두 가지 중 하나가 일어난다.
+
+1. `templates/modules/<id>/page.html` 에 `id="page-<소메뉴 page>"` 인 화면이 있으면 그 화면으로 전환한다.
+2. 없으면 대메뉴 공통 화면에서 **`?menu=<소메뉴 id>` 를 붙여 `panel_path` 를 다시 호출**한다.
+   WAS 가 `menu` 값을 보고 해당 소메뉴의 패널 스펙을 돌려주면 된다.
+
+2번이면 WAS 코드만으로 소메뉴가 완성된다. 화면 파일을 추가할 필요가 없다.
+
+```python
+# WAS 쪽 예시
+@app.get("/api/dashboard/panel")
+def panel():
+    menu = request.args.get("menu", "")
+    if menu == "trend":
+        return jsonify({"title": "사용률 추이", "table": {...}})
+    return jsonify({"title": "용량 요약", "metrics": [...]})
+```
 
 `base_url` 은 통합 웹 서버만 알면 되는 내부 주소다. 화면에는 내려가지 않는다.
 공유 비밀키(`MODULE_SHARED_SECRET`)는 이 파일이 아니라 `.env` 에 둔다.

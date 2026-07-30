@@ -21,9 +21,53 @@ _ROLE_RANK = {"user": 0, "admin": 1}
 _ACCESS_MODES = ("role", "explicit")
 DEFAULT_ALLOWED_PREFIXES = ("/api/",)
 
+# 통합 대시보드는 12칸 격자다. main.html 이 100 폭이라면 width 4 는 대략 33% 다.
+DASHBOARD_COLUMNS = 12
+DEFAULT_DASHBOARD_WIDTH = 4
+DEFAULT_DASHBOARD_HEIGHT = 1
+MAX_DASHBOARD_HEIGHT = 4
+
 
 class ModuleConfigError(ValueError):
     pass
+
+
+def _clamp(value: Any, default: int, low: int, high: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
+
+
+@dataclass(slots=True)
+class ModuleMenuItem:
+    """소메뉴 한 칸.
+
+    대메뉴 하나에 화면이 여러 개인 경우가 많다. 담당자가 ``children`` 을 적으면
+    사이드바가 2단으로 그려지고, 통합 웹 화면 파일은 고치지 않는다.
+    """
+
+    id: str
+    name: str
+    icon: str = "•"
+    page: str = ""
+    required_role: str = "user"
+    enabled: bool = True
+
+    def visible_to(self, role: str) -> bool:
+        required = _ROLE_RANK.get(str(self.required_role or "user").lower(), 0)
+        actual = _ROLE_RANK.get(str(role or "user").lower(), 0)
+        return self.enabled and actual >= required
+
+    def public(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "icon": self.icon,
+            "page": self.page or self.id,
+            "required_role": self.required_role,
+        }
 
 
 @dataclass(slots=True)
@@ -43,6 +87,11 @@ class ModuleDefinition:
     show_in_menu: bool = True
     # role: required_role 로 판정(기본) · explicit: 명시 부여가 있어야 접근 가능
     access: str = "role"
+    # 통합 대시보드에서 차지할 칸 수(12칸 기준). 담당자별 축소 위젯 크기다.
+    dashboard_width: int = DEFAULT_DASHBOARD_WIDTH
+    dashboard_height: int = DEFAULT_DASHBOARD_HEIGHT
+    show_in_dashboard: bool = True
+    children: tuple[ModuleMenuItem, ...] = field(default=())
 
     @property
     def is_local(self) -> bool:
@@ -53,6 +102,10 @@ class ModuleDefinition:
         required = _ROLE_RANK.get(str(self.required_role or "user").lower(), 0)
         actual = _ROLE_RANK.get(str(role or "user").lower(), 0)
         return self.enabled and actual >= required
+
+    def menu_items(self, role: str) -> list[ModuleMenuItem]:
+        """등급으로 걸러낸 소메뉴. 대메뉴 권한은 호출하는 쪽이 이미 판정했다."""
+        return [child for child in self.children if child.visible_to(role)]
 
     def public(self) -> dict[str, Any]:
         """화면에 넘길 정보. base_url 같은 내부 주소는 노출하지 않는다."""
@@ -66,6 +119,10 @@ class ModuleDefinition:
             "location": "LOCAL" if self.is_local else "REMOTE",
             "show_in_menu": self.show_in_menu,
             "access": self.access,
+            "dashboard_width": self.dashboard_width,
+            "dashboard_height": self.dashboard_height,
+            "show_in_dashboard": self.show_in_dashboard,
+            "children": [child.public() for child in self.children],
         }
 
     def resolve(self, path: str) -> str:
@@ -92,6 +149,41 @@ def _as_bool(value: Any, default: bool) -> bool:
     return str(value).strip().lower() in {"1", "true", "y", "yes", "on"}
 
 
+def _build_children(module_id: str, raw: Any) -> tuple[ModuleMenuItem, ...]:
+    """소메뉴 목록을 만든다. 항목 하나가 잘못돼도 대메뉴는 살린다."""
+    children: list[ModuleMenuItem] = []
+    seen: set[str] = set()
+    for entry in raw or []:
+        if not isinstance(entry, Mapping):
+            LOGGER.warning("%s 소메뉴 정의가 객체가 아니어서 건너뜁니다: %r", module_id, entry)
+            continue
+        child_id = str(entry.get("id") or "").strip().lower()
+        if not _MODULE_ID.fullmatch(child_id):
+            LOGGER.warning("%s 소메뉴 id 형식이 올바르지 않아 건너뜁니다: %r", module_id, entry.get("id"))
+            continue
+        if child_id in seen:
+            raise ModuleConfigError(f"{module_id} 소메뉴 id 가 중복되었습니다: {child_id}")
+        seen.add(child_id)
+        role = str(entry.get("required_role") or "user").strip().lower()
+        if role not in _ROLE_RANK:
+            raise ModuleConfigError(
+                f"{module_id}.{child_id} required_role 은 {', '.join(_ROLE_RANK)} 중 하나여야 합니다: {role}"
+            )
+        children.append(
+            ModuleMenuItem(
+                id=child_id,
+                name=str(entry.get("name") or child_id),
+                icon=str(entry.get("icon") or "•"),
+                # 기본 page 는 소메뉴 id 다. 통합 웹이 이미 갖고 있는 화면을 소메뉴로
+                # 붙일 때 page 만 따로 적으면 된다.
+                page=str(entry.get("page") or child_id),
+                required_role=role,
+                enabled=_as_bool(entry.get("enabled"), True),
+            )
+        )
+    return tuple(children)
+
+
 def _build(item: Mapping[str, Any]) -> ModuleDefinition:
     module_id = str(item.get("id") or "").strip().lower()
     if not _MODULE_ID.fullmatch(module_id):
@@ -111,6 +203,7 @@ def _build(item: Mapping[str, Any]) -> ModuleDefinition:
     if access not in _ACCESS_MODES:
         raise ModuleConfigError(f"{module_id} access 는 {', '.join(_ACCESS_MODES)} 중 하나여야 합니다: {access}")
     timeout = item.get("timeout_seconds")
+    dashboard = item.get("dashboard") if isinstance(item.get("dashboard"), Mapping) else {}
     return ModuleDefinition(
         id=module_id,
         name=str(item.get("name") or module_id),
@@ -126,6 +219,14 @@ def _build(item: Mapping[str, Any]) -> ModuleDefinition:
         allowed_prefixes=prefixes or DEFAULT_ALLOWED_PREFIXES,
         show_in_menu=_as_bool(item.get("show_in_menu"), True),
         access=access,
+        dashboard_width=_clamp(
+            dashboard.get("width"), DEFAULT_DASHBOARD_WIDTH, 1, DASHBOARD_COLUMNS
+        ),
+        dashboard_height=_clamp(
+            dashboard.get("height"), DEFAULT_DASHBOARD_HEIGHT, 1, MAX_DASHBOARD_HEIGHT
+        ),
+        show_in_dashboard=_as_bool(dashboard.get("enabled"), True),
+        children=_build_children(module_id, item.get("children")),
     )
 
 
