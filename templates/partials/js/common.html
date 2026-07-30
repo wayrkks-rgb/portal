@@ -220,7 +220,8 @@ window.addEventListener('load', () => {
   loadModulePanels();
   const page = '{{ page }}';
   if(page === 'history') loadHistory();
-  if(page === 'admin') { loadMenus(); }
+  if(page === 'admin_mapping') { loadMenus(); }
+  if(page === 'admin_users') { loadUsers(); }
   if(page === 'asset_sync') { loadAssetSyncDashboard(); }
   if(page === 'integration_settings') { loadIntegrationSettings(); }
   if(page === 'report') { loadResourceUsage(); }

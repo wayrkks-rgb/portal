@@ -2,7 +2,7 @@
 {# 관리자 전용 화면. 분할 전에는 하나의 if 블록이 여러 화면을 감싸고 있었다. #}
 {% if user.role == 'admin' %}
 <!-- ====== 관리 - 사용자 관리 ====== -->
-<div class="page" id="page-admin_users">
+<div class="page {% if page=='admin_users' %}active{% endif %}" id="page-admin_users">
   <div class="topbar">
     <div>
       <div class="topbar-title">사용자 관리</div>

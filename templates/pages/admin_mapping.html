@@ -2,7 +2,7 @@
 {# 관리자 전용 화면. 분할 전에는 하나의 if 블록이 여러 화면을 감싸고 있었다. #}
 <!-- ====== 관리 - 매핑 설정 ====== -->
 {% if user.role == 'admin' %}
-<div class="page" id="page-admin_mapping">
+<div class="page {% if page=='admin_mapping' %}active{% endif %}" id="page-admin_mapping">
   <div class="topbar">
     <div>
       <div class="topbar-title">비교 스크립트 관리</div>

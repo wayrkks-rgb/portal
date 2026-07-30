@@ -22,7 +22,8 @@ bp = Blueprint("admin", __name__)
 def admin():
     if session['user']['role'] != 'admin':
         return redirect(url_for('auth.dashboard'))
-    return render_template('main.html', user=session['user'], page='admin')
+    # page 값은 화면 id 와 같아야 한다. 'admin' 은 대응하는 화면이 없어 빈 화면이 떴다.
+    return render_template('main.html', user=session['user'], page='admin_mapping')
 
 @bp.route("/api/mappings", methods=["GET"])
 @require_login
