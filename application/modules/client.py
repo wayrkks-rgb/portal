@@ -14,15 +14,31 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Mapping
-
-import requests
-from requests.adapters import HTTPAdapter
+from typing import TYPE_CHECKING, Any, Mapping
 
 from .registry import ModuleConfigError, ModuleDefinition, ModuleRegistry
 from .tokens import issue_token, mask_token
 
+if TYPE_CHECKING:  # 타입 힌트 전용. 실행 시점에는 import 하지 않는다.
+    import requests
+
 LOGGER = logging.getLogger(__name__)
+
+# requests 는 원격 대메뉴를 호출할 때만 필요하다. 여기서 최상위 import 를 하면
+# 패키지가 없는 설치에서 통합 웹 자체가 기동하지 못한다 -- 원격 모듈을 하나도
+# 쓰지 않는 경우까지 막히므로, 실제로 호출할 때 가져온다.
+_REQUESTS_MISSING = (
+    "requests 패키지가 설치되지 않아 원격 대메뉴를 호출할 수 없습니다. "
+    "requirements-bff.txt 를 설치하세요. 통합 웹의 나머지 기능은 그대로 동작합니다."
+)
+
+
+def _import_requests():
+    try:
+        import requests  # noqa: PLC0415 - 지연 import 가 의도다
+    except ImportError as exc:
+        raise ModuleConfigError(_REQUESTS_MISSING) from exc
+    return requests
 
 # 상태값은 기존 수집 파이프라인(PARTIAL_SUCCESS/COLLECTION_GAP)과 같은 결로 맞춘다.
 STATUS_SUCCESS = "SUCCESS"
@@ -64,12 +80,22 @@ class ModuleResponse:
 class ModuleClient:
     """레지스트리에 등록된 모듈을 호출한다. 커넥션은 Session 으로 재사용한다."""
 
-    def __init__(self, registry: ModuleRegistry, session: requests.Session | None = None) -> None:
+    def __init__(self, registry: ModuleRegistry, session: "requests.Session | None" = None) -> None:
         self.registry = registry
-        self.session = session or self._build_session()
+        # 세션 생성도 미룬다. 원격 모듈이 없으면 requests 가 없어도 상관없다.
+        self._session = session
+
+    @property
+    def session(self) -> "requests.Session":
+        if self._session is None:
+            self._session = self._build_session()
+        return self._session
 
     @staticmethod
-    def _build_session() -> requests.Session:
+    def _build_session() -> "requests.Session":
+        requests = _import_requests()
+        from requests.adapters import HTTPAdapter
+
         session = requests.Session()
         # 대시보드가 모듈마다 반복 호출하므로 커넥션 재사용이 지연에 크게 영향을 준다.
         adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=0)
@@ -125,6 +151,8 @@ class ModuleClient:
             if module.is_local:
                 raise ModuleConfigError(f"내부 모듈은 프록시 대상이 아닙니다: {module_id}")
             url = module.resolve(path)
+            # requests 가 없으면 이 모듈만 실패로 처리한다. 화면 전체가 죽으면 안 된다.
+            _requests = _import_requests()
         except ModuleConfigError as exc:
             return ModuleResponse(module_id, STATUS_FAILED, error=str(exc))
 
@@ -151,9 +179,9 @@ class ModuleClient:
                     allow_redirects=False,
                     stream=True,
                 )
-            except requests.Timeout:
+            except _requests.Timeout:
                 last_status, last_error = STATUS_TIMEOUT, f"{effective_timeout:.1f}초 안에 응답하지 않았습니다."
-            except requests.RequestException as exc:
+            except _requests.RequestException as exc:
                 # 드라이버 예외 원문은 화면에 담기에 너무 길다. 상세는 로그에만 남긴다.
                 LOGGER.warning("모듈 연결 실패 %s: %s", module.id, exc)
                 last_status = STATUS_UNREACHABLE
@@ -173,7 +201,7 @@ class ModuleClient:
     def _read(
         self,
         module: ModuleDefinition,
-        response: requests.Response,
+        response: "requests.Response",
         started: float,
         *,
         parse_json: bool,

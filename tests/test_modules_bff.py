@@ -440,3 +440,43 @@ def test_login_required_on_module_endpoints(portal) -> None:
     anonymous = portal.test_client()
     for path in ("/api/modules", "/api/modules/health", "/api/modules/dashboard"):
         assert anonymous.get(path).status_code in (302, 401)
+
+
+# ------------------------------------------------- 선택 의존성 (requests)
+def test_client_can_be_created_without_requests(monkeypatch) -> None:
+    """requests 가 없어도 통합 웹은 기동해야 한다.
+
+    최상위 import 였을 때는 원격 대메뉴를 하나도 쓰지 않는 설치에서도 앱 자체가
+    뜨지 않았다(ModuleNotFoundError: No module named 'requests').
+    """
+    import application.modules.client as client_module
+
+    registry = ModuleRegistry.from_config({"registry": [{"id": "asset_sync", "name": "자산", "base_url": ""}]})
+    monkeypatch.setattr(client_module, "_import_requests", _raise_missing)
+    # 생성 시점에 세션을 만들지 않으므로 예외가 없어야 한다.
+    ModuleClient(registry)
+
+
+def _raise_missing():
+    from application.modules.registry import ModuleConfigError
+
+    raise ModuleConfigError(client_missing_message())
+
+
+def client_missing_message() -> str:
+    import application.modules.client as client_module
+
+    return client_module._REQUESTS_MISSING
+
+
+def test_a_remote_call_without_requests_fails_only_that_module(monkeypatch) -> None:
+    """설치 안내가 담긴 실패 응답이어야 하고, 예외로 화면을 깨면 안 된다."""
+    import application.modules.client as client_module
+
+    registry = ModuleRegistry.from_config(
+        {"registry": [{"id": "remote", "name": "원격", "base_url": "http://127.0.0.1:9"}]}
+    )
+    monkeypatch.setattr(client_module, "_import_requests", _raise_missing)
+    response = ModuleClient(registry).call("remote", "/api/health")
+    assert response.ok is False
+    assert "requirements-bff.txt" in (response.error or "")

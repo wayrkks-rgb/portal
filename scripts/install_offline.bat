@@ -33,6 +33,13 @@ if errorlevel 1 exit /b 1
 ".venv\Scripts\python.exe" -m pip install --no-index --find-links "wheels" -r requirements-dev.txt
 if errorlevel 1 exit /b 1
 
+REM 대메뉴 WAS 호출(BFF)과 MySQL 공유 DB 용. 둘 다 없으면 해당 기능만 못 쓴다.
+".venv\Scripts\python.exe" -m pip install --no-index --find-links "wheels" -r requirements-bff.txt
+if errorlevel 1 exit /b 1
+
+".venv\Scripts\python.exe" -m pip install --no-index --find-links "wheels" -r requirements-mysql.txt
+if errorlevel 1 exit /b 1
+
 ".venv\Scripts\python.exe" scripts\initialize_db.py
 if errorlevel 1 exit /b 1
 
