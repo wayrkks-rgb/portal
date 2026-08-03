@@ -20,9 +20,24 @@ def main() -> None:
     itsm_mode = str(cfg.itsm.get("collection_mode", "ORACLE")).upper()
     vc_mode = str(cfg.rvtools.get("collection_mode", "POWERCLI")).upper()
 
-    if itsm_mode != "ORACLE":
+    # 수집기는 아래 값만 받는다. 그 밖의 값이면 배치가 시작하자마자 실패하므로
+    # 여기서 오류로 잡는다 -- 경고로 두면 07시 배치가 실패한 뒤에야 알게 된다.
+    valid_itsm = {"DEMO", "FILE_ONLY", "ORACLE"}
+    valid_vcenter = {"DEMO", "FILE_ONLY", "POWERCLI"}
+    if itsm_mode not in valid_itsm:
+        errors.append(
+            f"ITSM collection_mode 값이 잘못되었습니다: {itsm_mode} "
+            f"(가능한 값: {', '.join(sorted(valid_itsm))})"
+        )
+    elif itsm_mode != "ORACLE":
         warnings.append(f"ITSM mode is {itsm_mode}; operating mode should normally be ORACLE.")
-    if vc_mode != "POWERCLI":
+    if vc_mode not in valid_vcenter:
+        errors.append(
+            f"vCenter collection_mode 값이 잘못되었습니다: {vc_mode} "
+            f"(가능한 값: {', '.join(sorted(valid_vcenter))}) "
+            "· 관리 → 연동정보 관리 에서 수집모드를 다시 저장하면 정상값으로 맞춰집니다."
+        )
+    elif vc_mode != "POWERCLI":
         warnings.append(f"vCenter mode is {vc_mode}; operating mode should normally be POWERCLI.")
 
     if itsm_mode == "ORACLE":
