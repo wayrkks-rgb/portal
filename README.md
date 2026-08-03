@@ -65,4 +65,11 @@ data/archive/vcenter/YYYYMMDD/       날짜별 vCenter XLSX
 
 상세 절차는 `BEGINNER_RUN_AND_VALIDATION_GUIDE.md`와 `CONNECTION_SETUP_GUIDE.md`를 참고한다.
 여러 WAS를 붙여 운영하려면 `MULTI_WAS_MYSQL_GUIDE.md`를 함께 본다.
-통합 웹에 새 대메뉴(담당 WAS)를 추가하려면 `MODULE_INTEGRATION_GUIDE.md`를 본다.
+
+## 대메뉴 연동 (타 팀 담당자)
+
+| 문서 | 용도 |
+|---|---|
+| **`MODULE_ONBOARDING.md`** | **먼저 읽는다.** 구조와 최소 연동 방법을 한 번에 정리 |
+| `MODULE_INTEGRATION_GUIDE.md` | 세부 규격 (프록시 차단 항목·권한·스키마 규칙 전체) |
+| `config/modules/README.md` | 등록 파일의 필드 표 |
