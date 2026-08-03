@@ -6,7 +6,12 @@ from typing import Any
 
 from ..config import AppConfig
 from ..utils.validation import validate_oracle_identifier
-from .oracle_connection import OracleConnectionError, build_connect_kwargs, prepare_driver
+from .oracle_connection import (
+    OracleConnectionError,
+    apply_call_timeout,
+    build_connect_kwargs,
+    prepare_driver,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -68,7 +73,10 @@ class OracleITSMCollector:
             .strip()
             .rstrip(";")
         )
-        fetch_size = int(oracle_cfg.get("fetch_size", 1000))
+        # arraysize 는 한 번에 받아올 행 수다. 컬럼이 많으면 행당 버퍼가 커져서
+        # 값을 크게 잡을수록 메모리와 왕복 지연이 함께 늘어난다. 수천 행 규모에서는
+        # 수백이면 충분하고, 그 이상은 이득 없이 버퍼만 커진다.
+        fetch_size = max(1, min(int(oracle_cfg.get("fetch_size", 500) or 500), 5000))
         self.last_metadata = {
             "asset_source_configured": bool(asset_source) or not requires_asset_source,
             "asset_source": asset_source,
@@ -85,10 +93,13 @@ class OracleITSMCollector:
         fetched = 0
         try:
             with oracledb.connect(**kwargs) as connection:
+                query_timeout = apply_call_timeout(connection, oracle_cfg)
+                self.last_metadata["query_timeout_seconds"] = query_timeout
                 stage = "EXECUTE"
                 with connection.cursor() as cursor:
                     cursor.arraysize = fetch_size
-                    cursor.prefetchrows = fetch_size
+                    # prefetchrows 까지 같이 키우면 첫 왕복에서 같은 양을 한 번 더
+                    # 버퍼링한다. 컬럼이 많을수록 낭비라 기본값에 맡긴다.
                     cursor.execute(sql)
                     stage = "DESCRIBE"
                     columns = [str(column[0]).upper() for column in cursor.description]
@@ -109,6 +120,9 @@ class OracleITSMCollector:
                         fetched += len(rows)
                         if not rows:
                             break
+                        if fetched % (fetch_size * 10) == 0:
+                            # 오래 걸릴 때 어디까지 갔는지 로그로 알 수 있어야 한다.
+                            LOGGER.info("Oracle 수집 진행: %d건", fetched)
                         for row in rows:
                             records.append(dict(zip(columns, row)))
                             if max_rows is not None and len(records) >= max_rows:

@@ -6,6 +6,11 @@ from typing import Any, Iterator, Mapping
 
 LOGGER = logging.getLogger(__name__)
 
+#: 접속 단계 제한(초). 폐쇄망에서 경로가 막히면 여기서 걸린다.
+DEFAULT_CONNECT_TIMEOUT = 15
+#: 조회 한 건의 제한(초). 컬럼이 많고 행이 수천이어도 이 안에 끝나야 정상이다.
+DEFAULT_QUERY_TIMEOUT = 300
+
 
 class OracleConnectionError(RuntimeError):
     pass
@@ -64,7 +69,37 @@ def build_connect_kwargs(oracle_cfg: Mapping[str, Any]) -> dict[str, Any]:
     else:
         kwargs.update({"host": host, "port": port})
         kwargs["service_name" if service_name else "sid"] = service_name or sid
+
+    # 타임아웃이 없으면 방화벽이 조용히 끊었을 때 무한정 기다리거나, 한참 뒤에
+    # 엉뚱한 오류로 나타난다. 어디서 막혔는지 알 수 있게 접속 단계에 제한을 둔다.
+    connect_timeout = _positive_int(oracle_cfg.get("connect_timeout_seconds"), DEFAULT_CONNECT_TIMEOUT)
+    if connect_timeout:
+        kwargs["tcp_connect_timeout"] = connect_timeout
     return kwargs
+
+
+def _positive_int(value: Any, default: int) -> int:
+    """0 이나 빈 값은 '제한 없음' 으로 본다."""
+    if value in (None, ""):
+        return default
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0, number)
+
+
+def apply_call_timeout(connection: Any, oracle_cfg: Mapping[str, Any]) -> int:
+    """조회 한 건이 이 시간을 넘기면 드라이버가 끊는다.
+
+    접속은 됐는데 조회가 끝나지 않는 경우(잠금 대기, 과도한 전체 스캔)를 잡는다.
+    0 이면 제한하지 않는다.
+    """
+    seconds = _positive_int(oracle_cfg.get("query_timeout_seconds"), DEFAULT_QUERY_TIMEOUT)
+    if seconds:
+        # call_timeout 은 밀리초 단위다.
+        connection.call_timeout = seconds * 1000
+    return seconds
 
 
 @contextmanager
@@ -73,4 +108,5 @@ def oracle_connection(oracle_cfg: Mapping[str, Any]) -> Iterator[Any]:
     oracledb = prepare_driver(oracle_cfg)
     kwargs = build_connect_kwargs(oracle_cfg)
     with oracledb.connect(**kwargs) as connection:
+        apply_call_timeout(connection, oracle_cfg)
         yield connection

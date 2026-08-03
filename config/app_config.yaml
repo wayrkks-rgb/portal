@@ -61,7 +61,12 @@ oracle:
   mode: thin
   asset_source: ''
   query_file: config/oracle_query.local.sql
-  fetch_size: 1000
+  # 한 번에 받아올 행 수. 컬럼이 많으면 행당 버퍼가 커지므로 크게 잡을 이유가 없다.
+  fetch_size: 500
+  # 접속 단계 제한(초). 방화벽이 막혀 있으면 여기서 끝난다.
+  connect_timeout_seconds: 15
+  # 조회 한 건의 제한(초). 0 이면 제한 없음.
+  query_timeout_seconds: 300
   port: 1521
 itsm:
   collection_mode: ORACLE
