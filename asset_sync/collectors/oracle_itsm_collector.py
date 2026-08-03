@@ -15,6 +15,15 @@ class OracleCollectionError(RuntimeError):
     pass
 
 
+#: 실패 단계별로 무엇을 확인해야 하는지. 드라이버 오류 코드만 보면 판단이 어렵다.
+_HINTS = {
+    "CONNECT": " · 접속 자체가 안 됨: 주소·포트·서비스명·계정 확인",
+    "EXECUTE": " · 접속은 됐고 SQL 실행에서 실패: 조회 SQL 과 대상 테이블 권한 확인",
+    "DESCRIBE": " · SQL 은 통과했으나 결과 구조를 읽지 못함",
+    "FETCH": " · 조회 도중 끊김: 세션 타임아웃·방화벽 idle 차단·건수 과다 가능성",
+}
+
+
 class OracleITSMCollector:
     """Read-only Oracle collector. Import and connect only when ORACLE mode runs."""
 
@@ -70,12 +79,18 @@ class OracleITSMCollector:
             "mode": mode,
         }
 
+        # 실패했을 때 어느 단계였는지 남긴다. 드라이버 메시지(예: DPY-1001)만으로는
+        # 접속에서 끊긴 건지 조회 도중 끊긴 건지 구분할 수 없다.
+        stage = "CONNECT"
+        fetched = 0
         try:
             with oracledb.connect(**kwargs) as connection:
+                stage = "EXECUTE"
                 with connection.cursor() as cursor:
                     cursor.arraysize = fetch_size
                     cursor.prefetchrows = fetch_size
                     cursor.execute(sql)
+                    stage = "DESCRIBE"
                     columns = [str(column[0]).upper() for column in cursor.description]
                     memory_field = str(self.config.itsm.get("memory_field", "CM_MEMORY")).upper()
                     required = {
@@ -88,8 +103,10 @@ class OracleITSMCollector:
                     self.last_metadata["columns"] = columns
                     self.last_metadata["required_columns"] = sorted(required)
                     records: list[dict[str, Any]] = []
+                    stage = "FETCH"
                     while True:
                         rows = cursor.fetchmany(fetch_size)
+                        fetched += len(rows)
                         if not rows:
                             break
                         for row in rows:
@@ -101,8 +118,10 @@ class OracleITSMCollector:
         except OracleCollectionError:
             raise
         except Exception as exc:
-            LOGGER.exception("Oracle collection failed")
-            raise OracleCollectionError(str(exc)) from exc
+            LOGGER.exception("Oracle collection failed (stage=%s, fetched=%d)", stage, fetched)
+            self.last_metadata["failed_stage"] = stage
+            self.last_metadata["fetched_before_failure"] = fetched
+            raise OracleCollectionError(f"{exc} [단계={stage}{_HINTS.get(stage, '')}]") from exc
 
         if not records:
             raise OracleCollectionError("Oracle 조회 결과가 0건입니다. 정상 스냅샷으로 저장하지 않습니다.")
