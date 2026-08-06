@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from asset_sync.collectors.oracle_connection import describe_exception
 from asset_sync.collectors.oracle_itsm_collector import OracleITSMCollector
 from asset_sync.config import load_config
 
@@ -41,10 +42,15 @@ def main() -> int:
         result = OracleITSMCollector(config).test_connection()
     except Exception as exc:
         # 예외 사슬의 가장 안쪽이 실제 이유다(드라이버 미설치, 로그인 실패, ORA-00942 등).
+        # __cause__ 뿐 아니라 __context__ 도 따라가야 한다. 정리 단계에서 다시 실패하면
+        # 원래 오류가 __context__ 로 밀려나고 DPY-1001 같은 결과만 남는다.
         root = exc
-        while root.__cause__ is not None:
-            root = root.__cause__
-        payload = {"status": "FAILED", "error": str(exc)}
+        while root.__cause__ is not None or root.__context__ is not None:
+            nxt = root.__cause__ or root.__context__
+            if nxt is None or nxt is root:
+                break
+            root = nxt
+        payload = {"status": "FAILED", "error": describe_exception(exc)}
         if str(root) != str(exc):
             payload["root_cause"] = str(root)
         print(json.dumps(payload, ensure_ascii=False, indent=2))

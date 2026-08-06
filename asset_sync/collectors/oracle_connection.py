@@ -16,6 +16,28 @@ class OracleConnectionError(RuntimeError):
     pass
 
 
+def describe_exception(exc: BaseException, limit: int = 5) -> str:
+    """예외 사슬을 한 줄로 편다.
+
+    드라이버가 실패한 뒤 정리 단계에서 다시 실패하면, 마지막 오류만 남고 원래
+    이유는 __context__ 로 밀려난다. DPY-1001("not connected to database")이 대표적인
+    예다. 이 값은 "연결이 이미 끊긴 객체를 썼다"는 결과일 뿐이라, 그것만 봐서는
+    왜 끊겼는지 알 수 없다. 원인 사슬을 같이 남겨야 판단할 수 있다.
+    """
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and len(parts) < limit:
+        if id(current) in seen:
+            break
+        seen.add(id(current))
+        text = " ".join(str(current).split()) or current.__class__.__name__
+        if not parts or text != parts[-1]:
+            parts.append(text)
+        current = current.__cause__ or current.__context__
+    return " ← 원인: ".join(parts)
+
+
 def import_oracledb() -> Any:
     """Import the driver only when an Oracle feature actually runs."""
     try:

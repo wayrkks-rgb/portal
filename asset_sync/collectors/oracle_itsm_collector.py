@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from typing import Any
 
 from ..config import AppConfig
@@ -10,6 +11,7 @@ from .oracle_connection import (
     OracleConnectionError,
     apply_call_timeout,
     build_connect_kwargs,
+    describe_exception,
     prepare_driver,
 )
 
@@ -28,6 +30,10 @@ _HINTS = {
     "FETCH": " · 조회 도중 끊김: 세션 타임아웃·방화벽 idle 차단·건수 과다 가능성",
 }
 
+#: 이 파일이 실제로 반영됐는지 화면에서 바로 확인하기 위한 표식.
+#: 오류 문구에 같이 나오므로, 표식이 안 보이면 예전 파일이 돌고 있는 것이다.
+COLLECTOR_BUILD = "2026-08-oracle-diag"
+
 
 class OracleITSMCollector:
     """Read-only Oracle collector. Import and connect only when ORACLE mode runs."""
@@ -36,15 +42,13 @@ class OracleITSMCollector:
         self.config = config
         self.last_metadata: dict[str, Any] = {}
 
-    def collect(self, max_rows: int | None = None) -> list[dict[str, Any]]:
-        oracle_cfg = self.config.oracle
-        try:
-            oracledb = prepare_driver(oracle_cfg)
-            kwargs = build_connect_kwargs(oracle_cfg)
-        except OracleConnectionError as exc:
-            raise OracleCollectionError(str(exc)) from exc
-        mode = str(oracle_cfg.get("mode", "thin")).lower()
+    def prepare_query(self) -> tuple[str, dict[str, Any]]:
+        """조회 SQL 을 완성하고 그 근거를 함께 돌려준다.
 
+        접속 없이도 확인할 수 있어야 진단 스크립트가 같은 SQL 을 쓸 수 있다.
+        """
+        oracle_cfg = self.config.oracle
+        mode = str(oracle_cfg.get("mode", "thin")).lower()
         query_path = self.config.resolve(oracle_cfg.get("query_file", "config/oracle_query.local.sql"))
         if not query_path.exists():
             raise OracleCollectionError(
@@ -73,11 +77,7 @@ class OracleITSMCollector:
             .strip()
             .rstrip(";")
         )
-        # arraysize 는 한 번에 받아올 행 수다. 컬럼이 많으면 행당 버퍼가 커져서
-        # 값을 크게 잡을수록 메모리와 왕복 지연이 함께 늘어난다. 수천 행 규모에서는
-        # 수백이면 충분하고, 그 이상은 이득 없이 버퍼만 커진다.
-        fetch_size = max(1, min(int(oracle_cfg.get("fetch_size", 500) or 500), 5000))
-        self.last_metadata = {
+        return sql, {
             "asset_source_configured": bool(asset_source) or not requires_asset_source,
             "asset_source": asset_source,
             "query_file": str(query_path),
@@ -87,21 +87,50 @@ class OracleITSMCollector:
             "mode": mode,
         }
 
+    def collect(self, max_rows: int | None = None) -> list[dict[str, Any]]:
+        oracle_cfg = self.config.oracle
+        try:
+            oracledb = prepare_driver(oracle_cfg)
+            kwargs = build_connect_kwargs(oracle_cfg)
+        except OracleConnectionError as exc:
+            raise OracleCollectionError(str(exc)) from exc
+
+        sql, metadata = self.prepare_query()
+        cpu_field = str(metadata["cpu_field"])
+        eos_field = str(metadata["eos_field"])
+        # arraysize 는 한 번에 받아올 행 수다. 컬럼이 많으면 행당 버퍼가 커져서
+        # 값을 크게 잡을수록 메모리와 왕복 지연이 함께 늘어난다. 수천 행 규모에서는
+        # 수백이면 충분하고, 그 이상은 이득 없이 버퍼만 커진다.
+        fetch_size = max(1, min(int(oracle_cfg.get("fetch_size", 500) or 500), 5000))
+        self.last_metadata = dict(metadata)
+
         # 실패했을 때 어느 단계였는지 남긴다. 드라이버 메시지(예: DPY-1001)만으로는
         # 접속에서 끊긴 건지 조회 도중 끊긴 건지 구분할 수 없다.
         stage = "CONNECT"
         fetched = 0
+        started_at = time.monotonic()
+        stage_at = started_at
+        stage_seconds: dict[str, float] = {}
+
+        def enter(next_stage: str) -> str:
+            """단계 전환. 각 단계에 몇 초가 걸렸는지 남긴다."""
+            nonlocal stage_at
+            now = time.monotonic()
+            stage_seconds[stage] = round(now - stage_at, 1)
+            stage_at = now
+            return next_stage
+
         try:
             with oracledb.connect(**kwargs) as connection:
                 query_timeout = apply_call_timeout(connection, oracle_cfg)
                 self.last_metadata["query_timeout_seconds"] = query_timeout
-                stage = "EXECUTE"
+                stage = enter("EXECUTE")
                 with connection.cursor() as cursor:
                     cursor.arraysize = fetch_size
                     # prefetchrows 까지 같이 키우면 첫 왕복에서 같은 양을 한 번 더
                     # 버퍼링한다. 컬럼이 많을수록 낭비라 기본값에 맡긴다.
                     cursor.execute(sql)
-                    stage = "DESCRIBE"
+                    stage = enter("DESCRIBE")
                     columns = [str(column[0]).upper() for column in cursor.description]
                     memory_field = str(self.config.itsm.get("memory_field", "CM_MEMORY")).upper()
                     required = {
@@ -114,7 +143,7 @@ class OracleITSMCollector:
                     self.last_metadata["columns"] = columns
                     self.last_metadata["required_columns"] = sorted(required)
                     records: list[dict[str, Any]] = []
-                    stage = "FETCH"
+                    stage = enter("FETCH")
                     while True:
                         rows = cursor.fetchmany(fetch_size)
                         fetched += len(rows)
@@ -132,10 +161,22 @@ class OracleITSMCollector:
         except OracleCollectionError:
             raise
         except Exception as exc:
-            LOGGER.exception("Oracle collection failed (stage=%s, fetched=%d)", stage, fetched)
+            elapsed = round(time.monotonic() - started_at, 1)
+            stage_seconds[stage] = round(time.monotonic() - stage_at, 1)
+            LOGGER.exception(
+                "Oracle collection failed (build=%s, stage=%s, fetched=%d, elapsed=%.1fs, stages=%s)",
+                COLLECTOR_BUILD, stage, fetched, elapsed, stage_seconds,
+            )
             self.last_metadata["failed_stage"] = stage
             self.last_metadata["fetched_before_failure"] = fetched
-            raise OracleCollectionError(f"{exc} [단계={stage}{_HINTS.get(stage, '')}]") from exc
+            self.last_metadata["stage_seconds"] = stage_seconds
+            self.last_metadata["elapsed_seconds"] = elapsed
+            # 마지막 오류만 보여주면 원인을 잃는다. 사슬과 경과시간을 함께 남긴다.
+            raise OracleCollectionError(
+                f"{describe_exception(exc)} "
+                f"[단계={stage} 경과={elapsed}초 수집={fetched}건 "
+                f"단계별초={stage_seconds} build={COLLECTOR_BUILD}{_HINTS.get(stage, '')}]"
+            ) from exc
 
         if not records:
             raise OracleCollectionError("Oracle 조회 결과가 0건입니다. 정상 스냅샷으로 저장하지 않습니다.")

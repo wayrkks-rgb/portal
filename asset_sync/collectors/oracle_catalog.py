@@ -19,7 +19,7 @@ from decimal import Decimal
 from typing import Any, Iterable, Mapping
 
 from ..utils.validation import validate_oracle_identifier
-from .oracle_connection import OracleConnectionError, oracle_connection
+from .oracle_connection import OracleConnectionError, describe_exception, oracle_connection
 
 LOGGER = logging.getLogger(__name__)
 
@@ -112,7 +112,7 @@ class OracleCatalogBrowser:
             raise
         except Exception as exc:
             LOGGER.exception("Oracle catalog query failed")
-            raise OracleCatalogError(str(exc)) from exc
+            raise OracleCatalogError(describe_exception(exc)) from exc
 
     def current_user(self) -> str:
         _, rows = self._rows("SELECT USER FROM DUAL", {})
