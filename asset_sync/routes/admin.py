@@ -20,6 +20,7 @@ from ..collectors import (
     build_asset_query,
     oracle_connection,
 )
+from ..collectors.oracle_diagnostics import run_diagnostics
 from ..config import AppConfig, load_config
 from ..db.manager import DatabaseManager
 from ..repositories import AssetRepository
@@ -222,6 +223,22 @@ def create_admin_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprin
             "error": str(exc),
             "details": ["Oracle 데이터 딕셔너리 조회 단계에서 실패했습니다."],
         }), status_code
+
+    @bp.route("/api/asset-sync/admin/diagnose/oracle", methods=["GET"])
+    @admin_required
+    def diagnose_oracle() -> Any:
+        """scripts/diagnose_oracle_itsm.py 와 같은 점검을 웹 프로세스 안에서 돌린다.
+
+        CLI 는 통과하는데 화면만 실패하는 경우가 있다. 그때 둘의 차이를 보려면
+        웹 프로세스 안에서 같은 단계를 밟아봐야 한다. 브라우저 주소창에 그대로
+        열 수 있도록 GET 이고, ?rows=100 으로 수집량을 줄일 수 있다.
+        """
+        try:
+            max_rows = int(request.args.get("rows") or 0)
+        except ValueError:
+            max_rows = 0
+        result = run_diagnostics(load_config(), max_rows=max_rows or None)
+        return jsonify(result), 200 if result["status"] != "FAILED" else 500
 
     @bp.route("/api/asset-sync/admin/oracle/tables", methods=["POST"])
     @admin_required

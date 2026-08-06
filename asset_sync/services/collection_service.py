@@ -14,6 +14,7 @@ from ..collectors import (
     SyntheticRVToolsCollector,
     VCenterSnapshotFileCollector,
 )
+from ..collectors.oracle_connection import describe_exception
 from ..config import AppConfig
 from ..db.manager import DatabaseManager
 from ..repositories import AssetRepository
@@ -102,7 +103,7 @@ class CollectionService:
                     "FAILED",
                     0,
                     datetime.now().isoformat(),
-                    error_message=str(exc),
+                    error_message=describe_exception(exc),
                     metadata={"mode": selected_mode},
                 )
                 raise
@@ -174,7 +175,7 @@ class CollectionService:
                     "FAILED",
                     0,
                     datetime.now().isoformat(),
-                    error_message=str(exc),
+                    error_message=describe_exception(exc),
                     metadata={"collector": collector_metadata, "mode": selected_mode},
                 )
                 raise
