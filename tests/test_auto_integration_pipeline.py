@@ -45,6 +45,13 @@ class FakeConnection:
 
 
 class FakeOracleModule:
+    # LOB 출력 핸들러가 참조하는 타입 상수. 실제 드라이버와 이름이 같아야 한다.
+    DB_TYPE_CLOB = "CLOB"
+    DB_TYPE_NCLOB = "NCLOB"
+    DB_TYPE_BLOB = "BLOB"
+    DB_TYPE_LONG = "LONG"
+    DB_TYPE_LONG_RAW = "LONG_RAW"
+
     def __init__(self, rows: list[dict[str, object]]) -> None:
         self.rows = rows
         self.last_kwargs: dict[str, object] = {}

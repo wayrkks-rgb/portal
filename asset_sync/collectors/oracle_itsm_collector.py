@@ -10,8 +10,10 @@ from ..utils.validation import validate_oracle_identifier
 from .oracle_connection import (
     OracleConnectionError,
     apply_call_timeout,
+    apply_lob_handler,
     build_connect_kwargs,
     describe_exception,
+    plain_value,
     prepare_driver,
 )
 
@@ -123,6 +125,9 @@ class OracleITSMCollector:
         try:
             with oracledb.connect(**kwargs) as connection:
                 query_timeout = apply_call_timeout(connection, oracle_cfg)
+                # CM_DESCR 같은 CLOB 컬럼은 손잡이로 온다. 여기서 값으로 바꿔두지
+                # 않으면 연결이 닫힌 뒤 정규화 단계에서 읽다가 DPY-1001 이 난다.
+                apply_lob_handler(connection, oracledb)
                 self.last_metadata["query_timeout_seconds"] = query_timeout
                 stage = enter("EXECUTE")
                 with connection.cursor() as cursor:
@@ -153,7 +158,12 @@ class OracleITSMCollector:
                             # 오래 걸릴 때 어디까지 갔는지 로그로 알 수 있어야 한다.
                             LOGGER.info("Oracle 수집 진행: %d건", fetched)
                         for row in rows:
-                            records.append(dict(zip(columns, row)))
+                            # 핸들러가 안 걸린 드라이버를 대비한 안전망. 연결이 살아
+                            # 있는 지금 읽어야 한다.
+                            records.append({
+                                column: plain_value(value)
+                                for column, value in zip(columns, row)
+                            })
                             if max_rows is not None and len(records) >= max_rows:
                                 break
                         if max_rows is not None and len(records) >= max_rows:

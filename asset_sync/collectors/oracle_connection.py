@@ -111,6 +111,45 @@ def _positive_int(value: Any, default: int) -> int:
     return max(0, number)
 
 
+def plain_value(value: Any) -> Any:
+    """LOB 손잡이를 값으로 바꾼다.
+
+    LOB 은 '나중에 읽는 손잡이'라서, 연결이 닫힌 뒤에 읽으면 DPY-1001 이 난다.
+    수집 결과는 연결보다 오래 살아남으므로 받는 즉시 값으로 만들어야 한다.
+    """
+    read = getattr(value, "read", None)
+    return read() if callable(read) else value
+
+
+def apply_lob_handler(connection: Any, oracledb: Any) -> None:
+    """CLOB/BLOB 을 손잡이가 아니라 값으로 받게 한다.
+
+    행마다 따로 읽으면 왕복이 행 수만큼 늘어난다. 드라이버가 조회 결과와 함께
+    실어 보내도록 바꾸면 왕복도 없고, 연결이 닫힌 뒤에 읽을 일도 없다.
+    """
+    replacement = {
+        oracledb.DB_TYPE_CLOB: oracledb.DB_TYPE_LONG,
+        oracledb.DB_TYPE_NCLOB: oracledb.DB_TYPE_LONG,
+        oracledb.DB_TYPE_BLOB: oracledb.DB_TYPE_LONG_RAW,
+    }
+
+    def handler(cursor: Any, *args: Any) -> Any:
+        # 드라이버 버전에 따라 (cursor, metadata) 또는
+        # (cursor, name, default_type, ...) 로 불린다. 둘 다 받는다.
+        type_code = getattr(args[0], "type_code", None)
+        if type_code is None and len(args) >= 2:
+            type_code = args[1]
+        target = replacement.get(type_code)
+        if target is None:
+            return None
+        return cursor.var(target, arraysize=cursor.arraysize)
+
+    try:
+        connection.outputtypehandler = handler
+    except Exception:  # 지원하지 않는 드라이버면 plain_value 가 받아낸다.
+        LOGGER.warning("LOB 출력 핸들러를 설정하지 못했습니다. 행마다 읽습니다.", exc_info=True)
+
+
 def apply_call_timeout(connection: Any, oracle_cfg: Mapping[str, Any]) -> int:
     """조회 한 건이 이 시간을 넘기면 드라이버가 끊는다.
 
@@ -131,4 +170,5 @@ def oracle_connection(oracle_cfg: Mapping[str, Any]) -> Iterator[Any]:
     kwargs = build_connect_kwargs(oracle_cfg)
     with oracledb.connect(**kwargs) as connection:
         apply_call_timeout(connection, oracle_cfg)
+        apply_lob_handler(connection, oracledb)
         yield connection

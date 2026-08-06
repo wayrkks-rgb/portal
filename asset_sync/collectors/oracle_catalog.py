@@ -19,7 +19,12 @@ from decimal import Decimal
 from typing import Any, Iterable, Mapping
 
 from ..utils.validation import validate_oracle_identifier
-from .oracle_connection import OracleConnectionError, describe_exception, oracle_connection
+from .oracle_connection import (
+    OracleConnectionError,
+    describe_exception,
+    oracle_connection,
+    plain_value,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -107,7 +112,12 @@ class OracleCatalogBrowser:
                 with connection.cursor() as cursor:
                     cursor.execute(sql, dict(binds))
                     columns = [str(column[0]).upper() for column in cursor.description]
-                    return columns, list(cursor.fetchall())
+                    # 연결이 닫히기 전에 값으로 만들어 둔다. 미리보기에 CLOB 컬럼이
+                    # 섞여 있으면 나중에 읽다가 DPY-1001 이 난다.
+                    return columns, [
+                        tuple(plain_value(value) for value in row)
+                        for row in cursor.fetchall()
+                    ]
         except OracleConnectionError:
             raise
         except Exception as exc:
