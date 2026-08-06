@@ -106,6 +106,10 @@ class CollectionService:
                     error_message=describe_exception(exc),
                     metadata={"mode": selected_mode},
                 )
+                # 이 예외는 with 밖으로 나가고, 그때 매니저가 트랜잭션을 되돌린다.
+                # 먼저 확정하지 않으면 실패 기록 자체가 사라져 [수집 이력] 에 아무것도
+                # 남지 않는다. 실패 원인은 남겨야 하므로 여기서 확정한다.
+                conn.commit()
                 raise
 
     def collect_vcenter(self, mode: str | None = None, files: list[Path] | None = None) -> dict[str, Any]:
@@ -178,6 +182,8 @@ class CollectionService:
                     error_message=describe_exception(exc),
                     metadata={"collector": collector_metadata, "mode": selected_mode},
                 )
+                # ITSM 쪽과 같은 이유로, 되돌려지기 전에 실패 기록을 확정한다.
+                conn.commit()
                 raise
 
     def collect_rvtools(self, mode: str | None = None, files: list[Path] | None = None) -> dict[str, Any]:
