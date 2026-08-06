@@ -69,7 +69,14 @@
         자산 조회가 <code>ORA-00942</code>(테이블 없음)로 실패하면 여기에서 실제 테이블을 찾아 <strong>자산 원본으로 적용</strong>하세요.
         선택한 테이블의 컬럼에 맞춰 조회 SQL이 자동 생성되며, 없는 컬럼은 <code>NULL</code>로 채워 필수 컬럼 검증을 통과시킵니다.
       </div>
-      <div class="text-xs text-muted" style="margin-bottom:10px">현재 자산 원본: <span class="mono" id="oracle-current-asset-source">미지정</span></div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+        <div class="text-xs text-muted">현재 자산 원본: <span class="mono" id="oracle-current-asset-source">미지정</span></div>
+        <div id="oracle-asset-source-actions" style="display:none;gap:6px">
+          <button type="button" class="btn btn-secondary btn-sm" onclick="editOracleAssetSource()">조건 수정</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="btn-oracle-source-delete"
+                  onclick="deleteOracleAssetSource()">원본 해제</button>
+        </div>
+      </div>
       <div class="grid-3">
         <div class="form-group"><label class="form-label">테이블명 검색어</label><input class="form-input" id="int-oracle-table-keyword" placeholder="예: ASSET, CMDB, SERVER" onkeydown="if(event.key==='Enter'){event.preventDefault();loadOracleTables();}"></div>
         <div class="form-group"><label class="form-label">소유자(스키마)</label><input class="form-input" id="int-oracle-table-owner" placeholder="비워두면 접근 가능한 전체 스키마"></div>

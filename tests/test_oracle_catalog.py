@@ -315,3 +315,87 @@ def test_save_asset_source_rejects_unsafe_values(tmp_path: Path, monkeypatch) ->
         store.save_asset_source("TB_ASSET; DROP TABLE X")
     with pytest.raises(SettingsValidationError):
         store.save_asset_source("TB_ASSET", query_file="../../escape.sql")
+
+
+# ── 조회 조건: 여러 조건과 비교 연산 ────────────────────────────────────────
+
+FILTER_COLUMNS = ["CM_ID", "CM_CAT_CD", "CM_STA_CD", "CM_HOSTNAME", "CM_DESCR"]
+
+
+def build_with(filters):
+    return build_asset_query(source_columns=FILTER_COLUMNS, itsm_cfg=ITSM_CFG, filters=filters)
+
+
+def test_several_conditions_must_all_hold() -> None:
+    result = build_with([
+        {"column": "CM_CAT_CD", "operator": "IN", "values": "HW0101, HW0102"},
+        {"column": "CM_STA_CD", "operator": "=", "values": "USE"},
+    ])
+    assert result["where_clause"] == (
+        "WHERE CM_CAT_CD IN ('HW0101', 'HW0102')\n  AND CM_STA_CD = 'USE'"
+    )
+    assert result["sql"].rstrip().endswith("AND CM_STA_CD = 'USE'")
+    assert len(result["filters"]) == 2
+
+
+def test_every_operator_produces_its_own_shape() -> None:
+    cases = {
+        "IN": "CM_STA_CD IN ('USE')",
+        "NOT IN": "CM_STA_CD NOT IN ('USE')",
+        "=": "CM_STA_CD = 'USE'",
+        "!=": "CM_STA_CD != 'USE'",
+        "LIKE": "CM_STA_CD LIKE 'USE'",
+        "NOT LIKE": "CM_STA_CD NOT LIKE 'USE'",
+    }
+    for operator, expected in cases.items():
+        result = build_with([{"column": "CM_STA_CD", "operator": operator, "values": ["USE"]}])
+        assert result["where_clause"] == f"WHERE {expected}", operator
+
+
+def test_null_operators_take_no_values() -> None:
+    result = build_with([{"column": "CM_DESCR", "operator": "IS NOT NULL", "values": []}])
+    assert result["where_clause"] == "WHERE CM_DESCR IS NOT NULL"
+    with pytest.raises(ValueError, match="코드값을 넣지 않습니다"):
+        build_with([{"column": "CM_DESCR", "operator": "IS NULL", "values": ["X"]}])
+
+
+def test_single_value_operators_reject_a_list() -> None:
+    with pytest.raises(ValueError, match="1개만"):
+        build_with([{"column": "CM_STA_CD", "operator": "=", "values": ["A", "B"]}])
+
+
+def test_an_unknown_operator_is_rejected_with_the_allowed_list() -> None:
+    with pytest.raises(ValueError, match="지원하지 않는 조회 조건"):
+        build_with([{"column": "CM_STA_CD", "operator": "DROP", "values": ["A"]}])
+
+
+def test_a_condition_cannot_smuggle_sql_through_its_value() -> None:
+    result = build_with([{"column": "CM_STA_CD", "operator": "=", "values": ["A' OR '1'='1"]}])
+    assert result["where_clause"] == "WHERE CM_STA_CD = 'A'' OR ''1''=''1'"
+
+
+def test_blank_rows_from_the_screen_are_ignored() -> None:
+    """화면은 빈 줄을 하나 띄워 두므로, 그게 조건으로 세지면 안 된다."""
+    result = build_with([
+        {"column": "CM_CAT_CD", "operator": "IN", "values": "HW0101"},
+        {"column": "", "operator": "IN", "values": ""},
+    ])
+    assert len(result["filters"]) == 1
+    assert result["where_clause"] == "WHERE CM_CAT_CD IN ('HW0101')"
+
+
+def test_the_older_single_condition_form_still_works() -> None:
+    """저장된 설정과 예전 화면이 그대로 남아 있어도 같은 결과여야 한다."""
+    old = build_asset_query(
+        source_columns=FILTER_COLUMNS, itsm_cfg=ITSM_CFG,
+        filter_column="CM_CAT_CD", filter_values=["HW0101"],
+    )
+    new = build_with([{"column": "CM_CAT_CD", "operator": "IN", "values": ["HW0101"]}])
+    assert old["where_clause"] == new["where_clause"]
+    assert old["filter_column"] == "CM_CAT_CD"
+    assert old["filter_values"] == ["HW0101"]
+
+
+def test_too_many_conditions_are_refused() -> None:
+    with pytest.raises(ValueError, match="최대"):
+        build_with([{"column": "CM_STA_CD", "operator": "=", "values": [str(n)]} for n in range(11)])

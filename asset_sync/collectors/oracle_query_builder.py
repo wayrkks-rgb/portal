@@ -19,6 +19,22 @@ from ..utils.validation import validate_oracle_identifier
 
 MAX_FILTER_VALUES = 50
 MAX_FILTER_VALUE_LENGTH = 128
+MAX_FILTERS = 10
+
+#: 조회 조건에 쓸 수 있는 비교. 값 개수 규칙이 서로 달라 함께 둔다.
+#: 자유 입력 SQL 을 받지 않는 이유는, 조회 전용 계정이라도 문장을 그대로 넣게 하면
+#: 주석·부질의로 원래 의도와 다른 조회가 만들어질 수 있기 때문이다.
+FILTER_OPERATORS: dict[str, dict[str, str]] = {
+    "IN": {"label": "다음 값 중 하나", "arity": "many"},
+    "NOT IN": {"label": "다음 값 제외", "arity": "many"},
+    "=": {"label": "같음", "arity": "one"},
+    "!=": {"label": "다르다", "arity": "one"},
+    "LIKE": {"label": "패턴 일치 (% 사용)", "arity": "one"},
+    "NOT LIKE": {"label": "패턴 제외 (% 사용)", "arity": "one"},
+    "IS NULL": {"label": "값이 비어 있음", "arity": "none"},
+    "IS NOT NULL": {"label": "값이 있음", "arity": "none"},
+}
+DEFAULT_FILTER_OPERATOR = "IN"
 
 # Logical columns the pipeline reads, in output order. cpu/memory/eos entries are
 # filled from the ITSM settings because they are configurable per site.
@@ -145,12 +161,82 @@ def _filter_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def normalize_filters(
+    raw_filters: Any = None,
+    *,
+    filter_column: str = "",
+    filter_values: Any = None,
+) -> list[dict[str, Any]]:
+    """조건 목록을 하나의 형태로 맞춘다.
+
+    조건이 하나뿐이던 시절의 filter_column/filter_values 도 같이 받는다. 저장된
+    설정과 화면이 섞여 들어오므로, 어느 쪽이 와도 같은 결과가 나와야 한다.
+    """
+    items: list[Mapping[str, Any]] = []
+    if isinstance(raw_filters, Mapping):
+        items = [raw_filters]
+    elif isinstance(raw_filters, (list, tuple)):
+        items = [item for item in raw_filters if isinstance(item, Mapping)]
+    if not items and str(filter_column or "").strip():
+        items = [{"column": filter_column, "operator": DEFAULT_FILTER_OPERATOR, "values": filter_values}]
+    elif not items and normalize_filter_values(filter_values):
+        # 컬럼 없이 값만 온 경우. 아래 검증에서 잡히도록 그대로 넘긴다.
+        items = [{"column": "", "operator": DEFAULT_FILTER_OPERATOR, "values": filter_values}]
+
+    normalized: list[dict[str, Any]] = []
+    for item in items:
+        column = str(item.get("column") or "").strip().upper()
+        operator = str(item.get("operator") or DEFAULT_FILTER_OPERATOR).strip().upper()
+        values = normalize_filter_values(item.get("values"))
+        if not column and not values:
+            continue  # 빈 줄은 화면에서 흔하다. 조건으로 세지 않는다.
+        normalized.append({"column": column, "operator": operator, "values": values})
+    return normalized
+
+
+def _condition_sql(condition: Mapping[str, Any], available_list: list[str]) -> str:
+    """조건 하나를 SQL 한 줄로 만든다. 컬럼·비교·값 개수를 모두 확인한다."""
+    column = str(condition.get("column") or "").strip().upper()
+    operator = str(condition.get("operator") or DEFAULT_FILTER_OPERATOR).strip().upper()
+    values = normalize_filter_values(condition.get("values"))
+
+    if not column:
+        raise ValueError("조회 조건의 컬럼을 선택하세요.")
+    if column not in available_list:
+        raise ValueError(f"조회 조건 컬럼이 테이블에 없습니다: {column}")
+    column = validate_oracle_identifier(column, "filter_column")
+    if operator not in FILTER_OPERATORS:
+        raise ValueError(
+            f"지원하지 않는 조회 조건입니다: {operator} "
+            f"(사용 가능: {', '.join(FILTER_OPERATORS)})"
+        )
+
+    arity = FILTER_OPERATORS[operator]["arity"]
+    if arity == "none":
+        if values:
+            raise ValueError(f"{column} {operator} 에는 코드값을 넣지 않습니다.")
+        return f"{column} {operator}"
+    if not values:
+        raise ValueError(f"{column} {operator} 에 쓸 코드값을 1개 이상 입력하세요.")
+    if len(values) > MAX_FILTER_VALUES:
+        raise ValueError(f"조회 조건 코드값은 조건당 최대 {MAX_FILTER_VALUES}개까지 지정할 수 있습니다.")
+    if arity == "one":
+        if len(values) > 1:
+            raise ValueError(
+                f"{column} {operator} 에는 코드값을 1개만 넣을 수 있습니다. "
+                f"여러 개를 쓰려면 IN 을 고르세요."
+            )
+        return f"{column} {operator} {_filter_literal(values[0])}"
+    return f"{column} {operator} ({', '.join(_filter_literal(value) for value in values)})"
+
+
 def build_asset_query(
     *,
     source_columns: Iterable[str],
     itsm_cfg: Mapping[str, Any],
     asset_source: str = "",
     overrides: Mapping[str, Any] | None = None,
+    filters: Any = None,
     filter_column: str = "",
     filter_values: Any = None,
     generated_at: dt.datetime | None = None,
@@ -158,8 +244,10 @@ def build_asset_query(
     """Return the generated SQL plus the mapping report for the admin screen.
 
     ``overrides`` maps a logical column to the source column chosen by the
-    operator; an empty value forces that column to be selected as NULL. When
-    ``filter_column`` is given, its code values become a WHERE ... IN clause.
+    operator; an empty value forces that column to be selected as NULL.
+    ``filters`` is a list of ``{column, operator, values}`` conditions joined
+    with AND; ``filter_column``/``filter_values`` is the older single-condition
+    form and still works.
     """
     available_list = [str(name).strip().upper() for name in source_columns if str(name).strip()]
     available: dict[str, str] = {}
@@ -213,20 +301,14 @@ def build_asset_query(
             }
         )
 
-    selected_filter = str(filter_column or "").strip().upper()
-    values = normalize_filter_values(filter_values)
+    conditions = normalize_filters(filters, filter_column=filter_column, filter_values=filter_values)
+    if len(conditions) > MAX_FILTERS:
+        raise ValueError(f"조회 조건은 최대 {MAX_FILTERS}개까지 지정할 수 있습니다.")
+    # 조건은 모두 만족해야 한다(AND). OR 가 필요하면 한 컬럼에 IN 을 쓰면 된다.
+    condition_lines = [_condition_sql(condition, available_list) for condition in conditions]
     where_line = ""
-    if selected_filter:
-        if selected_filter not in available_list:
-            raise ValueError(f"조회 조건 컬럼이 테이블에 없습니다: {selected_filter}")
-        selected_filter = validate_oracle_identifier(selected_filter, "filter_column")
-        if not values:
-            raise ValueError("조회 조건 컬럼을 선택하면 코드값을 1개 이상 입력해야 합니다.")
-        if len(values) > MAX_FILTER_VALUES:
-            raise ValueError(f"조회 조건 코드값은 최대 {MAX_FILTER_VALUES}개까지 지정할 수 있습니다.")
-        where_line = f"WHERE {selected_filter} IN ({', '.join(_filter_literal(value) for value in values)})"
-    elif values:
-        raise ValueError("조회 조건 코드값을 사용하려면 조건 컬럼을 함께 선택해야 합니다.")
+    if condition_lines:
+        where_line = "WHERE " + "\n  AND ".join(condition_lines)
 
     stamp = (generated_at or dt.datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
     header = [
@@ -262,7 +344,9 @@ def build_asset_query(
         "matched_count": sum(1 for item in mapping if item["match_type"] != "MISSING"),
         "total_count": len(mapping),
         "source_columns": available_list,
-        "filter_column": selected_filter,
-        "filter_values": values,
+        "filters": conditions,
+        # 조건이 하나뿐이던 시절의 화면·설정과 계속 맞추기 위해 함께 돌려준다.
+        "filter_column": conditions[0]["column"] if len(conditions) == 1 else "",
+        "filter_values": conditions[0]["values"] if len(conditions) == 1 else [],
         "where_clause": where_line,
     }

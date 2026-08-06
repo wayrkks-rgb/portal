@@ -323,24 +323,113 @@ function resetOracleMappingOverrides(){
   applyOracleAssetSource(false);
 }
 
-function currentOracleFilter(){
-  const columnEl=document.getElementById('oracle-filter-column');
-  const valuesEl=document.getElementById('oracle-filter-values');
-  return {
-    filter_column:columnEl?columnEl.value:'',
-    filter_values:valuesEl?valuesEl.value:''
-  };
+// 조건 비교 목록. 서버의 FILTER_OPERATORS 와 같아야 한다.
+const ORACLE_FILTER_OPERATORS=[
+  ['IN','다음 값 중 하나'],['NOT IN','다음 값 제외'],
+  ['=','같음'],['!=','다르다'],
+  ['LIKE','패턴 일치 (% 사용)'],['NOT LIKE','패턴 제외 (% 사용)'],
+  ['IS NULL','값이 비어 있음'],['IS NOT NULL','값이 있음']
+];
+// 값을 받지 않는 비교. 코드값 칸을 잠근다.
+const ORACLE_FILTER_NO_VALUE=['IS NULL','IS NOT NULL'];
+
+function renderOracleFilterRows(filters){
+  const host=document.getElementById('oracle-filter-rows');
+  if(!host)return;
+  const rows=(filters&&filters.length)?filters:[{column:'',operator:'IN',values:[]}];
+  const columnOptions=name=>['<option value="">컬럼 선택</option>']
+    .concat(oracleCatalogColumns.map(c=>`<option value="${escapeHtml(c)}"${c===name?' selected':''}>${escapeHtml(c)}</option>`)).join('');
+  host.innerHTML=rows.map((row,index)=>{
+    const operator=row.operator||'IN';
+    const noValue=ORACLE_FILTER_NO_VALUE.includes(operator);
+    const values=Array.isArray(row.values)?row.values.join(', '):(row.values||'');
+    return `<div class="oracle-filter-row" style="display:grid;grid-template-columns:1fr 1fr 1.4fr auto;gap:8px;margin-bottom:8px">
+      <select class="form-select oracle-filter-column">${columnOptions(row.column||'')}</select>
+      <select class="form-select oracle-filter-operator" onchange="renderOracleFilterRows(readOracleFilters())">
+        ${ORACLE_FILTER_OPERATORS.map(([value,label])=>`<option value="${value}"${value===operator?' selected':''}>${escapeHtml(label)}</option>`).join('')}
+      </select>
+      <input class="form-input oracle-filter-values" placeholder="${noValue?'값 없음':'예: HW0101, HW0102'}"
+             value="${escapeHtml(values)}"${noValue?' disabled':''}>
+      <button type="button" class="btn btn-secondary btn-sm" title="이 조건 삭제"
+              onclick="removeOracleFilterRow(${index})">✕</button>
+    </div>`;
+  }).join('');
 }
+
+function readOracleFilters(){
+  return Array.from(document.querySelectorAll('.oracle-filter-row')).map(row=>({
+    column:row.querySelector('.oracle-filter-column').value,
+    operator:row.querySelector('.oracle-filter-operator').value,
+    values:row.querySelector('.oracle-filter-values').value
+  }));
+}
+
+function addOracleFilterRow(){
+  renderOracleFilterRows(readOracleFilters().concat([{column:'',operator:'IN',values:''}]));
+}
+
+function removeOracleFilterRow(index){
+  const rows=readOracleFilters();
+  rows.splice(index,1);
+  renderOracleFilterRows(rows);
+}
+
+function currentOracleFilter(){
+  // 컬럼도 값도 비어 있는 줄은 조건으로 보내지 않는다.
+  const filters=readOracleFilters().filter(row=>row.column||String(row.values||'').trim());
+  return {filters};
+}
+
+// [수정] 으로 들어올 때 되살릴 조건. 상세 화면이 그려진 뒤 한 번만 쓰인다.
+let pendingOracleFilters=null;
 
 function renderOracleAssetSourceState(){
   const el=document.getElementById('oracle-current-asset-source');
   if(!el)return;
   const source=integrationOracleInternal.asset_source||'';
+  const actions=document.getElementById('oracle-asset-source-actions');
   if(!source){
     el.textContent='미지정 · 아래에서 자산 테이블을 선택하세요';
+    if(actions)actions.style.display='none';
     return;
   }
-  el.textContent=`${source} · 조회 SQL ${integrationOracleInternal.query_file_exists?'생성됨':'없음'}`;
+  const spec=integrationOracleInternal.asset_query||{};
+  const count=(spec.filters||[]).length;
+  el.textContent=`${source} · 조회 SQL ${integrationOracleInternal.query_file_exists?'생성됨':'없음'}`
+    +` · 조건 ${count?count+'개':'없음'}`;
+  if(actions)actions.style.display='';
+}
+
+async function editOracleAssetSource(){
+  const spec=integrationOracleInternal.asset_query||{};
+  if(!spec.owner||!spec.table_name){
+    integrationToast('이 원본은 조건 정보가 없어 되살릴 수 없습니다. 아래에서 테이블을 다시 선택하세요.','error');
+    return;
+  }
+  // 상세 화면은 테이블 목록의 항목을 눌러 여는 구조라, 저장된 대상을 그 자리에 끼워 넣는다.
+  oracleCatalogTables=[{owner:spec.owner,table_name:spec.table_name,full_name:spec.asset_source||''}];
+  pendingOracleFilters=spec.filters||[];
+  oracleCatalogOverrides={...(spec.mapping||{})};
+  await inspectOracleTable(0);
+  document.getElementById('oracle-table-detail')?.scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+async function deleteOracleAssetSource(){
+  const source=integrationOracleInternal.asset_source||'';
+  if(!source)return;
+  if(!confirm(`${source} 지정과 생성된 조회 SQL 을 지웁니다.\n접속정보는 그대로 둡니다. 계속할까요?`))return;
+  setButtonBusy('btn-oracle-source-delete',true,'해제 중','원본 해제');
+  const res=await integrationFetch('/api/asset-sync/admin/oracle/asset-source',{method:'DELETE'});
+  setButtonBusy('btn-oracle-source-delete',false,'','원본 해제');
+  if(res.status!=='SUCCESS'){
+    integrationToast(res.error||'원본 해제에 실패했습니다.','error');
+    return;
+  }
+  integrationOracleInternal.asset_source='';
+  integrationOracleInternal.query_file_exists=false;
+  integrationOracleInternal.asset_query={};
+  renderOracleAssetSourceState();
+  integrationToast(res.message,'success');
 }
 
 function buildOracleCatalogPayload(extra={}){
@@ -418,8 +507,6 @@ async function inspectOracleTable(index){
     <td>${escapeHtml(c.data_type)}${c.data_precision!=null?`(${c.data_precision}${c.data_scale?','+c.data_scale:''})`:(c.data_length?`(${c.data_length})`:'')}</td>
     <td>${c.nullable?'Y':'N'}</td>
     <td>${escapeHtml(c.comments||'-')}</td></tr>`).join('');
-  const filterOptions=['<option value="">조건 없음 · 전체 행 수집</option>']
-    .concat(oracleCatalogColumns.map(name=>`<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`)).join('');
   const previewBlock=preview.status==='SUCCESS'
     ? `<div class="table-wrap" style="max-height:260px;overflow:auto"><table>
          <thead><tr>${(preview.columns||[]).map(c=>`<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>
@@ -442,12 +529,13 @@ async function inspectOracleTable(index){
       <div class="alert alert-info" style="margin-top:12px;margin-bottom:0">
         조회 조건을 지정하지 않으면 <strong>대상 테이블의 전체 행</strong>을 수집합니다.
         서버 자산만 수집하려면 구분 컬럼과 실제 코드값을 지정하세요. 코드값이 실제와 다르면 0건 조회로 수집이 중단됩니다.
+        조건을 여러 개 지정하면 <strong>모두 만족</strong>하는 행만 가져옵니다(AND).
       </div>
-      <div class="grid-2" style="margin-top:12px">
-        <div class="form-group" style="margin:0"><label class="form-label">조회 조건 컬럼</label>
-          <select class="form-select" id="oracle-filter-column">${filterOptions}</select></div>
-        <div class="form-group" style="margin:0"><label class="form-label">코드값 · 쉼표로 구분</label>
-          <input class="form-input" id="oracle-filter-values" placeholder="예: HW0101, HW0102, HW0104"></div>
+      <div style="margin-top:12px">
+        <div class="text-sm" style="font-weight:700;margin-bottom:6px">조회 조건 (WHERE)</div>
+        <div id="oracle-filter-rows"></div>
+        <button type="button" class="btn btn-secondary btn-sm" style="margin-top:8px"
+                onclick="addOracleFilterRow()">＋ 조건 추가</button>
       </div>
       <div class="grid-2" style="margin-top:12px">
         <div>
@@ -462,6 +550,8 @@ async function inspectOracleTable(index){
       </div>
       <div id="oracle-mapping-detail" style="margin-top:14px"></div>
     </div>`;
+  renderOracleFilterRows(pendingOracleFilters);
+  pendingOracleFilters=null;
 }
 
 async function applyOracleAssetSource(apply){
@@ -494,19 +584,17 @@ async function applyOracleAssetSource(apply){
     state:failedVerification?'error':(res.applied?'success':'info'),
     title:res.applied?'자산 원본 적용 완료':'매핑 미리보기 완료',
     summary:res.message,
-    meta:[`${res.matched_count}/${res.total_count} 컬럼 매핑`,res.asset_source,res.filter_column?`조건 ${res.filter_column}`:'조건 없음'],
+    meta:[`${res.matched_count}/${res.total_count} 컬럼 매핑`,res.asset_source,(res.filters||[]).length?`조건 ${res.filters.length}개`:'조건 없음'],
     details
   });
   oracleCatalogAutoMapping={};
   (res.mapping||[]).forEach(m=>{if(!m.forced)oracleCatalogAutoMapping[m.logical_column]=m.source_column||'';});
   // 서버가 정규화한 조회 조건을 화면에 되돌려 실제 적용된 값과 일치시킵니다.
-  const filterColumnEl=document.getElementById('oracle-filter-column');
-  if(filterColumnEl)filterColumnEl.value=res.filter_column||'';
-  const filterValuesEl=document.getElementById('oracle-filter-values');
-  if(filterValuesEl)filterValuesEl.value=(res.filter_values||[]).join(', ');
+  renderOracleFilterRows(res.filters||[]);
   if(res.applied){
     integrationOracleInternal.asset_source=res.asset_source;
     integrationOracleInternal.query_file_exists=true;
+    integrationOracleInternal.asset_query=(res.settings&&res.settings.oracle&&res.settings.oracle.asset_query)||{};
     renderOracleAssetSourceState();
     integrationToast(failedVerification?'자산 원본은 저장했지만 조회 검증에 실패했습니다.':'자산 원본을 적용했습니다.',failedVerification?'error':'success');
   }
@@ -580,6 +668,8 @@ async function loadIntegrationSettings(showMessage=false){
     asset_source:res.oracle.asset_source||'',
     query_file:res.oracle.query_file||'config/oracle_query.local.sql',
     query_file_exists:Boolean(res.oracle.query_file_exists),
+    // 어떤 테이블·조건으로 만든 SQL 인지. [조건 수정] 이 이 값으로 입력을 되살린다.
+    asset_query:res.oracle.asset_query||{},
     cpu_compare_field:res.itsm.cpu_compare_field||'CM_CPU_CORE_CNT',
     memory_field:res.itsm.memory_field||'CM_MEMORY',
     os_eos_field:res.itsm.os_eos_field||'OS_EOS_DATE'

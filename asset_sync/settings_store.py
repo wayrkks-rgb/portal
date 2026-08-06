@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
 
@@ -207,6 +207,9 @@ class LocalSettingsStore:
                 "query_file_exists": cfg.resolve(
                     cfg.oracle.get("query_file", "config/oracle_query.local.sql")
                 ).exists(),
+                # 어떤 테이블·조건·매핑으로 만든 SQL 인지. 화면이 [수정] 을 눌렀을 때
+                # 이 값으로 원래 입력을 되살린다.
+                "asset_query": dict(cfg.oracle.get("asset_query") or {}),
                 "password_configured": bool(cfg.oracle.get("password")),
             },
             "itsm": {
@@ -508,12 +511,39 @@ class LocalSettingsStore:
         _atomic_write(self.app_local_path, yaml.safe_dump(local_yaml, allow_unicode=True, sort_keys=False))
         return self.public_settings()
 
+    def clear_asset_source(self) -> dict[str, Any]:
+        """자산 원본 지정과 생성된 조회 SQL 을 함께 지운다.
+
+        설정만 지우고 파일을 남기면, 다음에 다른 테이블을 골랐을 때 예전 SQL 이
+        그대로 쓰여 엉뚱한 결과가 나온다. 둘은 항상 같이 움직여야 한다.
+        접속정보는 건드리지 않는다.
+        """
+        local_yaml = _read_yaml_dict(self.app_local_path)
+        oracle_section = dict(local_yaml.get("oracle") or {})
+        query_file = str(
+            oracle_section.get("query_file")
+            or load_config().oracle.get("query_file")
+            or "config/oracle_query.local.sql"
+        ).strip()
+
+        for key in ("asset_source", "asset_query"):
+            oracle_section.pop(key, None)
+        local_yaml["oracle"] = oracle_section
+        _atomic_write(self.app_local_path, yaml.safe_dump(local_yaml, allow_unicode=True, sort_keys=False))
+
+        if query_file and not Path(query_file).is_absolute():
+            resolved = (self.root / query_file).resolve()
+            if resolved.is_relative_to(self.root) and resolved.is_file():
+                resolved.unlink()
+        return self.public_settings()
+
     def save_asset_source(
         self,
         asset_source: str,
         *,
         query_sql: str | None = None,
         query_file: str | None = None,
+        query_spec: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Register the Oracle asset table and optionally write its query file.
 
@@ -544,6 +574,10 @@ class LocalSettingsStore:
         oracle_section.setdefault("mode", str(current_cfg.oracle.get("mode", "thin")).lower())
         oracle_section["asset_source"] = source
         oracle_section["query_file"] = target_file
+        if query_spec is not None:
+            # 어떤 조건·매핑으로 만들었는지 남긴다. 이게 없으면 나중에 조건 하나를
+            # 고치려 해도 테이블 선택부터 전부 다시 입력해야 한다.
+            oracle_section["asset_query"] = dict(query_spec)
         local_yaml["oracle"] = oracle_section
         if query_sql is not None:
             _atomic_write(resolved, query_sql if query_sql.endswith("\n") else query_sql + "\n")

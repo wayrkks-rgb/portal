@@ -10,6 +10,7 @@ from typing import Any
 from flask import Blueprint, jsonify, render_template, request, session
 
 from ..collectors import (
+    FILTER_OPERATORS,
     OracleCatalogBrowser,
     OracleCatalogError,
     OracleConnectionError,
@@ -325,6 +326,32 @@ def create_admin_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprin
         except Exception as exc:
             return _catalog_failure(exc)
 
+    @bp.route("/api/asset-sync/admin/oracle/asset-source", methods=["DELETE"])
+    @admin_required
+    def oracle_clear_asset_source() -> Any:
+        """자산 원본 지정과 생성된 조회 SQL 을 지운다. 접속정보는 그대로 둔다."""
+        current = str(load_config().oracle.get("asset_source") or "")
+        if not current:
+            return jsonify({
+                "status": "FAILED",
+                "stage": "VALIDATION",
+                "error": "지정된 자산 원본이 없습니다.",
+            }), 400
+        try:
+            saved = settings_store.clear_asset_source()
+        except (SettingsValidationError, ValueError, TypeError) as exc:
+            return jsonify({"status": "FAILED", "stage": "VALIDATION", "error": str(exc)}), 400
+        except OSError as exc:
+            LOGGER.exception("Asset source clear failed")
+            return jsonify({"status": "FAILED", "stage": "SAVE", "error": f"자산 원본 해제 실패: {exc}"}), 500
+        return jsonify({
+            "status": "SUCCESS",
+            "stage": "CLEARED",
+            "cleared": current,
+            "settings": saved,
+            "message": f"{current} 지정과 생성된 조회 SQL 을 지웠습니다. 새 테이블을 선택하세요.",
+        })
+
     @bp.route("/api/asset-sync/admin/oracle/asset-source", methods=["POST"])
     @admin_required
     def oracle_apply_asset_source() -> Any:
@@ -344,6 +371,7 @@ def create_admin_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprin
                 itsm_cfg=test_cfg.itsm,
                 asset_source=target["full_name"],
                 overrides=overrides,
+                filters=payload.get("filters"),
                 filter_column=str(payload.get("filter_column") or ""),
                 filter_values=payload.get("filter_values"),
             )
@@ -366,6 +394,8 @@ def create_admin_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprin
             "matched_count": generated["matched_count"],
             "total_count": generated["total_count"],
             "source_columns": generated["source_columns"],
+            "filters": generated["filters"],
+            "filter_operators": FILTER_OPERATORS,
             "filter_column": generated["filter_column"],
             "filter_values": generated["filter_values"],
             "where_clause": generated["where_clause"],
@@ -379,7 +409,23 @@ def create_admin_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprin
             return jsonify(response)
 
         try:
-            saved = settings_store.save_asset_source(target["full_name"], query_sql=generated["sql"])
+            saved = settings_store.save_asset_source(
+                target["full_name"],
+                query_sql=generated["sql"],
+                # 나중에 조건 하나만 고칠 수 있도록 만든 입력을 함께 남긴다.
+                query_spec={
+                    "owner": target.get("owner") or str(payload.get("owner") or ""),
+                    "table_name": target.get("table_name") or str(payload.get("table_name") or ""),
+                    "asset_source": target["full_name"],
+                    "filters": generated["filters"],
+                    "mapping": {
+                        item["logical_column"]: item["source_column"] or ""
+                        for item in generated["mapping"]
+                        if item["forced"]
+                    },
+                    "generated_at": datetime.now().isoformat(timespec="seconds"),
+                },
+            )
         except (SettingsValidationError, ValueError, TypeError) as exc:
             return jsonify({"status": "FAILED", "stage": "VALIDATION", "error": str(exc)}), 400
         except OSError as exc:
