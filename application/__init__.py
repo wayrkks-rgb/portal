@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from application.module_assets import (
 )
 from application.modules import ModuleClient, ModuleRegistry, create_modules_blueprint
 from application.settings import BASE_DIR, USERS_FILE, initialize_legacy_data
+from asset_sync.collectors.oracle_itsm_collector import COLLECTOR_BUILD
 from asset_sync.config import load_config as load_asset_sync_config
 from asset_sync.flask_blueprint import create_asset_sync_blueprint
 from asset_sync.logging_config import configure_logging
@@ -42,6 +44,13 @@ def create_app() -> Flask:
 
     asset_config = load_asset_sync_config()
     configure_logging(asset_config.resolve("logs"), asset_config.log_level, asset_config)
+
+    # 파일만 덮어쓰고 프로세스를 안 껐다 켜면 예전 코드가 계속 돈다. 그 상태에서는
+    # 화면 오류만 보고 원인을 판단할 수 없으므로, 기동할 때 무엇이 올라왔는지 남긴다.
+    logging.getLogger(__name__).info(
+        "통합 웹 기동 · 소스=%s · 설정=%s · 수집기=%s",
+        BASE_DIR, asset_config.root_dir, COLLECTOR_BUILD,
+    )
     app.register_blueprint(create_asset_sync_blueprint(asset_config))
 
     # 대메뉴는 설정에 있는 모듈 레지스트리로 결정된다. 새 대메뉴를 붙일 때
