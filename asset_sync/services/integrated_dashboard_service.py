@@ -28,6 +28,8 @@ class IntegratedDashboardService:
         latest_rv = self.repo.latest_snapshot("RVTOOLS")
         current_assets = self._current_assets(int(latest_itsm["id"])) if latest_itsm else []
         itsm_status = self._asset_status(current_assets)
+        if latest_itsm:
+            itsm_status["counting_basis"] = self._counting_basis(int(latest_itsm["id"]))
         period_changes = self._period_changes(start_day, end_day, detail_limit)
         vcenter_changes = self._vcenter_resource_changes(start_day, end_day, detail_limit)
         comparison = self._comparison(start_day, end_day, latest_itsm, latest_rv, detail_limit)
@@ -56,7 +58,30 @@ class IntegratedDashboardService:
         return result
 
     def _current_assets(self, snapshot_id: int) -> list[dict[str, Any]]:
-        return [record for record in self.repo.load_itsm_records(snapshot_id).values() if record.get("status_code") in ACTIVE_STATUS]
+        # 집계는 정규화된 컬럼만 쓴다. 원본까지 풀 이유가 없다.
+        records = self.repo.load_itsm_records(snapshot_id, with_raw=False).values()
+        return [record for record in records if record.get("status_code") in ACTIVE_STATUS]
+
+    def _counting_basis(self, snapshot_id: int) -> dict[str, Any]:
+        """대수가 무엇을 세고 무엇을 뺐는지 밝힌다.
+
+        ITSM 총 건수와 화면의 대수가 다를 때, 기준이 안 보이면 어느 쪽이 틀렸는지
+        따질 수가 없다. 집계에서 빠진 상태코드를 건수까지 같이 돌려준다.
+        """
+        records = self.repo.load_itsm_records(snapshot_id, with_raw=False).values()
+        included: Counter[str] = Counter()
+        excluded: Counter[str] = Counter()
+        for record in records:
+            code = str(record.get("status_code") or "")
+            target = included if code in ACTIVE_STATUS else excluded
+            target[f"{ASSET_STATUS.get(code, '알 수 없음')}({code or '없음'})"] += 1
+        return {
+            "snapshot_total": len(records),
+            "counted_status_codes": sorted(ACTIVE_STATUS),
+            "included": dict(included),
+            "excluded": dict(excluded),
+            "category_codes": {"물리": PHYSICAL_CATEGORY, "논리": LOGICAL_CATEGORY},
+        }
 
     def _asset_status(self, assets: list[dict[str, Any]]) -> dict[str, Any]:
         status = Counter()
@@ -107,7 +132,8 @@ class IntegratedDashboardService:
             or (event.get("field_name") and event["event_type"] != "ITSM_STATUS_CHANGED")
         ]
         totals = Counter(self._event_category(e["event_type"]) for e in primary)
-        details = [self._enrich_event(e) for e in primary[:limit]]
+        snapshot_cache: dict[int, dict[str, dict[str, Any]]] = {}
+        details = [self._enrich_event(e, snapshot_cache) for e in primary[:limit]]
         matrix: dict[str, Counter[str]] = defaultdict(Counter)
         for item in details:
             matrix[item["location"]][item["server_type"]] += 1
@@ -133,11 +159,13 @@ class IntegratedDashboardService:
             previous: dict[str, Any] = {}
             if event.get("snapshot_id"):
                 sid = int(event["snapshot_id"])
-                cache.setdefault(sid, self.repo.load_rv_records(sid))
+                if sid not in cache:
+                    cache[sid] = self.repo.load_rv_records(sid, with_raw=False)
                 current = cache[sid].get(event["asset_key"], {})
             if event.get("previous_snapshot_id"):
                 sid = int(event["previous_snapshot_id"])
-                cache.setdefault(sid, self.repo.load_rv_records(sid))
+                if sid not in cache:
+                    cache[sid] = self.repo.load_rv_records(sid, with_raw=False)
                 previous = cache[sid].get(event["asset_key"], {})
             vm = current or previous
             details.append({
@@ -244,7 +272,8 @@ class IntegratedDashboardService:
                 if not snapshot_id:
                     continue
                 sid = int(snapshot_id)
-                cache.setdefault(sid, self.repo.load_itsm_records(sid))
+                if sid not in cache:
+                    cache[sid] = self.repo.load_itsm_records(sid, with_raw=False)
                 record = cache[sid].get(event["asset_key"])
                 if record:
                     records.append(record)
@@ -262,7 +291,8 @@ class IntegratedDashboardService:
                 if not snapshot_id:
                     continue
                 sid = int(snapshot_id)
-                cache.setdefault(sid, self.repo.load_rv_records(sid))
+                if sid not in cache:
+                    cache[sid] = self.repo.load_rv_records(sid, with_raw=False)
                 record = cache[sid].get(event["asset_key"])
                 if record:
                     records.append(record)
@@ -286,8 +316,10 @@ class IntegratedDashboardService:
             row["drifts"] = json.loads(row.pop("drift_json") or "[]")
             itsm_id = int(row["itsm_snapshot_id"])
             rv_id = int(row["rv_snapshot_id"])
-            itsm_cache.setdefault(itsm_id, self.repo.load_itsm_records(itsm_id))
-            rv_cache.setdefault(rv_id, self.repo.load_rv_records(rv_id))
+            if itsm_id not in itsm_cache:
+                itsm_cache[itsm_id] = self.repo.load_itsm_records(itsm_id)
+            if rv_id not in rv_cache:
+                rv_cache[rv_id] = self.repo.load_rv_records(rv_id, with_raw=False)
             asset = itsm_cache[itsm_id].get(row.get("cm_id")) if row.get("cm_id") else None
             vm = rv_cache[rv_id].get(row.get("rv_asset_key")) if row.get("rv_asset_key") else None
             row.update(
@@ -304,11 +336,22 @@ class IntegratedDashboardService:
             result.append(row)
         return result
 
-    def _enrich_event(self, event: dict[str, Any]) -> dict[str, Any]:
-        current = self.repo.load_itsm_records(int(event["snapshot_id"])).get(event["asset_key"], {})
-        previous = {}
-        if event.get("previous_snapshot_id"):
-            previous = self.repo.load_itsm_records(int(event["previous_snapshot_id"])).get(event["asset_key"], {})
+    def _enrich_event(
+        self, event: dict[str, Any], cache: dict[int, dict[str, dict[str, Any]]] | None = None
+    ) -> dict[str, Any]:
+        # 스냅샷 하나가 수천~수만 행이다. 이벤트마다 다시 읽으면 건수만큼 곱해진다.
+        cache = {} if cache is None else cache
+
+        def snapshot(snapshot_id: Any) -> dict[str, dict[str, Any]]:
+            if not snapshot_id:
+                return {}
+            key = int(snapshot_id)
+            if key not in cache:
+                cache[key] = self.repo.load_itsm_records(key)
+            return cache[key]
+
+        current = snapshot(event.get("snapshot_id")).get(event["asset_key"], {})
+        previous = snapshot(event.get("previous_snapshot_id")).get(event["asset_key"], {})
         asset = current or previous
         raw = asset.get("raw", {})
         return {

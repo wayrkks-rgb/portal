@@ -40,8 +40,23 @@ function renderAssetStatus(data){
   const physical=Number(category['물리']||0), logical=Number(category['논리']||0), total=Math.max(physical+logical,1), p=Math.round(physical/total*100);
   document.getElementById('dash-category-donut').style.background=`conic-gradient(#284566 0 ${p}%, #c2ccdb ${p}% 100%)`;
   document.getElementById('dash-category-legend').innerHTML=`<div class="legend-row"><span>🟠 물리</span><strong>${dashboardNumber(physical)}</strong></div><div class="legend-row"><span>⚪ 논리</span><strong>${dashboardNumber(logical)}</strong></div><div class="legend-row"><span>IDC / DR</span><strong>${dashboardNumber(location.IDC)} / ${dashboardNumber(location.DR)}</strong></div>`;
+  renderCountingBasis(data.counting_basis||null);
   const rows=data.os||[], max=Math.max(...rows.map(r=>Number(r.count||0)),1);
   document.getElementById('dash-os-bars').innerHTML=rows.length?rows.slice(0,12).map(r=>`<div class="bar-row"><span title="${syncEscape(r.name)}">${syncEscape(r.name)}</span><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2,Number(r.count||0)/max*100)}%"></div></div><strong>${dashboardNumber(r.count)}</strong></div>`).join(''):'<div class="text-muted">정상 ITSM 스냅샷이 없습니다.</div>';
+}
+// 대수가 ITSM 총 건수와 다를 때, 무엇을 세고 무엇을 뺐는지 보여준다.
+// 기준이 안 보이면 어느 쪽이 틀렸는지 따질 수가 없다.
+function renderCountingBasis(basis){
+  const el=document.getElementById('dash-counting-basis');
+  if(!el)return;
+  if(!basis){el.innerHTML='';return;}
+  const excluded=Object.entries(basis.excluded||{});
+  const included=Object.entries(basis.included||{}).map(([k,v])=>`${syncEscape(k)} ${dashboardNumber(v)}`).join(' + ');
+  el.innerHTML=`<div class="text-xs text-muted">`
+    +`ITSM 스냅샷 ${dashboardNumber(basis.snapshot_total)}건 중 <strong>${included||'0'}</strong> 을(를) 셌습니다.`
+    +(excluded.length?` 제외: ${excluded.map(([k,v])=>`${syncEscape(k)} ${dashboardNumber(v)}`).join(', ')}`:'')
+    +`<br>물리/논리는 ${syncEscape(basis.category_codes['물리'])} / ${syncEscape(basis.category_codes['논리'])} 코드로 나눕니다.`
+    +`</div>`;
 }
 function renderITSMChanges(data){
   const counts=data.counts||{};

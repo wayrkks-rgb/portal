@@ -5,6 +5,7 @@ from typing import Any
 
 from ..config import AppConfig
 from ..repositories import AssetRepository
+from .change_presenter import present
 from .diff_service import DiffService
 
 
@@ -62,7 +63,9 @@ class DailyComparisonService:
             "COLLECTION_GAP": set(),
         }
         for raw in pair["events"][:limit]:
-            item = dict(raw)
+            # 화면용 표현(라벨·요약)을 여기서 붙인다. 코드값과 원본 JSON 을 그대로
+            # 내보내면 표가 읽을 수 없게 된다.
+            item = present(raw)
             category = self._category(source, str(item["event_type"]))
             item["category"] = category
             events.append(item)

@@ -17,7 +17,7 @@ from ..repositories import AssetRepository
 from ..services import (
     AutomatedReportService, ChangeSyncService, DailyComparisonService, DashboardService, ExportService,
     IntegratedDashboardService, PeriodService, ReconciliationExceptionService,
-    ReconciliationService, VMResourceUsageExportService,
+    ReconciliationService, VMResourceUsageExportService, present_all,
 )
 from ..web_common import admin_required, login_required
 
@@ -92,14 +92,14 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         source = request.args.get("source")
         limit = min(int(request.args.get("limit", 500)), 10000)
         with manager.connect() as conn:
-            return jsonify(
-                AssetRepository(conn).changes(
-                    source=source,
-                    limit=limit,
-                    start=request.args.get("start"),
-                    end=request.args.get("end"),
-                )
+            rows = AssetRepository(conn).changes(
+                source=source,
+                limit=limit,
+                start=request.args.get("start"),
+                end=request.args.get("end"),
             )
+        # 코드값·원본 JSON 을 그대로 내보내면 화면에서 읽을 수 없다.
+        return jsonify(present_all(rows))
 
     @bp.route("/api/reconciliation")
     @bp.route("/api/asset-sync/reconciliation")

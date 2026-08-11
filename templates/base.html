@@ -82,7 +82,7 @@ body{background:var(--bg);color:var(--text);font-family:'Noto Sans KR',sans-seri
 .btn-logout:hover{border-color:var(--error);color:var(--error);}
 
 /* ── 메인 콘텐츠 ── */
-.main{margin-left:var(--sidebar-w);flex:1;min-height:100vh;}
+.main{margin-left:var(--sidebar-w);flex:1;min-height:100vh;min-width:0;}
 .topbar{
   background:var(--surface);border-bottom:1px solid var(--border);
   padding:16px 32px; display:flex; align-items:center; justify-content:space-between;
@@ -90,7 +90,7 @@ body{background:var(--bg);color:var(--text);font-family:'Noto Sans KR',sans-seri
 }
 .topbar-title{font-size:16px;font-weight:700;}
 .topbar-sub{font-size:12px;color:var(--text-muted);margin-top:2px;font-family:'JetBrains Mono',monospace;}
-.content{padding:32px;}
+.content{padding:32px;min-width:0;}
 
 /* ── 공통 카드 ── */
 .card{
@@ -104,6 +104,11 @@ body{background:var(--bg);color:var(--text);font-family:'Noto Sans KR',sans-seri
 .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:20px;}
 .grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;}
 .grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;}
+/* flex·grid 자식은 기본이 min-width:auto 라서 내용보다 작아지지 못한다. 표에 긴 값이
+   하나만 들어와도 칸이 그만큼 벌어지고, 결국 페이지 전체가 좌우로 밀린다.
+   가로 스크롤은 표 안에서만 일어나야 한다. */
+.grid-2>*,.grid-3>*,.grid-4>*{min-width:0;}
+.card{min-width:0;}
 
 /* ── 통계 카드 ── */
 .stat-card{
@@ -161,7 +166,14 @@ body{background:var(--bg);color:var(--text);font-family:'Noto Sans KR',sans-seri
 textarea.form-input{resize:vertical;min-height:80px;}
 
 /* ── 테이블 ── */
-.table-wrap{overflow-x:auto;}
+.table-wrap{overflow-x:auto;max-width:100%;}
+/* 끊을 곳이 없는 긴 값(JSON·해시)도 칸 안에서 접히게 한다. 이게 없으면 표의
+   최소 너비가 그 값만큼 커진다. */
+td{overflow-wrap:anywhere;}
+/* 값이 길면 세 줄까지만 보여주고, 클릭하면 전체를 편다. */
+.cell-clip{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;
+  overflow:hidden;max-width:min(460px,34vw);cursor:pointer;}
+.cell-clip.open{-webkit-line-clamp:unset;max-width:none;cursor:zoom-out;}
 table{width:100%;border-collapse:collapse;font-size:13px;}
 th{background:var(--surface2);padding:10px 14px;text-align:left;color:var(--text-muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid var(--border);}
 td{padding:10px 14px;border-bottom:1px solid rgba(30,45,64,0.5);color:var(--text-dim);}

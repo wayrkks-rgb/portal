@@ -247,4 +247,33 @@ window.addEventListener('load', () => {
   const openModule = PORTAL_MODULES.find(m => m.location === 'REMOTE' && m.page === page);
   if(openModule) loadModulePage(openModule.id);
 });
+
+// ── 변경 이벤트 표시 ──
+// 서버가 붙여준 표시용 값(old_display/new_display)을 쓴다. 없으면 원래 값으로 돌아간다.
+// 값이 길면 세 줄까지만 보이고, 눌러서 전체를 편다.
+function changeCell(row, side){
+  const display=row[`${side}_display`];
+  const fallback=row[`${side}_value`];
+  const short=(display!=null&&display!=='')?String(display)
+    :(fallback==null||fallback===''?'':String(fallback));
+  if(!short)return '<span class="text-muted">-</span>';
+  const detail=row.detail?row.detail[side]:null;
+  const full=detail==null?short
+    :(typeof detail==='string'?detail:JSON.stringify(detail,null,2));
+  if(full===short&&short.length<=60)return escapeHtml(short);
+  return `<div class="cell-clip" title="눌러서 전체 보기"`
+    +` data-short="${escapeHtml(short)}" data-full="${escapeHtml(full)}"`
+    +` onclick="toggleCellDetail(this)">${escapeHtml(short)}</div>`;
+}
+
+function toggleCellDetail(el){
+  const open=el.classList.toggle('open');
+  el.textContent=open?el.dataset.full:el.dataset.short;
+}
+
+// 필드 이름도 라벨이 있으면 그걸 쓴다.
+function changeField(row){
+  const label=row.field_label||row.field_name;
+  return label?escapeHtml(label):'<span class="text-muted">-</span>';
+}
 </script>

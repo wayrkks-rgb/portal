@@ -40,12 +40,81 @@ function switchSyncTab(name, tab) {
   tab.parentElement.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   tab.classList.add('active'); document.getElementById(`sync-panel-${name}`).classList.add('active');
 }
+let syncReconRows=[];
+
+// 자원 값은 단위를 붙여야 4 와 4096 을 헷갈리지 않는다.
+function reconValue(field,value){
+  if(value==null||value==='')return '-';
+  if(field==='MEMORY')return memoryGbValue(value);
+  return String(value);
+}
+
+// 한쪽 요약. 어떤 서버인지 알아볼 수 있을 만큼만 보여준다.
+function reconSide(row,side){
+  const prefix=side==='itsm'?'itsm':'rv';
+  const name=side==='itsm'?row.cm_id:(row.rv_vm_name||row.rv_asset_key);
+  if(!name)return '<span class="text-muted">없음</span>';
+  const host=row[`${prefix}_hostname`]||'';
+  const ip=row[`${prefix}_ip`]||'';
+  const os=[row[`${prefix}_os`],row[`${prefix}_os_version`]].filter(Boolean).join(' ');
+  const spec=[row[`${prefix}_cpu`]!=null?`${row[`${prefix}_cpu`]}Core`:'',
+              row[`${prefix}_memory`]!=null?memoryGbValue(row[`${prefix}_memory`]):''].filter(Boolean).join(' / ');
+  const lines=[`<strong>${syncEscape(name)}</strong>`];
+  if(host||ip)lines.push(syncEscape([host,ip].filter(Boolean).join(' · ')));
+  if(os||spec)lines.push(`<span class="text-xs text-muted">${syncEscape([os,spec].filter(Boolean).join(' · '))}</span>`);
+  return lines.join('<br>');
+}
+
+// 무엇이 얼마나 다른지. 상태 이름만으로는 비교가 안 된다.
+function reconDrifts(row){
+  const drifts=row.drifts||[];
+  if(!drifts.length)return '<span class="text-muted">-</span>';
+  return drifts.map(d=>{
+    const unknown=String(d.status||'').endsWith('_UNKNOWN');
+    const cls=unknown?'badge-yellow':'badge-red';
+    return `<div style="margin-bottom:2px"><span class="badge ${cls}">${syncEscape(d.field)}</span> `
+      +`<span class="mono">${syncEscape(reconValue(d.field,d.itsm))}</span> → `
+      +`<span class="mono">${syncEscape(reconValue(d.field,d.rvtools))}</span></div>`;
+  }).join('');
+}
+
 async function loadSyncReconciliation() {
   const status = document.getElementById('sync-recon-filter')?.value || '';
-  const rows = await fetch('/api/asset-sync/reconciliation?limit=1000'+(status?'&status='+encodeURIComponent(status):'')).then(r=>r.json());
-  const body = document.getElementById('sync-recon-body'); if(!body) return;
-  body.innerHTML = rows.length ? rows.map(r=>`<tr><td>${syncBadge(r.match_status)}</td><td class="mono">${syncEscape(r.cm_id||'-')}</td><td class="mono">${syncEscape(r.rv_asset_key||'-')}</td><td>${syncEscape(r.match_method||'-')}</td><td>${r.score}</td><td>${syncEscape((r.drifts||[]).map(d=>d.status).join(', ')||'-')}</td><td>${syncEscape(r.reason||'-')}</td></tr>`).join('') : '<tr><td colspan="7" style="text-align:center">정합성 결과가 없습니다.</td></tr>';
+  syncReconRows = await fetch('/api/asset-sync/reconciliation?limit=1000'+(status?'&status='+encodeURIComponent(status):'')).then(r=>r.json());
+  renderSyncReconciliation();
 }
+
+function renderSyncReconciliation(){
+  const body = document.getElementById('sync-recon-body'); if(!body) return;
+  const term=(document.getElementById('sync-recon-search')?.value||'').trim().toLowerCase();
+  const rows=term?syncReconRows.filter(r=>[r.cm_id,r.rv_asset_key,r.rv_vm_name,r.itsm_hostname,
+      r.rv_hostname,r.itsm_ip,r.rv_ip].some(v=>String(v||'').toLowerCase().includes(term))):syncReconRows;
+
+  const counts={};
+  syncReconRows.forEach(r=>{counts[r.match_status]=(counts[r.match_status]||0)+1;});
+  const countsEl=document.getElementById('sync-recon-counts');
+  if(countsEl)countsEl.innerHTML=Object.entries(counts).sort((a,b)=>b[1]-a[1])
+    .map(([status,n])=>`<span style="cursor:pointer" onclick="filterSyncRecon('${syncEscape(status)}')">`
+      +`${syncBadge(status)} ${n.toLocaleString()}</span>`).join('');
+
+  body.innerHTML = rows.length ? rows.map(r=>`<tr>
+    <td>${syncBadge(r.match_status)}</td>
+    <td class="mono">${syncEscape(r.cm_id||r.rv_asset_key||'-')}</td>
+    <td>${reconSide(r,'itsm')}</td>
+    <td>${reconSide(r,'rv')}</td>
+    <td>${reconDrifts(r)}</td>
+    <td>${syncEscape(r.match_method||'-')}${r.score?` <span class="text-xs text-muted">${r.score}</span>`:''}</td>
+    <td>${syncEscape(r.reason||'-')}</td></tr>`).join('')
+    : `<tr><td colspan="7" style="text-align:center">${term?'검색 결과가 없습니다.':'정합성 결과가 없습니다.'}</td></tr>`;
+}
+
+function filterSyncRecon(status){
+  const select=document.getElementById('sync-recon-filter');
+  if(!select)return;
+  select.value=select.value===status?'':status;
+  loadSyncReconciliation();
+}
+
 async function loadDailyComparison(source) {
   const key=source==='ITSM'?'itsm':'rvtools';
   const summaryEl=document.getElementById(`daily-${key}-summary`), body=document.getElementById(`daily-${key}-body`); if(!summaryEl||!body)return;
@@ -56,14 +125,14 @@ async function loadDailyComparison(source) {
   const c=res.counts||{}, rc=res.record_counts||{};
   const basis=res.comparison_basis==='PREVIOUS_DAY'?'전일 정상 스냅샷 대비':'동일 일자 직전 실행 대비(전일 기준자료 없음)';
   summaryEl.innerHTML=`<div class="text-xs text-muted mb-4">${syncEscape(basis)} · ${syncEscape(res.previous.snapshot_date)} (${Number(rc.previous||0).toLocaleString()}건) → ${syncEscape(res.current.snapshot_date)} (${Number(rc.current||0).toLocaleString()}건), 순증감 ${Number(rc.net||0).toLocaleString()}</div><div class="flex gap-2"><span class="badge badge-green">추가 ${c.ADDED||0}</span><span class="badge badge-red">삭제 ${c.REMOVED||0}</span><span class="badge badge-yellow">변경 ${c.CHANGED||0}</span><span class="badge badge-blue">상태변경 ${c.STATUS_CHANGED||0}</span><span class="badge badge-red">수집공백 ${c.COLLECTION_GAP||0}</span></div>`;
-  body.innerHTML=(res.events||[]).length?(res.events||[]).map(r=>`<tr><td>${syncBadge(r.category||'-')}</td><td class="mono">${syncEscape(r.asset_key)}</td><td>${syncEscape(r.event_type)}</td><td>${syncEscape(r.field_name||'-')}</td><td>${memoryChangeValue(r.field_name,r.event_type,r.old_value)}</td><td>${memoryChangeValue(r.field_name,r.event_type,r.new_value)}</td></tr>`).join(''):'<tr><td colspan="6" style="text-align:center">변경 없음</td></tr>';
+  body.innerHTML=(res.events||[]).length?(res.events||[]).map(r=>`<tr><td>${syncBadge(r.category||'-')}</td><td class="mono">${syncEscape(r.asset_key)}</td><td>${syncEscape(r.event_type)}</td><td>${changeField(r)}</td><td>${changeCell(r,'old')}</td><td>${changeCell(r,'new')}</td></tr>`).join(''):'<tr><td colspan="6" style="text-align:center">변경 없음</td></tr>';
 }
 
 async function loadSyncChanges() {
   const source = document.getElementById('sync-change-source')?.value || '';
   const rows = await fetch('/api/asset-sync/changes?limit=1000'+(source?'&source='+encodeURIComponent(source):'')).then(r=>r.json());
   const body = document.getElementById('sync-changes-body'); if(!body) return;
-  body.innerHTML = rows.length ? rows.map(r=>`<tr><td>${syncEscape(new Date(r.detected_at).toLocaleString('ko-KR'))}</td><td>${syncBadge(r.source)}</td><td class="mono">${syncEscape(r.asset_key)}</td><td>${syncEscape(r.event_type)}</td><td>${syncEscape(r.field_name||'-')}</td><td>${memoryChangeValue(r.field_name,r.event_type,r.old_value)}</td><td>${memoryChangeValue(r.field_name,r.event_type,r.new_value)}</td></tr>`).join('') : '<tr><td colspan="7" style="text-align:center">변경 이력이 없습니다.</td></tr>';
+  body.innerHTML = rows.length ? rows.map(r=>`<tr><td>${syncEscape(new Date(r.detected_at).toLocaleString('ko-KR'))}</td><td>${syncBadge(r.source)}</td><td class="mono">${syncEscape(r.asset_key)}</td><td>${syncEscape(r.event_type)}</td><td>${changeField(r)}</td><td>${changeCell(r,'old')}</td><td>${changeCell(r,'new')}</td></tr>`).join('') : '<tr><td colspan="7" style="text-align:center">변경 이력이 없습니다.</td></tr>';
 }
 async function loadSyncResults() {
   const rows = await fetch('/api/asset-sync/sync-results?limit=1000').then(r=>r.json());

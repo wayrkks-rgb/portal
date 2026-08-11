@@ -37,13 +37,20 @@
       <div class="card">
         <div class="flex justify-between items-center mb-4">
           <div class="card-title" style="margin-bottom:0"><span class="icon">🔗</span> ITSM ↔ vCenter 정합성 결과</div>
-          <select class="form-select" id="sync-recon-filter" style="width:220px" onchange="loadSyncReconciliation()">
-            <option value="">전체 상태</option><option value="MATCHED">MATCHED</option><option value="MATCHED_WITH_DRIFT">MATCHED_WITH_DRIFT</option>
-            <option value="IP_CHANGE_CANDIDATE">IP_CHANGE_CANDIDATE</option><option value="HOSTNAME_REVIEW">HOSTNAME_REVIEW</option>
-            <option value="ITSM_ONLY">ITSM_ONLY</option><option value="RVTOOLS_ONLY">VCENTER_ONLY</option><option value="AMBIGUOUS">AMBIGUOUS</option>
-          </select>
+          <div class="flex gap-2 items-center">
+            <input class="form-input" id="sync-recon-search" style="width:200px" placeholder="호스트명·IP·자산번호 검색"
+                   oninput="renderSyncReconciliation()">
+            <select class="form-select" id="sync-recon-filter" style="width:220px" onchange="loadSyncReconciliation()">
+              <option value="">전체 상태</option><option value="MATCHED">MATCHED · 일치</option><option value="MATCHED_WITH_DRIFT">MATCHED_WITH_DRIFT · 값 불일치</option>
+              <option value="IP_CHANGE_CANDIDATE">IP_CHANGE_CANDIDATE · IP 변경 의심</option><option value="HOSTNAME_REVIEW">HOSTNAME_REVIEW · 호스트명 검토</option>
+              <option value="ITSM_ONLY">ITSM_ONLY · ITSM 에만 있음</option><option value="RVTOOLS_ONLY">VCENTER_ONLY · vCenter 에만 있음</option><option value="AMBIGUOUS">AMBIGUOUS · 후보 복수</option>
+            </select>
+          </div>
         </div>
-        <div class="table-wrap"><table><thead><tr><th>상태</th><th>CM_ID</th><th>vCenter 자산키</th><th>매칭방식</th><th>점수</th><th>Drift</th><th>사유</th></tr></thead><tbody id="sync-recon-body"></tbody></table></div>
+        <div id="sync-recon-counts" class="flex gap-2 mb-4" style="flex-wrap:wrap"></div>
+        <div class="table-wrap"><table><thead><tr>
+          <th>상태</th><th>자산</th><th>ITSM</th><th>vCenter</th><th>차이</th><th>매칭</th><th>사유</th>
+        </tr></thead><tbody id="sync-recon-body"></tbody></table></div>
       </div>
     </div>
 

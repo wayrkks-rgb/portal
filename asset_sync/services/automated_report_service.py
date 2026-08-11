@@ -167,11 +167,13 @@ class AutomatedReportService:
             if event["event_type"] not in {"ITSM_ASSET_CREATED", "ITSM_RECORD_REMOVED", "ITSM_ASSET_UPDATED", "ITSM_STATUS_TO_UNUSED", "ITSM_STATUS_TO_DISPOSED", "ITSM_ASSET_REACTIVATED"}:
                 continue
             current_id = int(event["snapshot_id"])
-            cache.setdefault(current_id, self.repo.load_itsm_records(current_id))
+            if current_id not in cache:
+                cache[current_id] = self.repo.load_itsm_records(current_id)
             record = cache[current_id].get(event["asset_key"], {})
             if not record and event.get("previous_snapshot_id"):
                 previous_id = int(event["previous_snapshot_id"])
-                cache.setdefault(previous_id, self.repo.load_itsm_records(previous_id))
+                if previous_id not in cache:
+                    cache[previous_id] = self.repo.load_itsm_records(previous_id)
                 record = cache[previous_id].get(event["asset_key"], {})
             raw = record.get("raw", {})
             rows.append([

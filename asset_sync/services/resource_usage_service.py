@@ -476,7 +476,8 @@ class VMResourceUsageExportService:
                 if not sid:
                     continue
                 sid = int(sid)
-                cache.setdefault(sid, self.repo.load_rv_records(sid))
+                if sid not in cache:
+                    cache[sid] = self.repo.load_rv_records(sid)
                 if cache[sid].get(event["asset_key"]):
                     records.append(cache[sid][event["asset_key"]])
             vm = records[0] if records else {}

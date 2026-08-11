@@ -187,18 +187,24 @@ class AssetRepository:
             ip_rows,
         )
 
-    def load_itsm_records(self, snapshot_id: int) -> dict[str, dict[str, Any]]:
+    def load_itsm_records(self, snapshot_id: int, with_raw: bool = True) -> dict[str, dict[str, Any]]:
         rows = self.conn.execute("SELECT * FROM itsm_asset_snapshot WHERE snapshot_id=?", (snapshot_id,)).fetchall()
-        return {row["cm_id"]: self._row_to_record(row) for row in rows}
+        return {row["cm_id"]: self._row_to_record(row, with_raw) for row in rows}
 
-    def load_rv_records(self, snapshot_id: int) -> dict[str, dict[str, Any]]:
+    def load_rv_records(self, snapshot_id: int, with_raw: bool = True) -> dict[str, dict[str, Any]]:
         rows = self.conn.execute("SELECT * FROM rv_asset_snapshot WHERE snapshot_id=?", (snapshot_id,)).fetchall()
-        return {row["asset_key"]: self._row_to_record(row) for row in rows}
+        return {row["asset_key"]: self._row_to_record(row, with_raw) for row in rows}
 
     @staticmethod
-    def _row_to_record(row: Any) -> dict[str, Any]:
+    def _row_to_record(row: Any, with_raw: bool = True) -> dict[str, Any]:
+        """raw_json 파싱은 행마다 든다.
+
+        스냅샷 한 개가 수천~수만 행이라, 원본이 필요 없는 집계·비교에서까지 파싱하면
+        그 비용이 화면 대기시간으로 그대로 나온다. 필요할 때만 푼다.
+        """
         record = dict(row)
-        record["raw"] = json.loads(record.pop("raw_json"))
+        raw_json = record.pop("raw_json", None)
+        record["raw"] = json.loads(raw_json) if with_raw and raw_json else {}
         if "ip_json" in record:
             record["ip_addresses"] = json.loads(record.pop("ip_json"))
         return record
@@ -266,14 +272,36 @@ class AssetRepository:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    #: 정합성 결과에 양쪽 실제 값을 붙인다. 상태 이름(MEMORY_DIFF)만 봐서는
+    #: ITSM 이 얼마고 vCenter 가 얼마인지 알 수 없어 비교가 안 된다.
+    #: ITSM_ONLY 행도 자산번호만으로는 어떤 서버인지 알 수 없어 호스트명·IP 를 같이 준다.
+    _RECONCILIATION_SELECT = """
+        SELECT r.*,
+               i.normalized_hostname AS itsm_hostname, i.primary_ip AS itsm_ip,
+               i.cpu_cores AS itsm_cpu, i.memory_mb AS itsm_memory,
+               i.os_family AS itsm_os, i.os_version AS itsm_os_version,
+               i.status_code AS itsm_status_code,
+               i.server_category_code AS itsm_server_category_code,
+               v.vm_name AS rv_vm_name, v.normalized_hostname AS rv_hostname,
+               v.primary_ip AS rv_ip, v.cpus AS rv_cpu, v.memory_mb AS rv_memory,
+               v.os_family AS rv_os, v.os_version AS rv_os_version,
+               v.power_state AS rv_power_state, v.esxi_host AS rv_esxi_host,
+               v.vcenter AS rv_vcenter
+        FROM reconciliation_result r
+        LEFT JOIN itsm_asset_snapshot i
+               ON i.snapshot_id = r.itsm_snapshot_id AND i.cm_id = r.cm_id
+        LEFT JOIN rv_asset_snapshot v
+               ON v.snapshot_id = r.rv_snapshot_id AND v.asset_key = r.rv_asset_key
+    """
+
     def reconciliation(self, limit: int = 1000, status: str | None = None) -> list[dict[str, Any]]:
-        if status:
-            rows = self.conn.execute(
-                "SELECT * FROM reconciliation_result WHERE match_status=? ORDER BY created_at DESC LIMIT ?",
-                (status, limit),
-            ).fetchall()
-        else:
-            rows = self.conn.execute("SELECT * FROM reconciliation_result ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        where = " WHERE r.match_status=?" if status else ""
+        params: list[Any] = [status] if status else []
+        params.append(limit)
+        rows = self.conn.execute(
+            f"{self._RECONCILIATION_SELECT}{where} ORDER BY r.created_at DESC LIMIT ?",
+            tuple(params),
+        ).fetchall()
         return [dict(row) for row in rows]
 
     def identity_maps(self) -> dict[str, str]:
