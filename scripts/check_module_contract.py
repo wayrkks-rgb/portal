@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import re
 import sys
 from pathlib import Path
@@ -146,6 +147,55 @@ def check_templates(report: Report, modules: list) -> None:
             report.warn(f"templates/modules/{module_id}/ 가 있는데 등록된 대메뉴가 아닙니다.")
 
 
+def check_local_python(report: Report, wanted: str | None) -> None:
+    """application/modules_local/<id>/ 의 파이썬 계약을 확인한다.
+
+    통합 웹은 한 모듈의 오류로 전체가 멈추지 않도록, 등록에 실패하면 그 모듈만
+    건너뛰고 로그만 남긴다. 그래서 이름을 틀리면 **기동은 되는데 내 모듈만 안 뜬다**.
+    로그를 열어보기 전에는 알 수 없으므로 여기서 미리 잡는다.
+    """
+    print("\n== 내부 모듈 파이썬 ==")
+    base = ROOT / "application" / "modules_local"
+    directories = [
+        path for path in sorted(base.iterdir())
+        if base.is_dir() and path.is_dir() and not path.name.startswith(("_", "."))
+    ] if base.is_dir() else []
+    if wanted:
+        directories = [path for path in directories if path.name == wanted]
+    if not directories:
+        report.ok("내부 모듈 없음 (선택 사항)")
+        return
+
+    for directory in directories:
+        module_id = directory.name
+        checked = False
+        for filename, symbol, requirement in (
+            ("routes.py", "bp", "bp = Blueprint(...) 를 모듈 최상위에 두어야 합니다"),
+            ("panel.py", "panel", "def panel(user, params) 함수를 두어야 합니다"),
+        ):
+            path = directory / filename
+            if not path.is_file():
+                continue
+            checked = True
+            try:
+                loaded = importlib.import_module(f"application.modules_local.{module_id}.{filename[:-3]}")
+            except Exception as exc:  # 문법 오류·의존성 누락 모두 여기서 드러난다.
+                report.fail(f"{module_id}/{filename}: 불러올 수 없습니다 → {exc}")
+                continue
+            target = getattr(loaded, symbol, None)
+            if target is None:
+                report.fail(f"{module_id}/{filename}: {symbol} 이(가) 없습니다. {requirement}")
+            elif symbol == "panel" and not callable(target):
+                report.fail(f"{module_id}/{filename}: panel 이 함수가 아닙니다. {requirement}")
+            else:
+                report.ok(f"{module_id}/{filename}: {symbol} 확인")
+        if not checked:
+            report.warn(
+                f"{module_id}: routes.py 도 panel.py 도 없습니다 → "
+                "화면만 있는 모듈이면 정상입니다."
+            )
+
+
 def check_styles(report: Report) -> None:
     """모듈 CSS 가 다른 팀 화면을 건드리지 않는지."""
     print("\n== 모듈 CSS ==")
@@ -256,6 +306,7 @@ def main() -> int:
         check_schemas(report, args.module)
         check_migrations(report, args.module)
         check_templates(report, modules)
+        check_local_python(report, args.module)
         check_styles(report)
         if args.live:
             check_live(report, modules)

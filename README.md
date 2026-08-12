@@ -70,6 +70,7 @@ data/archive/vcenter/YYYYMMDD/       날짜별 vCenter XLSX
 
 | 문서 | 용도 |
 |---|---|
-| **`MODULE_ONBOARDING.md`** | **먼저 읽는다.** 구조와 최소 연동 방법을 한 번에 정리 |
+| **`CONTRIBUTING.md`** | **여기부터.** 저장소 구조·branch 작업 순서·건드리면 안 되는 파일 |
+| **`MODULE_ONBOARDING.md`** | 구조와 최소 연동 방법을 한 번에 정리 |
 | `MODULE_INTEGRATION_GUIDE.md` | 세부 규격 (프록시 차단 항목·권한·스키마 규칙 전체) |
 | `config/modules/README.md` | 등록 파일의 필드 표 |
