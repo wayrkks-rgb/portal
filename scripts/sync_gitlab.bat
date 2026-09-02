@@ -10,7 +10,7 @@ REM 자세한 절차는 GITLAB_SETUP_GUIDE.md 를 본다.
 git remote get-url gitlab >nul 2>&1
 if errorlevel 1 (
   echo [ERROR] gitlab remote 가 없다. 처음 한 번만 등록한다:
-  echo         git remote add gitlab https://gitlab.example.local/그룹/portal.git
+  echo         git remote add gitlab https://ito-ax-gitlab.apps.dev.honecloud.co.kr/26-project-hli-syscheck-gitlab/hli-syscheck-service.git
   exit /b 1
 )
 

@@ -4,9 +4,15 @@
 수정·배포까지 하려면 **사내망이 어디까지 열려 있느냐**에 따라 방법이 갈린다.
 먼저 아래 세 줄만 확인하면 어느 경로인지 정해진다.
 
+대상 저장소는 이것이다.
+
+```text
+https://ito-ax-gitlab.apps.dev.honecloud.co.kr/26-project-hli-syscheck-gitlab/hli-syscheck-service
+```
+
 | 확인할 것 | 확인 방법 |
 |---|---|
-| ① 내 PC 에서 사내 GitLab 이 열리나 | 브라우저로 `https://gitlab.<사내주소>` 접속 |
+| ① 내 PC 에서 사내 GitLab 이 열리나 | 위 주소를 브라우저로 접속 |
 | ② 그 PC 에서 인터넷(github.com)이 되나 | 브라우저로 `https://github.com` 접속 |
 | ③ 그 PC 에서 `api.anthropic.com` 이 되나 | Claude Code 를 그 PC 에서 쓸 거면 필요 |
 
@@ -14,10 +20,18 @@
 - ①②가 다 된다 → **경로 B**. GitHub 에서 개발하고 GitLab 에 동기화한다.
 - ①과 ②가 서로 다른 PC 다(망분리) → **경로 C**. 파일로 반입한다.
 
-> **이 Claude 세션(claude.ai/code)에서는 사내 GitLab 에 직접 못 붙는다.**
-> 지금 세션은 인터넷상의 격리된 컨테이너에서 돌아간다. 사내망 주소는
-> 애초에 경로가 없다. 사내 GitLab 을 Claude 로 직접 고치려면 ③이 열린
-> **사내망 PC 에 Claude Code CLI 를 설치**해서 거기서 써야 한다.
+> **이 Claude 세션(claude.ai/code)에서는 위 주소에 붙지 못한다.** 실제로 붙여 보면
+> egress 정책에서 `403` 으로 막는다(`ito-ax-gitlab.apps.dev.honecloud.co.kr` 이
+> 허용 목록에 없음). 지금 세션은 인터넷상의 격리된 컨테이너에서 돌기 때문이다.
+>
+> 뚫는 방법은 둘 중 하나다.
+>
+> 1. **그 GitLab 이 인터넷에서 열리는 주소라면** — Claude Code 환경(environment)의
+>    network policy 허용 목록에 이 도메인을 넣으면 웹 세션에서도 직접 붙는다.
+>    설정은 <https://code.claude.com/docs/en/claude-code-on-the-web> 참고.
+>    여기서는 정책에 막혀서 열리는 주소인지 아닌지까지는 확인할 수 없다.
+> 2. **사내망에서만 열리는 주소라면** — ③이 열린 **사내망 PC 에 Claude Code CLI 를
+>    설치**해서 거기서 쓴다. 이게 말씀하신 "다이렉트로 수정·배포" 에 해당한다.
 
 ---
 
@@ -31,7 +45,7 @@
 ```bash
 git clone https://github.com/wayrkks-rgb/portal.git
 cd portal
-git remote add gitlab https://gitlab.example.local/<그룹>/portal.git
+git remote add gitlab https://ito-ax-gitlab.apps.dev.honecloud.co.kr/26-project-hli-syscheck-gitlab/hli-syscheck-service.git
 git push gitlab --all
 git push gitlab --tags
 ```
@@ -116,7 +130,7 @@ scripts\sync_gitlab.bat master
 처음 한 번만 remote 를 등록해 둔다.
 
 ```bash
-git remote add gitlab https://gitlab.example.local/<그룹>/portal.git
+git remote add gitlab https://ito-ax-gitlab.apps.dev.honecloud.co.kr/26-project-hli-syscheck-gitlab/hli-syscheck-service.git
 ```
 
 사람이 안 돌려도 되게 하려면 GitLab 의 **Pull mirroring** 을 쓴다
@@ -150,9 +164,9 @@ commit 이력이 사라져서 사내에서 이어서 작업할 수가 없다. `g
 폐쇄망 GitLab 을 **처음** 채울 때는 clone 할 것이 없으므로 이렇게 한다.
 
 ```bash
-git clone portal-master-<sha>.bundle portal
-cd portal
-git remote set-url origin https://gitlab.example.local/<그룹>/portal.git
+git clone portal-master-<sha>.bundle hli-syscheck-service
+cd hli-syscheck-service
+git remote set-url origin https://ito-ax-gitlab.apps.dev.honecloud.co.kr/26-project-hli-syscheck-gitlab/hli-syscheck-service.git
 git push -u origin master --tags
 ```
 
@@ -204,7 +218,7 @@ GitLab 에서 깨진다" 가 생긴다. 경로 A 로 완전히 넘어가서 GitH
 
 ## 처음 한 번 체크리스트
 
-- [ ] 사내 GitLab 에 `portal` 프로젝트 생성 (private)
+- [ ] 사내 GitLab `26-project-hli-syscheck-gitlab/hli-syscheck-service` 프로젝트 확인 (private)
 - [ ] 위 ①②③ 확인해서 경로 A / B / C 중 하나 결정
 - [ ] 저장소 올리기 (`git push --all` 또는 bundle 반입)
 - [ ] 비밀값이 이력에 없는지 확인
