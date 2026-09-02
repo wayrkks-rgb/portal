@@ -1,227 +1,219 @@
-# 사내 GitLab 으로 옮겨서 계속 개발하기
+# 사내 GitLab 에서 개발하기
 
-지금 이 저장소는 GitHub(`wayrkks-rgb/portal`)에 있다. 이걸 사내 GitLab 에 붙여서
-수정·배포까지 하려면 **사내망이 어디까지 열려 있느냐**에 따라 방법이 갈린다.
-먼저 아래 세 줄만 확인하면 어느 경로인지 정해진다.
+`hli-syscheck-service`(일일점검 자동화)는 **별개 신규 프로젝트**다. 이 저장소(`portal`)는
+GitHub 에 그대로 두고 옮기지 않는다. 이 문서는 사내 GitLab 쪽 작업을 어떻게 시작하고
+이어가는지 정리한 것이다.
 
-대상 저장소는 이것이다.
+```text
+portal                  GitHub (wayrkks-rgb/portal)          — 그대로 둔다
+hli-syscheck-service    사내 GitLab, 신규                     — 여기서 새로 시작한다
+```
+
+대상 저장소:
 
 ```text
 https://ito-ax-gitlab.apps.dev.honecloud.co.kr/26-project-hli-syscheck-gitlab/hli-syscheck-service
 ```
 
-| 확인할 것 | 확인 방법 |
-|---|---|
-| ① 내 PC 에서 사내 GitLab 이 열리나 | 위 주소를 브라우저로 접속 |
-| ② 그 PC 에서 인터넷(github.com)이 되나 | 브라우저로 `https://github.com` 접속 |
-| ③ 그 PC 에서 `api.anthropic.com` 이 되나 | Claude Code 를 그 PC 에서 쓸 거면 필요 |
+---
 
-- ①만 된다 → **경로 A**. 사내 GitLab 을 주 저장소로 쓴다. 가장 깔끔하다.
-- ①②가 다 된다 → **경로 B**. GitHub 에서 개발하고 GitLab 에 동기화한다.
-- ①과 ②가 서로 다른 PC 다(망분리) → **경로 C**. 파일로 반입한다.
+## 0. 먼저 알아야 할 것 — 웹 세션에서는 이 GitLab 에 못 붙는다
 
-> **이 Claude 세션(claude.ai/code)에서는 위 주소에 붙지 못한다.** 실제로 붙여 보면
-> egress 정책에서 `403` 으로 막는다(`ito-ax-gitlab.apps.dev.honecloud.co.kr` 이
-> 허용 목록에 없음). 지금 세션은 인터넷상의 격리된 컨테이너에서 돌기 때문이다.
->
-> 뚫는 방법은 둘 중 하나다.
->
-> 1. **그 GitLab 이 인터넷에서 열리는 주소라면** — Claude Code 환경(environment)의
->    network policy 허용 목록에 이 도메인을 넣으면 웹 세션에서도 직접 붙는다.
->    설정은 <https://code.claude.com/docs/en/claude-code-on-the-web> 참고.
->    여기서는 정책에 막혀서 열리는 주소인지 아닌지까지는 확인할 수 없다.
-> 2. **사내망에서만 열리는 주소라면** — ③이 열린 **사내망 PC 에 Claude Code CLI 를
->    설치**해서 거기서 쓴다. 이게 말씀하신 "다이렉트로 수정·배포" 에 해당한다.
+claude.ai/code 세션에서 위 주소로 실제로 붙여 보면 egress 정책이 `403` 으로 막는다
+(`ito-ax-gitlab.apps.dev.honecloud.co.kr` 이 허용 목록에 없음). 웹 세션은 인터넷상의
+격리된 컨테이너에서 돌기 때문이다. 뚫는 방법은 둘 중 하나다.
+
+1. **그 GitLab 이 인터넷에서 열리는 주소라면** — Claude Code 환경(environment)의
+   network policy 허용 목록에 이 도메인을 넣으면 웹 세션에서도 직접 붙는다.
+   <https://code.claude.com/docs/en/claude-code-on-the-web> 참고. 정책에 막혀 있어서
+   여기서는 이 주소가 인터넷에서 열리는지 아닌지까지는 확인할 수 없다.
+2. **사내망에서만 열리는 주소라면** — 사내망 PC 에 **Claude Code CLI 를 설치**해서
+   거기서 쓴다. 이게 "다이렉트로 수정·배포" 에 해당한다. 그 PC 에서
+   `api.anthropic.com` 이 열려야 하므로 방화벽 담당자에게 요청해 둔다.
 
 ---
 
-## 경로 A — 사내 GitLab 을 주 저장소로 (권장)
+## 경로 A — 사내망 PC 에서 다이렉트 (권장)
 
-### A-1. 저장소 올리기
-
-인터넷 PC 에서 이력까지 통째로 받아 두고(→ 경로 C의 반입 파일), 사내에서 올린다.
-①②가 같은 PC 에서 되면 그냥 아래처럼 하면 된다.
+가장 단순하다. clone 하고, 고치고, push 한다. GitLab 이 곧 원본이다.
 
 ```bash
-git clone https://github.com/wayrkks-rgb/portal.git
-cd portal
-git remote add gitlab https://ito-ax-gitlab.apps.dev.honecloud.co.kr/26-project-hli-syscheck-gitlab/hli-syscheck-service.git
-git push gitlab --all
-git push gitlab --tags
+git clone https://ito-ax-gitlab.apps.dev.honecloud.co.kr/26-project-hli-syscheck-gitlab/hli-syscheck-service.git
+cd hli-syscheck-service
+git checkout -b feature/<작업이름>
+# ... 작업 ...
+git push -u origin feature/<작업이름>
 ```
 
-그다음 `origin` 을 GitLab 으로 바꿔 끼운다. 앞으로 `git push` 는 사내로 간다.
+push 하면 GitLab 이 MR 링크를 찍어 준다. 그 링크로 MR 을 만든다.
+
+필요한 것은 두 가지뿐이다.
+
+- **저장소 접근** — Settings → Access Tokens 에서 프로젝트 토큰(`read_repository`,
+  `write_repository`)을 만들어 쓰거나, SSH 키를 등록한다.
+- **Claude 를 쓸 거면** 그 PC 에서 `api.anthropic.com` 이 열려야 한다.
+
+## 경로 B — 망분리라서 사내망 PC 에 인터넷이 없을 때
+
+코드 작성은 인터넷 PC 에서 하고, 저장소를 **파일 하나로 반입**한다.
+**ZIP 으로 복사하면 안 된다.** commit 이력이 사라져서 사내에서 이어서 작업할 수 없다.
 
 ```bash
-git remote rename origin github
-git remote rename gitlab origin
+# [인터넷 PC] 묶는다
+git bundle create syscheck-main.bundle main --tags
+git bundle verify syscheck-main.bundle      # 들고 들어가기 전에 확인한다
+
+#   ── USB 등으로 반입 ──
+
+# [폐쇄망 PC] 사내 GitLab clone 폴더에서
+git bundle verify D:\반입\syscheck-main.bundle
+git checkout main
+git pull D:\반입\syscheck-main.bundle main   # merge 로 받는다. 충돌은 여기서 드러난다
+git fetch D:\반입\syscheck-main.bundle "refs/tags/*:refs/tags/*"
+git push origin main --tags
 ```
 
-### A-2. 작업 순서
+반대 방향(사내에서 고친 것을 밖으로)도 같은 방식이다. 다만 **양쪽에서 동시에 고치면
+반드시 충돌**하므로 어느 쪽이 원본인지 하나로 정해 둔다.
 
-`CONTRIBUTING.md` 의 순서와 같다. PR 이라는 말만 MR(Merge Request)로 바뀐다.
+---
+
+## 빈 프로젝트에 처음 올리기
+
+GitLab 프로젝트가 비어 있으면 이렇게 시작한다.
 
 ```bash
-git checkout -b feature/<내모듈>
-# ... ✅ 표시된 위치에만 파일 추가 ...
-python scripts/check_module_contract.py --module <내모듈>
-python -m pytest -q
-git push -u origin feature/<내모듈>
+mkdir hli-syscheck-service && cd hli-syscheck-service
+git init -b main
+# ... 첫 파일들 ...
+git remote add origin https://ito-ax-gitlab.apps.dev.honecloud.co.kr/26-project-hli-syscheck-gitlab/hli-syscheck-service.git
+git add . && git commit -m "프로젝트 뼈대를 만든다"
+git push -u origin main
 ```
 
-push 하면 GitLab 이 링크를 찍어 준다. 그 링크로 MR 을 만든다.
-
-### A-3. CI 켜기
-
-`.gitlab-ci.yml` 이 이미 저장소에 있다. GitHub Actions 와 **같은 검사**를 돌린다.
-
-1. 사내에 GitLab Runner 가 이미 있으면 그냥 push 하면 파이프라인이 돈다.
-2. Runner 가 없으면 등록해야 한다 (Settings → CI/CD → Runners).
-3. 폐쇄망이라 `python:3.11` 이미지를 못 받거나 docker executor 가 아니면,
-   `.gitlab-ci.yml` 아래쪽 주석의 **shell executor 방식**으로 바꾼다.
-4. 사내 PyPI 미러가 있으면 Settings → CI/CD → Variables 에 `PIP_INDEX_URL` 을 넣는다.
-   미러도 없으면 runner 서버에 venv 를 미리 만들어 두고 3번 방식을 쓴다.
-
-> 지금 `tests/test_oracle_diagnostics.py` 의 2건은 `oracledb` 가 없으면 실패한다.
-> GitHub CI 도 이 조합(dev·mysql·bff)이라 같은 상태다. GitLab 파이프라인을 켜면
-> 처음부터 빨간불로 시작하므로, runner 에 `requirements-oracle.txt` 를 같이 깔든지
-> 해당 테스트를 고치든지 먼저 정리하고 켜는 편이 낫다.
-
-Runner 를 못 붙이는 상황이면 CI 없이 가되, **MR 올리기 전에 사람이 두 줄을 돌린다.**
+반입 파일에서 시작하는 경우는 이렇게 한다.
 
 ```bash
-python scripts/check_module_contract.py
-python -m pytest -q
+git clone syscheck-main.bundle hli-syscheck-service
+cd hli-syscheck-service
+git remote set-url origin https://ito-ax-gitlab.apps.dev.honecloud.co.kr/26-project-hli-syscheck-gitlab/hli-syscheck-service.git
+git push -u origin main --tags
 ```
 
-### A-4. 배포까지 GitLab 에서
+올린 뒤 Settings → Repository → Protected branches 에서 `main` 을 보호한다.
 
-지금 배포는 손으로 한다 — 서버에서 `scripts\install_offline.bat` 하고
-`scripts\run_flask.bat`. 이걸 GitLab 에 넘기려면 **WAS 서버 자체에 shell
-executor runner** 를 깔고 `.gitlab-ci.yml` 에 stage 를 하나 더 붙인다.
+---
+
+## CI 뼈대
+
+새 프로젝트 루트에 `.gitlab-ci.yml` 로 둔다. push 할 때마다 테스트가 돈다.
+
+```yaml
+stages: [test]
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.pip-cache"
+  # 사내 PyPI 미러가 있으면 Settings → CI/CD → Variables 에 PIP_INDEX_URL 을 넣는다.
+
+cache:
+  key: pip-$CI_COMMIT_REF_SLUG
+  paths: [.pip-cache]
+
+테스트:
+  stage: test
+  image: python:3.11
+  # 같은 branch 에 연달아 push 하면 앞선 실행은 의미가 없다. 취소해 대기열을 비운다.
+  interruptible: true
+  before_script:
+    - python -m pip install --upgrade pip
+    - pip install -r requirements-dev.txt
+  script:
+    - python -m pytest -q
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+```
+
+Runner 가 docker executor 가 아니거나(폐쇄망에서 흔하다) `python:3.11` 이미지를 못
+받으면, runner 서버에 파이썬을 미리 깔고 shell executor 로 바꾼다.
+
+```yaml
+테스트:
+  stage: test
+  tags: [syscheck-shell]        # shell executor runner 에 붙인 tag
+  before_script:
+    - python -m venv .venv
+    - .venv/bin/pip install -r requirements-dev.txt
+  script:
+    - .venv/bin/python -m pytest -q
+```
+
+Runner 를 아예 못 붙이면 CI 없이 가되, MR 올리기 전에 사람이 `python -m pytest -q`
+를 돌린다.
+
+### 배포까지 GitLab 에서
+
+배포 서버(OpenShift 든 WAS 든)에 shell executor runner 를 붙이고 stage 를 하나 더 둔다.
+**자동 배포는 켜지 않는다.** 일일점검은 정해진 시각에 도는 배치라, 아무 때나 재기동하면
+점검이 통째로 빈다.
 
 ```yaml
 배포:
   stage: deploy
-  tags: [portal-was]          # WAS 서버에 붙인 runner tag
-  when: manual                # 버튼을 눌러야 나간다. 자동 배포는 하지 않는다.
+  tags: [syscheck-deploy]
+  when: manual                  # 버튼을 눌러야 나간다
   rules:
-    - if: $CI_COMMIT_BRANCH == "master"
+    - if: $CI_COMMIT_BRANCH == "main"
   script:
-    - git pull
-    - scripts\install_offline.bat
-    - powershell -File scripts\restart_flask.ps1   # 재기동 스크립트는 따로 만든다
+    - ./deploy.sh
 ```
-
-> **자동 배포는 켜지 말 것.** 이 시스템은 07:00 배치가 물려 있어서 아무 때나
-> 재기동하면 수집이 끊긴다. `when: manual` 로 두고 배치 시간을 피해서 누른다.
 
 ---
 
-## 경로 B — GitHub 에서 개발, GitLab 에 사본 유지
+## 사내 LLM 게이트웨이로 호출할 때
 
-개발은 지금처럼 GitHub 에서 하고(Claude Code 도 계속 쓸 수 있다), 사내 GitLab 에는
-읽기용 사본만 둔다. 두 저장소에 모두 닿는 PC 에서 한 줄로 맞춘다.
+LLM·RAG 는 사내 게이트웨이를 거친다. 코드에서 지킬 것은 세 가지다.
 
-```bash
-scripts\sync_gitlab.bat master
+**1. 키는 코드에 넣지 않는다.** 환경변수로 읽고, 값은 GitLab
+Settings → CI/CD → Variables 에 **Masked + Protected** 로 넣는다. 운영 서버에서는
+서버 환경변수나 OpenShift Secret 으로 준다. `.env` 는 반드시 `.gitignore` 에 넣는다.
+한 번 commit 되면 이력에 남으므로, 실수로 올렸으면 지우기 전에 **키부터 폐기**한다.
+
+**2. 게이트웨이 주소는 설정으로 뺀다.** 게이트웨이 URL 이 바뀌거나, 나중에
+Anthropic API 를 직접 부르게 되어도 코드를 안 고치도록 한 군데서 읽는다.
+
+```python
+# llm_client.py — 호출부는 전부 여기를 거친다
+import os
+import anthropic
+
+def build_client() -> anthropic.Anthropic:
+    return anthropic.Anthropic(
+        base_url=os.environ["LLM_GATEWAY_URL"],   # 사내 게이트웨이
+        api_key=os.environ["LLM_API_KEY"],
+    )
+
+MODEL = os.environ.get("LLM_MODEL", "claude-opus-5")
 ```
 
-처음 한 번만 remote 를 등록해 둔다.
+**3. 게이트웨이에 먼저 확인할 것** — 이 답에 따라 클라이언트가 달라진다.
 
-```bash
-git remote add gitlab https://ito-ax-gitlab.apps.dev.honecloud.co.kr/26-project-hli-syscheck-gitlab/hli-syscheck-service.git
-```
-
-사람이 안 돌려도 되게 하려면 GitLab 의 **Pull mirroring** 을 쓴다
-(Settings → Repository → Mirroring repositories, `Pull` 방향, GitHub URL 등록).
-단 **사내 GitLab 서버가 github.com 으로 나갈 수 있어야** 한다. 못 나가면
-`sync_gitlab.bat` 을 작업 스케줄러에 걸어 두는 쪽이 확실하다.
-
-> 이 경로에서는 **GitLab 쪽을 직접 고치지 않는다.** 양쪽에서 고치면 다음
-> 동기화 때 push 가 거부된다. 거부는 정상이다 — 덮어쓰지 말고 사람이 본다.
-
----
-
-## 경로 C — 망분리 (인터넷 PC ↔ 폐쇄망 PC)
-
-wheel 반입하듯이 저장소도 파일 하나로 반입한다. **ZIP 으로 복사하면 안 된다.**
-commit 이력이 사라져서 사내에서 이어서 작업할 수가 없다. `git bundle` 을 쓴다.
-
-```text
-[인터넷 PC]  scripts\export_git_bundle.bat master
-             → data\export\portal-master-<sha>.bundle
-
-             ── USB 등으로 반입 ──
-
-[폐쇄망 PC]  (사내 GitLab 을 clone 한 폴더에서)
-             scripts\import_git_bundle.bat D:\반입\portal-master-<sha>.bundle master
-```
-
-두 스크립트 다 반입 전후로 `git bundle verify` 를 돌린다. 깨진 파일을 들고
-들어갔다가 다시 나오는 일이 없게 한다.
-
-폐쇄망 GitLab 을 **처음** 채울 때는 clone 할 것이 없으므로 이렇게 한다.
-
-```bash
-git clone portal-master-<sha>.bundle hli-syscheck-service
-cd hli-syscheck-service
-git remote set-url origin https://ito-ax-gitlab.apps.dev.honecloud.co.kr/26-project-hli-syscheck-gitlab/hli-syscheck-service.git
-git push -u origin master --tags
-```
-
-반대 방향(사내에서 고친 것을 GitHub 로 내보내기)도 같은 방식이다. 폐쇄망 PC 에서
-`git bundle create` 로 묶어 반출하면 된다. 다만 **양쪽에서 동시에 고치면 반드시
-충돌**하므로, 어느 쪽이 원본인지 팀에서 하나로 정해 두는 편이 낫다.
-
----
-
-## 어느 경로든 공통
-
-### 절대 GitLab 에 올라가면 안 되는 것
-
-`.gitignore` 가 막고 있지만, 저장소를 옮길 때 손으로 복사하다 딸려 들어가기 쉽다.
-사내 GitLab 은 사람이 더 많이 본다.
-
-```text
-.env                            Oracle 계정
-config/app_config.local.yaml    실제 접속값
-config/vcenters.local.yaml      vCenter 주소·계정
-config/oracle_query.local.sql
-scripts/env_local.bat
-data/                           수집 원본과 DB
-```
-
-옮기고 나서 한 번 확인한다.
-
-```bash
-git log --all --name-only --pretty=format: | sort -u | findstr /i "\.env local\.yaml local\.sql"
-```
-
-한 줄이라도 나오면 이미 이력에 박혀 있는 것이다. 그 상태로 사내에 올리기 전에
-계정을 먼저 바꾼다.
-
-### CI 는 양쪽을 같이 고친다
-
-`.github/workflows/ci.yml` 과 `.gitlab-ci.yml` 은 같은 것을 검사한다.
-한쪽에 검사를 추가하면 다른 쪽도 같이 넣는다. 안 그러면 "GitHub 에서는 통과했는데
-GitLab 에서 깨진다" 가 생긴다. 경로 A 로 완전히 넘어가서 GitHub 을 안 쓰게 되면
-그때 `.github/` 를 지운다. 지우기 전에는 둘 다 유지한다.
-
-### 사내망 PC 에서 Claude Code 쓰기
-
-경로 A 로 가면서 Claude 로 계속 개발하려면, 그 PC 에서 `api.anthropic.com` 이
-열려야 한다(프록시 허용 목록에 추가). 이건 방화벽 담당자에게 요청할 사항이고,
-안 열리면 코드 작성은 인터넷 PC 에서 하고 경로 C 로 반입하는 수밖에 없다.
+| 확인할 것 | 왜 |
+|---|---|
+| 어떤 API 규격인가 (Anthropic Messages API 호환인지) | 호환이면 위처럼 `anthropic` SDK 에 `base_url` 만 돌리면 된다. 다른 규격이면 클라이언트를 따로 써야 한다 |
+| 쓸 수 있는 모델 목록 | 게이트웨이가 열어 준 모델만 쓸 수 있다 |
+| **임베딩을 주는가** | RAG 의 절반은 임베딩이다. 게이트웨이가 안 주면 벡터를 어디서 만들지 따로 정해야 한다 |
+| 요청 크기·rate limit | 점검 로그를 통째로 넣으면 걸린다 |
+| 로그 보관 정책 | 점검 데이터가 나가는 것이라 사내 승인이 필요할 수 있다 |
 
 ---
 
 ## 처음 한 번 체크리스트
 
-- [ ] 사내 GitLab `26-project-hli-syscheck-gitlab/hli-syscheck-service` 프로젝트 확인 (private)
-- [ ] 위 ①②③ 확인해서 경로 A / B / C 중 하나 결정
-- [ ] 저장소 올리기 (`git push --all` 또는 bundle 반입)
-- [ ] 비밀값이 이력에 없는지 확인
-- [ ] Runner 등록하고 `.gitlab-ci.yml` 파이프라인 한 번 통과시키기
-- [ ] Settings → Repository → Protected branches 에서 `master` 보호
-- [ ] 팀에 `CONTRIBUTING.md` 와 이 문서 링크 공지
+- [ ] 위 GitLab 주소가 사내망 전용인지 인터넷에서도 열리는지 확인 → 경로 A / B 결정
+- [ ] 사내망 PC 에서 Claude 를 쓸 거면 `api.anthropic.com` 방화벽 허용 요청
+- [ ] 프로젝트 Access Token 또는 SSH 키 등록
+- [ ] 빈 프로젝트에 뼈대 push, `main` Protected branch 설정
+- [ ] `.gitlab-ci.yml` 넣고 파이프라인 한 번 통과시키기 (Runner 유무 먼저 확인)
+- [ ] LLM 게이트웨이 규격·모델·임베딩 제공 여부 확인
+- [ ] `LLM_API_KEY` 를 CI/CD Variables 에 Masked + Protected 로 등록
