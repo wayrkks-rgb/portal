@@ -170,6 +170,8 @@ security:
   display_vcenter_server_in_logs: false
   allow_password_in_command: false
 scheduler:
+  # 끄면 일일 배치가 스스로 빠진다. Windows 작업은 그대로 둔다.
+  enabled: true
   daily_time: 07:00
   task_name: AssetDailyCollection
 retention:

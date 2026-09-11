@@ -637,11 +637,36 @@ function buildVCenterPayload(){
   return {vcenter:{activate_powercli:true,vcenters:cleanVcenters}};
 }
 
+// Windows 작업이 실제로 등록돼 있는지 보여준다. 설정만 저장하고 등록을 안 했으면
+// 시각을 아무리 바꿔도 배치가 돌지 않는다.
+async function loadScheduleStatus(){
+  const el=document.getElementById('int-schedule-task');
+  if(!el)return;
+  const res=await integrationFetch('/api/asset-sync/admin/schedule');
+  if(!res._ok){el.innerHTML=`<span class="text-error">작업 상태를 확인할 수 없습니다: ${escapeHtml(res.error||'')}</span>`;return;}
+  const task=res.task||{};
+  if(!task.supported){el.textContent=task.reason||'이 서버에서는 작업 스케줄러를 확인할 수 없습니다.';return;}
+  if(!task.registered){
+    el.innerHTML='<span class="text-error">⚠ Windows 작업이 등록되어 있지 않습니다.</span>'
+      +' <span class="mono">scripts\\register_daily_task.bat</span> 을 관리자 권한으로 한 번 실행하세요.';
+    return;
+  }
+  const bits=[`작업 <span class="mono">${escapeHtml(task.task_name||'')}</span> 등록됨`];
+  if(task.next_run)bits.push(`다음 실행 ${escapeHtml(task.next_run)}`);
+  if(task.last_run)bits.push(`마지막 실행 ${escapeHtml(task.last_run)}`);
+  if(task.last_result)bits.push(`마지막 결과 ${escapeHtml(task.last_result)}`);
+  el.innerHTML='✓ '+bits.join(' · ');
+}
+
 function buildRuntimePayload(){
   const mask=document.getElementById('int-mask-logs').value==='true';
   return {
     security:{mask_ip_in_logs:mask,mask_hostname_in_logs:mask,mask_user_id_in_logs:mask,allow_sensitive_export:false,display_vcenter_server_in_logs:false},
-    scheduler:{daily_time:document.getElementById('int-schedule-time').value,task_name:document.getElementById('int-schedule-name').value.trim()}
+    scheduler:{
+      enabled:document.getElementById('int-schedule-enabled').value==='true',
+      daily_time:document.getElementById('int-schedule-time').value,
+      task_name:document.getElementById('int-schedule-name').value.trim()
+    }
   };
 }
 
@@ -697,8 +722,10 @@ async function loadIntegrationSettings(showMessage=false){
     default_auth_mode:(vc.default_auth_mode||'CREDENTIAL').toUpperCase(),
     default_bypass_ssl_check:Boolean(vc.default_bypass_ssl_check)
   };
+  document.getElementById('int-schedule-enabled').value=String(res.scheduler.enabled!==false);
   document.getElementById('int-schedule-time').value=res.scheduler.daily_time||'07:00';
   document.getElementById('int-schedule-name').value=res.scheduler.task_name||'AssetDailyCollection';
+  loadScheduleStatus();
   document.getElementById('int-mask-logs').value=String(res.security.mask_ip_in_logs&&res.security.mask_hostname_in_logs&&res.security.mask_user_id_in_logs);
   integrationVcenters=(vc.vcenters||[]).map(v=>({...v,test_status:'미실행',test_message:'저장된 설정을 불러왔습니다.'}));
   renderVCenterCards();
@@ -818,8 +845,21 @@ async function saveRuntimeSettings(){
     integrationToast(`실행 설정 저장 실패: ${res.error||'알 수 없는 오류'}`,'error');
     return false;
   }
-  setActionResult('runtime-action-result',{state:'success',title:'실행 설정 저장 완료',summary:res.message||'실행 설정을 저장했습니다.',meta:[`HTTP ${res._httpStatus}`,`매일 ${res.scheduler?.daily_time||'-'}`]});
+  // 설정 저장과 Windows 작업 갱신은 별개다. 갱신이 실패했으면 그대로 알린다.
+  const task=res.scheduler?.task||{};
+  const enabled=res.scheduler?.enabled!==false;
+  const details=[enabled?'일일 배치 사용 중입니다.':'일일 배치를 끘 상태입니다. 이 시각에 수집이 돌지 않습니다.'];
+  if(task.error)details.push(`Windows 작업 갱신 실패: ${task.error} → scripts\\register_daily_task.bat 을 관리자 권한으로 실행하세요.`);
+  else if(task.applied)details.push(task.action==='CREATED'?'Windows 작업을 새로 등록했습니다.':'Windows 작업 시각을 갱신했습니다.');
+  setActionResult('runtime-action-result',{
+    state:task.error?'error':'success',
+    title:'실행 설정 저장 완료',
+    summary:res.message||'실행 설정을 저장했습니다.',
+    meta:[`HTTP ${res._httpStatus}`,`매일 ${res.scheduler?.daily_time||'-'}`,enabled?'사용':'사용 안 함'],
+    details
+  });
   integrationToast('실행시간과 로그 설정을 저장했습니다.','success');
+  loadScheduleStatus();
   return true;
 }
 

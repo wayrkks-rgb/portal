@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 import yaml
 
+from . import scheduler as schedule_module
 from .config import load_config
 from .utils.validation import validate_oracle_identifier
 
@@ -239,6 +240,7 @@ class LocalSettingsStore:
                 "display_vcenter_server_in_logs": bool(cfg.security.get("display_vcenter_server_in_logs", False)),
             },
             "scheduler": {
+                "enabled": bool(cfg.scheduler.get("enabled", True)),
                 "daily_time": str(cfg.scheduler.get("daily_time", "07:00")),
                 "task_name": str(cfg.scheduler.get("task_name", "AssetDailyCollection")),
             },
@@ -495,12 +497,16 @@ class LocalSettingsStore:
         """Save scheduler/security settings independently."""
         scheduler = dict(payload.get("scheduler") or {})
         security = dict(payload.get("security") or {})
-        self._validate_time(str(scheduler.get("daily_time", "07:00")))
+        try:
+            wanted = schedule_module.settings({
+                "enabled": scheduler.get("enabled", True),
+                "daily_time": scheduler.get("daily_time", "07:00"),
+                "task_name": scheduler.get("task_name", "AssetDailyCollection"),
+            })
+        except schedule_module.ScheduleError as exc:
+            raise SettingsValidationError(str(exc)) from exc
         local_yaml = _read_yaml_dict(self.app_local_path)
-        local_yaml["scheduler"] = {
-            "daily_time": str(scheduler.get("daily_time", "07:00")),
-            "task_name": str(scheduler.get("task_name", "AssetDailyCollection")).strip() or "AssetDailyCollection",
-        }
+        local_yaml["scheduler"] = dict(wanted)
         local_yaml["security"] = {
             "mask_ip_in_logs": bool(security.get("mask_ip_in_logs", True)),
             "mask_hostname_in_logs": bool(security.get("mask_hostname_in_logs", True)),
@@ -509,7 +515,14 @@ class LocalSettingsStore:
             "display_vcenter_server_in_logs": bool(security.get("display_vcenter_server_in_logs", False)),
         }
         _atomic_write(self.app_local_path, yaml.safe_dump(local_yaml, allow_unicode=True, sort_keys=False))
-        return self.public_settings()
+
+        # 설정 저장과 Windows 작업 갱신은 별개다. 권한이 없는 환경에서도 저장 자체는
+        # 성공해야 하므로, 갱신 실패는 예외가 아니라 응답으로 돌려주어 화면이 안내한다.
+        result = self.public_settings()
+        result["scheduler"]["task"] = schedule_module.apply_time(
+            self.root, wanted["task_name"], wanted["daily_time"]
+        )
+        return result
 
     def clear_asset_source(self) -> dict[str, Any]:
         """자산 원본 지정과 생성된 조회 SQL 을 함께 지운다.

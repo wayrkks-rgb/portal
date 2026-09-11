@@ -40,10 +40,15 @@ def test_non_oracle_mode_is_skipped(tmp_path):
 
 
 def test_a_failed_step_stops_the_rest(tmp_path):
-    """조회 SQL 파일이 없으면 접속을 시도할 이유가 없다."""
+    """앞 단계가 실패하면 뒤는 볼 필요가 없다.
+
+    어느 단계에서 멈추는지는 환경에 따라 다르다(드라이버가 없으면 드라이버에서,
+    있으면 조회 SQL 파일이 없어 거기서). 멈춘다는 것 자체를 확인한다.
+    """
     result = run_diagnostics(make_config(tmp_path))
     assert result["status"] == "FAILED"
-    assert [step["name"] for step in result["steps"]] == ["조회 SQL"]
+    assert len(result["steps"]) == 1, f"실패한 뒤에도 계속 진행했다: {result['steps']}"
+    assert result["steps"][0]["status"] == "FAILED"
     assert PASSWORD not in str(result)
 
 

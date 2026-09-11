@@ -268,6 +268,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             "allow_password_in_command": False,
         },
         "scheduler": {
+            "enabled": True,
             "daily_time": "07:00",
             "task_name": "AssetDailyCollection",
         },

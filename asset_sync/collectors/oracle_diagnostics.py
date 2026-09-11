@@ -71,6 +71,18 @@ class Steps:
     def skip(self, name: str, reason: str) -> None:
         self.items.append({"name": name, "status": "SKIPPED", "detail": reason})
 
+    def fail(self, name: str, error: str) -> None:
+        """실행해 보지 않고도 이미 아는 실패."""
+        self.items.append({"name": name, "status": "FAILED", "seconds": 0.0, "error": error})
+
+
+def _driver_version() -> str | None:
+    try:
+        import oracledb
+    except ImportError:
+        return None
+    return str(oracledb.__version__)
+
 
 def run_diagnostics(config: Any, *, max_rows: int | None = None) -> dict[str, Any]:
     """설정부터 실제 수집까지 순서대로 확인하고 결과를 돌려준다.
@@ -87,20 +99,17 @@ def run_diagnostics(config: Any, *, max_rows: int | None = None) -> dict[str, An
         "steps": steps.items,
     }
 
-    try:
-        import oracledb
-        result["oracledb"] = oracledb.__version__
-    except ImportError:
-        result["oracledb"] = None
-        steps.record("드라이버", lambda: (_ for _ in ()).throw(
-            RuntimeError("oracledb 가 설치되지 않았습니다. requirements-oracle.txt 를 설치하세요.")
-        ))
-        result["status"] = "FAILED"
-        return result
-
+    # 수집모드를 먼저 본다. ORACLE 이 아니면 드라이버가 없는 것도 문제가 아니다.
     if result["collection_mode"] != "ORACLE":
+        result["oracledb"] = _driver_version()
         steps.skip("수집모드", f"ITSM 수집모드가 {result['collection_mode']} 라 Oracle 직접조회를 쓰지 않습니다.")
         result["status"] = "SKIPPED"
+        return result
+
+    result["oracledb"] = _driver_version()
+    if result["oracledb"] is None:
+        steps.fail("드라이버", "oracledb 가 설치되지 않았습니다. requirements-oracle.txt 를 설치하세요.")
+        result["status"] = "FAILED"
         return result
 
     collector = OracleITSMCollector(config)

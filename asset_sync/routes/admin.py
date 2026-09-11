@@ -22,6 +22,7 @@ from ..collectors import (
     oracle_connection,
 )
 from ..collectors.oracle_diagnostics import run_diagnostics
+from .. import scheduler as schedule_module
 from ..config import AppConfig, load_config
 from ..db.manager import DatabaseManager
 from ..repositories import AssetRepository
@@ -224,6 +225,25 @@ def create_admin_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprin
             "error": str(exc),
             "details": ["Oracle 데이터 딕셔너리 조회 단계에서 실패했습니다."],
         }), status_code
+
+    @bp.route("/api/asset-sync/admin/schedule", methods=["GET"])
+    @admin_required
+    def schedule_status() -> Any:
+        """설정값과 Windows 작업의 실제 등록 상태를 함께 돌려준다.
+
+        설정에 시각만 적어두고 작업을 등록하지 않으면 배치가 돌지 않는다. 그 차이를
+        화면에서 바로 알 수 있어야 한다.
+        """
+        config = load_config()
+        try:
+            wanted = schedule_module.settings(config.scheduler)
+        except schedule_module.ScheduleError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify({
+            **wanted,
+            "batch_file": str(schedule_module.batch_path(cfg.root_dir)),
+            "task": schedule_module.describe(wanted["task_name"]),
+        })
 
     @bp.route("/api/asset-sync/admin/diagnose/oracle", methods=["GET"])
     @admin_required
