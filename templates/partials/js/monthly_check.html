@@ -1,0 +1,150 @@
+{# 월간 점검 스크립트 #}
+<script>
+let monthlyTab = 'server';
+
+function switchMonthlyTab(name, tab) {
+  ['key_resource','integrated','server','eosl'].forEach(n =>
+    document.getElementById(`monthly-panel-${n}`).classList.remove('active'));
+  tab.parentElement.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  tab.classList.add('active');
+  document.getElementById(`monthly-panel-${name}`).classList.add('active');
+  monthlyTab = name;
+}
+
+// 증감은 양식처럼 숫자 뒤에 (+8) · (-2) 로 붙인다. 0 은 붙이지 않는다.
+function deltaText(value) {
+  const number = Number(value || 0);
+  if (!number) return '';
+  const sign = number > 0 ? '+' : '';
+  const cls = number > 0 ? 'text-success' : 'text-error';
+  return ` <span class="${cls}" style="font-size:11px">(${sign}${number})</span>`;
+}
+
+function renderStatusTable(elementId, table, delta, unitLabel) {
+  const element = document.getElementById(elementId);
+  if (!element) return;
+  const columns = table.columns;
+  // 양식의 머리글: UNIX(HP·IBM) / X86(Linux·Windows) / 기타 / 소계
+  const groups = [['UNIX', ['HP','IBM']], ['X86', ['Linux','Windows']]];
+  const flat = [];
+  groups.forEach(([label, members]) => members.forEach(m => flat.push([label, m])));
+  columns.filter(c => !flat.some(([, m]) => m === c)).forEach(c => flat.push(['', c]));
+
+  const top = flat.map(([label], index, all) => {
+    if (!label) return `<th rowspan="2">${syncEscape(flat[index][1] === '소계' ? unitLabel : flat[index][1])}</th>`;
+    return all.findIndex(([l]) => l === label) === index
+      ? `<th colspan="${all.filter(([l]) => l === label).length}">${syncEscape(label)}</th>` : '';
+  }).join('');
+  const second = flat.filter(([label]) => label).map(([, m]) => `<th>${syncEscape(m)}</th>`).join('');
+
+  const rows = ['IDC','DR','계'].map(name => {
+    const values = table.rows[name] || {};
+    const cells = flat.map(([, column]) => {
+      const text = Number(values[column] || 0).toLocaleString();
+      const change = delta && delta[name] ? deltaText(delta[name][column]) : '';
+      const strong = column === '소계' || name === '계';
+      return `<td>${strong ? '<strong>' + text + '</strong>' : text}${change}</td>`;
+    }).join('');
+    return `<tr><td><strong>${name}</strong></td>${cells}</tr>`;
+  }).join('');
+
+  element.innerHTML = `<thead><tr><th rowspan="2">구분</th>${top}</tr><tr>${second}</tr></thead><tbody>${rows}</tbody>`;
+}
+
+// 양식의 문구 그대로: IDC : 논리서버 12대 (Linux 7대, 기타 2대) , 물리서버 16대 (...)
+function movementText(breakdown) {
+  const lines = [];
+  ['IDC','DR'].forEach(location => {
+    const area = breakdown.locations[location];
+    if (!area || !area.total) return;
+    const parts = ['논리서버','물리서버'].map(kind => {
+      const item = area.kinds[kind];
+      if (!item || !item.total) return '';
+      const detail = Object.entries(item.os).filter(([, n]) => n)
+        .map(([name, n]) => `${syncEscape(name)} ${n}대`).join(', ');
+      return `${kind} ${item.total}대${detail ? ` (${detail})` : ''}`;
+    }).filter(Boolean);
+    lines.push(`<div style="margin-left:18px">${location} : ${parts.join(' , ')}</div>`);
+  });
+  return lines.join('');
+}
+
+function renderMovements(movements) {
+  const element = document.getElementById('monthly-movements');
+  if (!element) return;
+  if (!movements) {
+    element.innerHTML = '<div class="text-muted">비교할 전월 스냅샷이 없습니다.</div>';
+    return;
+  }
+  const blocks = [['created','자산 신규 생성'], ['removed','자산 삭제']].map(([key, label]) => {
+    const data = movements[key];
+    const idc = data.locations.IDC.total, dr = data.locations.DR.total;
+    return `<div style="margin-bottom:12px">
+      <div><strong>- ${label} ${data.total}대</strong> ( IDC ${idc}대 / DR ${dr}대 )</div>
+      ${movementText(data)}</div>`;
+  }).join('');
+  element.innerHTML = blocks;
+}
+
+function renderEosl(eosl) {
+  const element = document.getElementById('monthly-eosl');
+  if (!element) return;
+  const columns = eosl.columns;
+  const head = `<thead><tr><th rowspan="2">구분</th><th rowspan="2">전체 수량</th>
+    <th colspan="${columns.length - 1}">EOSL 일자</th><th rowspan="2">비고</th></tr>
+    <tr>${columns.slice(0, -1).map(c => `<th>${syncEscape(c)}</th>`).join('')}</tr></thead>`;
+  const rows = ['physical','all'].map(key => {
+    const row = eosl[key];
+    const cells = columns.slice(0, -1).map(c => `<td>${Number(row.counts[c] || 0).toLocaleString()}</td>`).join('');
+    const unused = Number(row.counts['미사용'] || 0);
+    return `<tr><td><strong>${syncEscape(row.label)}</strong></td>
+      <td><strong>${Number(row.total).toLocaleString()}</strong></td>${cells}
+      <td>${unused ? `미사용 ${unused}대` : ''}</td></tr>`;
+  }).join('');
+  element.innerHTML = head + `<tbody>${rows}</tbody>`;
+  document.getElementById('monthly-eosl-basis').textContent =
+    `${eosl.criteria.eosl_field} 기준 · ${eosl.criteria.base_year}년 기준 · ${eosl.criteria.no_plan_year} = 계획 없음`;
+}
+
+async function loadMonthlyCheck() {
+  const alertEl = document.getElementById('monthly-alert');
+  if (!alertEl) return;
+  const month = document.getElementById('monthly-month').value;
+  alertEl.innerHTML = '<div class="alert alert-info"><span class="loading"></span> 서버 현황 집계 중...</div>';
+  const res = await fetch('/api/asset-sync/server-status' + (month ? `?month=${month}` : ''))
+    .then(r => r.json());
+  if (res.error) {
+    alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(res.error)}</div>`;
+    return;
+  }
+  if (res.status === 'NO_SNAPSHOT') {
+    alertEl.innerHTML = `<div class="alert alert-warning">⚠️ ${syncEscape(res.message)}</div>`;
+    return;
+  }
+  alertEl.innerHTML = '';
+
+  renderStatusTable('monthly-server-all', res.all.table, res.all.delta, '물리 + 논리 소계');
+  renderStatusTable('monthly-server-physical', res.physical.table, res.physical.delta, '물리 소계');
+  renderMovements(res.movements);
+  renderEosl(res.eosl);
+
+  // 기준을 드러낸다. 대수가 ITSM 과 다를 때 어느 쪽이 틀렸는지 따질 수 있어야 한다.
+  const criteria = res.criteria;
+  document.getElementById('monthly-server-basis').innerHTML =
+    `${syncEscape(res.as_of)} 기준` +
+    (res.previous_as_of ? ` · 전월 ${syncEscape(res.previous_as_of)} 대비 증감` : ' · 비교할 전월 없음') +
+    ` · 집계 ${Number(res.counts.selected).toLocaleString()}건 / 제외 ${Number(res.counts.excluded).toLocaleString()}건`;
+
+  document.getElementById('monthly-excluded-reason').textContent =
+    `제외 기준: ${res.excluded.reason}`;
+  const body = document.getElementById('monthly-excluded-body');
+  const items = res.excluded.items || [];
+  body.innerHTML = items.length ? items.map(item => `<tr>
+    <td class="mono">${syncEscape(item.cm_id || '-')}</td>
+    <td>${syncEscape(item.hostname || '-')}</td>
+    <td class="mono">${syncEscape(item.primary_ip || '-')}</td>
+    <td>${syncEscape(item.service_name || '-')}</td>
+    <td>${syncEscape(item.location || '-')}</td></tr>`).join('')
+    : '<tr><td colspan="5" style="text-align:center" class="text-muted">제외된 자산이 없습니다.</td></tr>';
+}
+</script>

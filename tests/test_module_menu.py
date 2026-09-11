@@ -136,7 +136,14 @@ def _sidebar(modules, role="user"):
 
 def test_portal_own_screens_are_in_the_sidebar() -> None:
     sections = _sidebar([], "admin")
-    assert [entry["page"] for entry in sections["운영"]] == ["dashboard", "report"]
+    assert [entry["page"] for entry in sections["운영"]] == ["dashboard", "daily_check", "report"]
+    # 시스템 파트는 점검 주기별 소메뉴를 갖는다.
+    system_part = next(entry for entry in sections["운영"] if entry["page"] == "daily_check")
+    assert [child["page"] for child in system_part["children"]] == [
+        "daily_check",
+        "weekly_check",
+        "monthly_check",
+    ]
     # 통합 웹 자신의 화면도 소메뉴를 갖는다.
     assert [child["page"] for child in sections["설정"][0]["children"]] == [
         "integration_settings",
@@ -156,7 +163,9 @@ def test_modules_join_the_section_named_in_their_config() -> None:
         {"id": "backup", "name": "백업", "page": "backup", "menu_section": "연계 모듈", "children": []},
     ]
     sections = _sidebar(modules)
-    assert [entry["page"] for entry in sections["운영"]] == ["dashboard", "report", "capacity"]
+    assert [entry["page"] for entry in sections["운영"]] == [
+        "dashboard", "daily_check", "report", "capacity",
+    ]
     assert [entry["page"] for entry in sections["연계 모듈"]] == ["backup"]
 
 

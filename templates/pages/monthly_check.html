@@ -1,0 +1,87 @@
+{# 월간 점검. 탭으로 1Depth 를 구성한다. 사이드바 3단 대신 화면 안 탭이 읽기 쉽다. #}
+<div class="page {% if page=='monthly_check' %}active{% endif %}" id="page-monthly_check">
+  <div class="topbar">
+    <div>
+      <div class="topbar-title">월간 점검</div>
+      <div class="topbar-sub">전월과 비교한 서버·자원 현황을 장표 양식으로 정리합니다</div>
+    </div>
+    <div class="flex gap-2 items-center">
+      <input class="form-input" type="month" id="monthly-month" style="width:150px" onchange="loadMonthlyCheck()">
+      <button class="btn btn-secondary btn-sm" onclick="loadMonthlyCheck()">새로고침</button>
+    </div>
+  </div>
+  <div class="content">
+    <div id="monthly-alert"></div>
+
+    <div class="tabs">
+      <div class="tab" onclick="switchMonthlyTab('key_resource', this)">주요서버 자원 현황</div>
+      <div class="tab" onclick="switchMonthlyTab('integrated', this)">통합서버 자원사용현황</div>
+      <div class="tab active" onclick="switchMonthlyTab('server', this)">서버 현황</div>
+      <div class="tab" onclick="switchMonthlyTab('eosl', this)">EOSL 현황</div>
+    </div>
+
+    <div class="tab-panel" id="monthly-panel-key_resource">
+      <div class="card">
+        <div class="card-title"><span class="icon">📈</span> 주요서버 자원 현황</div>
+        <div class="alert alert-info" style="margin-bottom:0">
+          타 솔루션(polestar) API 연동 예정입니다. 연동 후 분석 내용을 이 화면에 표시합니다.
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="monthly-panel-integrated">
+      <div class="card">
+        <div class="card-title"><span class="icon">🖥️</span> 통합서버 자원사용현황</div>
+        <div class="alert alert-info" style="margin-bottom:0">
+          보고서의 통합기별 자원사용현황을 이 화면으로 옮기는 작업이 진행 중입니다.
+          당장은 <strong>보고서</strong> 메뉴에서 같은 내용을 볼 수 있습니다.
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel active" id="monthly-panel-server">
+      <div class="card">
+        <div class="flex justify-between items-center mb-4">
+          <div class="card-title" style="margin-bottom:0"><span class="icon">🗄️</span> 서버현황 (전체 서버)</div>
+          <div class="text-xs text-muted" id="monthly-server-basis"></div>
+        </div>
+        <div class="table-wrap"><table id="monthly-server-all"></table></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title"><span class="icon">📋</span> 자산 현황 변동 내역</div>
+        <div id="monthly-movements"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title"><span class="icon">🔧</span> 서버현황 (물리서버)</div>
+        <div class="table-wrap"><table id="monthly-server-physical"></table></div>
+      </div>
+
+      <div class="card">
+        <div class="flex justify-between items-center mb-4">
+          <div class="card-title" style="margin-bottom:0"><span class="icon">🚫</span> 서버 현황 제외 목록</div>
+          <div class="text-xs text-muted" id="monthly-excluded-reason"></div>
+        </div>
+        <div class="table-wrap" style="max-height:320px;overflow:auto">
+          <table><thead><tr><th>자산번호</th><th>호스트명</th><th>IP</th><th>업무명</th><th>위치</th></tr></thead>
+          <tbody id="monthly-excluded-body"></tbody></table>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="monthly-panel-eosl">
+      <div class="card">
+        <div class="flex justify-between items-center mb-4">
+          <div class="card-title" style="margin-bottom:0"><span class="icon">📅</span> EOSL 현황</div>
+          <div class="text-xs text-muted" id="monthly-eosl-basis"></div>
+        </div>
+        <div class="table-wrap"><table id="monthly-eosl"></table></div>
+        <div class="alert alert-info" style="margin-top:12px;margin-bottom:0">
+          대상은 서버 현황과 같습니다. <strong>서버</strong> 행은 물리서버, <strong>OS</strong> 행은 전체서버이며
+          각 행의 합계가 서버 현황의 소계와 일치합니다. 연도만 보고, 9999 는 계획 없음으로 셉니다.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

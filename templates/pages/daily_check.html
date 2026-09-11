@@ -1,0 +1,64 @@
+{# 일간 점검. 매일 배치가 찾아낸 생성·삭제·변경을 하루 단위로 본다. #}
+<div class="page {% if page=='daily_check' %}active{% endif %}" id="page-daily_check">
+  <div class="topbar">
+    <div>
+      <div class="topbar-title">일간 점검</div>
+      <div class="topbar-sub">매일 배치가 찾아낸 자산 생성·삭제·변경을 확인합니다</div>
+    </div>
+    <button class="btn btn-secondary btn-sm" onclick="loadDailyCheck()">새로고침</button>
+  </div>
+  <div class="content">
+    <div id="daily-check-alert"></div>
+
+    <div class="grid-4 mb-4">
+      <div class="stat-card"><div class="stat-value" id="daily-total">-</div>
+        <div class="stat-label">ITSM 운영·대기 전체</div><div class="stat-delta" id="daily-as-of"></div></div>
+      <div class="stat-card"><div class="stat-value" id="daily-physical">-</div><div class="stat-label">물리서버</div></div>
+      <div class="stat-card"><div class="stat-value" id="daily-logical">-</div><div class="stat-label">논리서버</div></div>
+      <div class="stat-card"><div class="stat-value" id="daily-idc-dr">-</div><div class="stat-label">IDC / DR</div></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="flex justify-between items-center mb-4">
+          <div class="card-title" style="margin-bottom:0"><span class="icon">🗄️</span> ITSM 자산 변동</div>
+          <div id="daily-itsm-badges" class="flex gap-2"></div>
+        </div>
+        <div id="daily-itsm-basis" class="text-xs text-muted mb-4"></div>
+        <div class="table-wrap" style="max-height:420px;overflow:auto">
+          <table><thead><tr><th>분류</th><th>자산</th><th>항목</th><th>이전</th><th>현재</th></tr></thead>
+          <tbody id="daily-itsm-body"></tbody></table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="flex justify-between items-center mb-4">
+          <div class="card-title" style="margin-bottom:0"><span class="icon">🛰️</span> vCenter VM 구성·할당 자원 변경</div>
+          <div id="daily-vcenter-badges" class="flex gap-2"></div>
+        </div>
+        <div id="daily-vcenter-basis" class="text-xs text-muted mb-4"></div>
+        <div class="table-wrap" style="max-height:420px;overflow:auto">
+          <table><thead><tr><th>분류</th><th>VM</th><th>항목</th><th>이전</th><th>현재</th></tr></thead>
+          <tbody id="daily-vcenter-body"></tbody></table>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="icon">🧱</span> 물리 · 논리 구성</div>
+      <div class="grid-2">
+        <div class="mini-chart">
+          <div class="donut-chart" id="daily-category-donut">
+            <div class="donut-center"><span id="daily-category-total">-</span><small>전체</small></div>
+          </div>
+          <div class="chart-legend" id="daily-category-legend"></div>
+        </div>
+        <div>
+          <div class="text-sm" style="font-weight:700;margin-bottom:6px">OS 구성</div>
+          <div id="daily-os-bars"></div>
+        </div>
+      </div>
+      <div id="daily-counting-basis" style="margin-top:8px"></div>
+    </div>
+  </div>
+</div>

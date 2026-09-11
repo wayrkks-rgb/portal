@@ -26,6 +26,7 @@ class AppConfig:
     retention: dict[str, Any] = field(default_factory=dict)
     security: dict[str, Any] = field(default_factory=dict)
     scheduler: dict[str, Any] = field(default_factory=dict)
+    server_status: dict[str, Any] = field(default_factory=dict)
 
     def resolve(self, value: str | Path) -> Path:
         path = Path(value)
@@ -272,6 +273,14 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             "daily_time": "07:00",
             "task_name": "AssetDailyCollection",
         },
+        # 월간 점검의 서버 현황·EOSL 집계 기준. 대수가 ITSM 총 건수와 다를 때
+        # 어느 쪽이 틀렸는지 따질 수 있어야 하므로 기준을 설정으로 드러낸다.
+        "server_status": {
+            "exclude_when_all_empty": ["CM_OS", "CM_OS_VERSION", "CM_EOL_DT"],
+            "eosl_field": "CM_EOL_DT",
+            "location_field": "CM_PLACE",
+            "dr_keywords": ["DR", "재해", "재해복구"],
+        },
     }
 
     base_yaml = _load_yaml(base_config_path)
@@ -359,4 +368,5 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         retention=merged["retention"],
         security=merged["security"],
         scheduler=merged["scheduler"],
+        server_status=merged["server_status"],
     )

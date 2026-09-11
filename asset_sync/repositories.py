@@ -253,6 +253,16 @@ class AssetRepository:
         rows = self.conn.execute("SELECT * FROM collection_run ORDER BY started_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
 
+    def snapshot_on_or_before(self, source: str, day: str) -> dict[str, Any] | None:
+        """그 날짜까지의 마지막 정상 스냅샷. 전월 말일을 넘기면 전월 기준이 된다."""
+        row = self.conn.execute(
+            "SELECT * FROM snapshot WHERE source=? AND snapshot_date<=?"
+            " AND status IN ('SUCCESS','PARTIAL_SUCCESS')"
+            " ORDER BY snapshot_date DESC, collected_at DESC LIMIT 1",
+            (source.upper(), day),
+        ).fetchone()
+        return dict(row) if row else None
+
     def display_names(self) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             "SELECT * FROM vcenter_display_name ORDER BY scope, vcenter_id, object_key"

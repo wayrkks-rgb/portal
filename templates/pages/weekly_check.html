@@ -1,0 +1,52 @@
+{# 주간 점검. 일간 점검에서 모은 것을 월~일 한 주로 묶어 통계로 본다. #}
+<div class="page {% if page=='weekly_check' %}active{% endif %}" id="page-weekly_check">
+  <div class="topbar">
+    <div>
+      <div class="topbar-title">주간 점검</div>
+      <div class="topbar-sub">월요일부터 일요일까지 한 주의 변경을 묶어 봅니다</div>
+    </div>
+    <div class="flex gap-2 items-center">
+      <button class="btn btn-secondary btn-sm" onclick="shiftWeek(-1)">◀ 지난주</button>
+      <span class="mono" id="weekly-range" style="min-width:190px;text-align:center"></span>
+      <button class="btn btn-secondary btn-sm" onclick="shiftWeek(1)">다음주 ▶</button>
+    </div>
+  </div>
+  <div class="content">
+    <div id="weekly-alert"></div>
+
+    <div class="grid-4 mb-4">
+      <div class="stat-card"><div class="stat-value text-success" id="weekly-created">-</div><div class="stat-label">신규 생성</div></div>
+      <div class="stat-card"><div class="stat-value text-error" id="weekly-removed">-</div><div class="stat-label">삭제</div></div>
+      <div class="stat-card"><div class="stat-value" id="weekly-changed">-</div><div class="stat-label">자원·정보 변경</div></div>
+      <div class="stat-card"><div class="stat-value" id="weekly-net">-</div><div class="stat-label">순증감</div></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-title"><span class="icon">📊</span> 요일별 변경 건수</div>
+        <div id="weekly-by-day"></div>
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="icon">🔤</span> 변경 유형별 건수</div>
+        <div id="weekly-by-type"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="flex justify-between items-center mb-4">
+        <div class="card-title" style="margin-bottom:0"><span class="icon">🔁</span> 여러 번 바뀐 자산</div>
+        <div class="text-xs text-muted">한 주에 두 번 이상 바뀐 자산입니다. 반복 변경은 확인할 이유가 있습니다.</div>
+      </div>
+      <div class="table-wrap" style="max-height:340px;overflow:auto">
+        <table><thead><tr><th>출처</th><th>자산</th><th>변경 횟수</th><th>변경 항목</th></tr></thead>
+        <tbody id="weekly-repeat-body"></tbody></table>
+      </div>
+    </div>
+
+    <div class="alert alert-info">
+      기준은 <strong>월요일 00:00 ~ 일요일 24:00</strong> 입니다. 세부 내역은
+      <strong>일간 점검</strong>에서 날짜별로 볼 수 있습니다. 여기서는 한 주의 추세와
+      반복 변경만 봅니다.
+    </div>
+  </div>
+</div>

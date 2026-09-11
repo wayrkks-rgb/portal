@@ -17,9 +17,29 @@ from ..repositories import AssetRepository
 from ..services import (
     AutomatedReportService, ChangeSyncService, DailyComparisonService, DashboardService, ExportService,
     IntegratedDashboardService, PeriodService, ReconciliationExceptionService,
-    ReconciliationService, VMResourceUsageExportService, present_all,
+    ReconciliationService, ServerStatusService, VMResourceUsageExportService, present_all,
 )
 from ..web_common import admin_required, login_required
+
+
+def _month_end(month: str | None) -> date:
+    """기준일을 정한다.
+
+    month 가 없으면 오늘이다. 이번 달은 아직 끝나지 않았으므로 '지금까지' 의 값을
+    보여주고, 지난 달을 지정하면 그 달 말일 기준이 된다.
+    """
+    if not month:
+        return date.today()
+    try:
+        year, month_number = (int(part) for part in str(month).split("-")[:2])
+        first = date(year, month_number, 1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("month 는 YYYY-MM 형식이어야 합니다.") from exc
+    today = date.today()
+    if (first.year, first.month) == (today.year, today.month):
+        return today
+    next_month = date(year + (month_number == 12), (month_number % 12) + 1, 1)
+    return next_month - timedelta(days=1)
 
 
 def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint:
@@ -65,6 +85,55 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
     def legacy_dashboard_summary() -> Any:
         with manager.connect() as conn:
             return jsonify(DashboardService(AssetRepository(conn)).summary())
+
+    # ── 점검 화면 ──────────────────────────────────────────────────────
+    # 점검 주기별로 화면을 나눈다. 일간에서 모은 것을 주간이 묶고, 월간이 장표로 낸다.
+    @bp.route("/daily-check")
+    @login_required
+    def daily_check_page() -> Any:
+        return render_template("main.html", user=session["user"], page="daily_check")
+
+    @bp.route("/weekly-check")
+    @login_required
+    def weekly_check_page() -> Any:
+        return render_template("main.html", user=session["user"], page="weekly_check")
+
+    @bp.route("/monthly-check")
+    @login_required
+    def monthly_check_page() -> Any:
+        return render_template("main.html", user=session["user"], page="monthly_check")
+
+    @bp.route("/api/asset-sync/server-status")
+    @login_required
+    def server_status() -> Any:
+        """월간 점검의 서버 현황·EOSL. 기준일까지의 마지막 스냅샷과 전월 말일을 비교한다."""
+        try:
+            base_day = _month_end(request.args.get("month"))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        with manager.connect() as conn:
+            repo = AssetRepository(conn)
+            current = repo.snapshot_on_or_before("ITSM", base_day.isoformat())
+            if not current:
+                return jsonify({
+                    "status": "NO_SNAPSHOT", "as_of": None,
+                    "message": "해당 기간까지의 ITSM 스냅샷이 없습니다. 수집을 먼저 실행하세요.",
+                })
+            # 전월 말일 기준. 그 날짜까지의 마지막 스냅샷이 전월 값이 된다.
+            previous_day = base_day.replace(day=1) - timedelta(days=1)
+            previous = repo.snapshot_on_or_before("ITSM", previous_day.isoformat())
+            service = ServerStatusService(cfg, repo)
+            result = service.status(int(current["id"]), int(previous["id"]) if previous else None)
+            result["eosl"] = service.eosl(int(current["id"]))
+            if previous:
+                result["movements"] = service.movements(int(current["id"]), int(previous["id"]))
+        result.update({
+            "status": "SUCCESS",
+            "as_of": current["snapshot_date"],
+            "previous_as_of": previous["snapshot_date"] if previous else None,
+            "period": {"base_day": base_day.isoformat()},
+        })
+        return jsonify(result)
 
     @bp.route("/api/collection-runs")
     @bp.route("/api/asset-sync/collection-runs")

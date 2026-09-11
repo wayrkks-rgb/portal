@@ -1,0 +1,205 @@
+{# 일간 · 주간 점검 스크립트 #}
+<script>
+// ── 일간 점검 ──
+// 대시보드가 이미 만들어 둔 집계(/api/asset-sync/dashboard)와 전일 대비 비교를 쓴다.
+// 새로 계산하지 않으므로 화면만 옮겨온 셈이다.
+async function loadDailyCheck() {
+  const alertEl = document.getElementById('daily-check-alert');
+  if (!alertEl) return;
+  alertEl.innerHTML = '<div class="alert alert-info"><span class="loading"></span> 일간 점검 자료를 불러오는 중...</div>';
+  try {
+    const [summary, itsm, vcenter] = await Promise.all([
+      fetch('/api/asset-sync/dashboard').then(r => r.json()),
+      fetch('/api/asset-sync/daily-comparison?source=ITSM&limit=500').then(r => r.json()),
+      fetch('/api/asset-sync/daily-comparison?source=RVTOOLS&limit=500').then(r => r.json()),
+    ]);
+    alertEl.innerHTML = '';
+    renderDailyComposition(summary);
+    renderDailyChanges('itsm', itsm);
+    renderDailyChanges('vcenter', vcenter);
+  } catch (error) {
+    alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(error.message)}</div>`;
+  }
+}
+
+function renderDailyComposition(summary) {
+  const status = summary.asset_status || {};
+  const category = status.category || {}, location = status.location || {};
+  const physical = Number(category['물리'] || 0), logical = Number(category['논리'] || 0);
+  document.getElementById('daily-total').textContent = dashboardNumber(status.total);
+  document.getElementById('daily-physical').textContent = dashboardNumber(physical);
+  document.getElementById('daily-logical').textContent = dashboardNumber(logical);
+  document.getElementById('daily-idc-dr').textContent =
+    `${dashboardNumber(location.IDC)} / ${dashboardNumber(location.DR)}`;
+  document.getElementById('daily-as-of').textContent =
+    summary.as_of ? new Date(summary.as_of).toLocaleString('ko-KR') : '스냅샷 없음';
+
+  document.getElementById('daily-category-total').textContent = dashboardNumber(status.total);
+  const total = Math.max(physical + logical, 1);
+  const percent = Math.round(physical / total * 100);
+  document.getElementById('daily-category-donut').style.background =
+    `conic-gradient(#284566 0 ${percent}%, #c2ccdb ${percent}% 100%)`;
+  document.getElementById('daily-category-legend').innerHTML =
+    `<div class="legend-row"><span>🟠 물리</span><strong>${dashboardNumber(physical)}</strong></div>` +
+    `<div class="legend-row"><span>⚪ 논리</span><strong>${dashboardNumber(logical)}</strong></div>` +
+    `<div class="legend-row"><span>IDC / DR</span><strong>${dashboardNumber(location.IDC)} / ${dashboardNumber(location.DR)}</strong></div>`;
+
+  const rows = status.os || [], max = Math.max(...rows.map(r => Number(r.count || 0)), 1);
+  document.getElementById('daily-os-bars').innerHTML = rows.length
+    ? rows.slice(0, 12).map(r => `<div class="bar-row"><span title="${syncEscape(r.name)}">${syncEscape(r.name)}</span>
+        <div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, Number(r.count || 0) / max * 100)}%"></div></div>
+        <strong>${dashboardNumber(r.count)}</strong></div>`).join('')
+    : '<div class="text-muted">정상 ITSM 스냅샷이 없습니다.</div>';
+
+  // 기준을 드러낸다. 대수가 ITSM 총 건수와 다를 때 확인할 수 있어야 한다.
+  if (typeof renderCountingBasis === 'function') {
+    const holder = document.getElementById('daily-counting-basis');
+    if (holder) {
+      holder.id = 'dash-counting-basis';
+      renderCountingBasis(status.counting_basis || null);
+      holder.id = 'daily-counting-basis';
+    }
+  }
+}
+
+function renderDailyChanges(key, result) {
+  const body = document.getElementById(`daily-${key}-body`);
+  const badges = document.getElementById(`daily-${key}-badges`);
+  const basis = document.getElementById(`daily-${key}-basis`);
+  if (!body) return;
+
+  if (result.error || result.status === 'NO_SNAPSHOT') {
+    basis.textContent = result.error || '정상 스냅샷이 없습니다.';
+    body.innerHTML = '<tr><td colspan="5" style="text-align:center" class="text-muted">비교 결과 없음</td></tr>';
+    badges.innerHTML = '';
+    return;
+  }
+  if (result.status === 'NO_BASELINE') {
+    basis.textContent = `최초 정상 수집입니다. 현재 ${Number(result.current?.record_count || 0).toLocaleString()}건이며 다음 수집부터 비교됩니다.`;
+    body.innerHTML = '<tr><td colspan="5" style="text-align:center" class="text-muted">비교 기준 없음</td></tr>';
+    badges.innerHTML = '';
+    return;
+  }
+
+  const counts = result.counts || {}, records = result.record_counts || {};
+  badges.innerHTML = [['ADDED','신규','badge-green'], ['REMOVED','삭제','badge-red'],
+                      ['CHANGED','변경','badge-yellow'], ['STATUS_CHANGED','상태변경','badge-blue']]
+    .map(([code, label, cls]) => `<span class="badge ${cls}">${label} ${counts[code] || 0}</span>`).join('');
+  basis.textContent = `${result.previous.snapshot_date} (${Number(records.previous || 0).toLocaleString()}건)`
+    + ` → ${result.current.snapshot_date} (${Number(records.current || 0).toLocaleString()}건),`
+    + ` 순증감 ${Number(records.net || 0).toLocaleString()}`;
+
+  const events = result.events || [];
+  body.innerHTML = events.length ? events.map(row => `<tr>
+    <td>${syncBadge(row.category || row.event_type)}</td>
+    <td class="mono">${syncEscape(row.asset_key)}</td>
+    <td>${changeField(row)}</td>
+    <td>${changeCell(row, 'old')}</td>
+    <td>${changeCell(row, 'new')}</td></tr>`).join('')
+    : '<tr><td colspan="5" style="text-align:center" class="text-muted">변경 없음</td></tr>';
+}
+
+// ── 주간 점검 ──
+// 월요일을 주의 시작으로 본다.
+let weeklyOffset = 0;
+
+function weekRange(offset) {
+  const today = new Date();
+  const weekday = (today.getDay() + 6) % 7;          // 월=0 이 되도록 옮긴다
+  const monday = new Date(today);
+  monday.setDate(today.getDate() - weekday + offset * 7);
+  monday.setHours(0, 0, 0, 0);
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+  sunday.setHours(23, 59, 59, 0);
+  return { monday, sunday };
+}
+
+function shiftWeek(step) {
+  weeklyOffset += step;
+  loadWeeklyCheck();
+}
+
+function localDate(value) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
+}
+
+async function loadWeeklyCheck() {
+  const alertEl = document.getElementById('weekly-alert');
+  if (!alertEl) return;
+  const { monday, sunday } = weekRange(weeklyOffset);
+  document.getElementById('weekly-range').textContent = `${localDate(monday)} ~ ${localDate(sunday)}`;
+  alertEl.innerHTML = '<div class="alert alert-info"><span class="loading"></span> 주간 변경 집계 중...</div>';
+
+  const query = new URLSearchParams({
+    start: `${localDate(monday)}T00:00:00`,
+    end: `${localDate(sunday)}T23:59:59`,
+    limit: '10000',
+  });
+  const rows = await fetch('/api/asset-sync/changes?' + query).then(r => r.json());
+  if (rows.error) {
+    alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(rows.error)}</div>`;
+    return;
+  }
+  alertEl.innerHTML = '';
+  renderWeekly(rows, monday);
+}
+
+// 생성·삭제로 세는 이벤트. 나머지는 변경으로 본다.
+const WEEKLY_CREATED = ['ITSM_ASSET_CREATED', 'RV_NEW'];
+const WEEKLY_REMOVED = ['ITSM_RECORD_REMOVED', 'RV_REMOVED'];
+
+function renderWeekly(rows, monday) {
+  const created = rows.filter(r => WEEKLY_CREATED.includes(r.event_type)).length;
+  const removed = rows.filter(r => WEEKLY_REMOVED.includes(r.event_type)).length;
+  // 필드 변경만 센다. 묶음 이벤트(ITSM_ASSET_UPDATED)는 중복이므로 뺀다.
+  const changed = rows.filter(r => r.field_name && r.event_type !== 'ITSM_ASSET_UPDATED').length;
+
+  document.getElementById('weekly-created').textContent = created.toLocaleString();
+  document.getElementById('weekly-removed').textContent = removed.toLocaleString();
+  document.getElementById('weekly-changed').textContent = changed.toLocaleString();
+  const net = created - removed;
+  document.getElementById('weekly-net').textContent = (net > 0 ? '+' : '') + net.toLocaleString();
+
+  const labels = ['월','화','수','목','금','토','일'];
+  const byDay = new Array(7).fill(0);
+  rows.forEach(row => {
+    const detected = new Date(row.detected_at);
+    const index = Math.floor((detected - monday) / 86400000);
+    if (index >= 0 && index < 7) byDay[index] += 1;
+  });
+  const maxDay = Math.max(...byDay, 1);
+  document.getElementById('weekly-by-day').innerHTML = byDay.map((count, index) =>
+    `<div class="bar-row"><span>${labels[index]}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, count / maxDay * 100)}%"></div></div>
+      <strong>${count.toLocaleString()}</strong></div>`).join('');
+
+  const types = {};
+  rows.forEach(row => { types[row.event_type] = (types[row.event_type] || 0) + 1; });
+  const sorted = Object.entries(types).sort((a, b) => b[1] - a[1]);
+  const maxType = Math.max(...sorted.map(([, n]) => n), 1);
+  document.getElementById('weekly-by-type').innerHTML = sorted.length ? sorted.slice(0, 12).map(([name, count]) =>
+    `<div class="bar-row"><span title="${syncEscape(name)}">${syncEscape(name)}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, count / maxType * 100)}%"></div></div>
+      <strong>${count.toLocaleString()}</strong></div>`).join('')
+    : '<div class="text-muted">이 주에는 변경이 없습니다.</div>';
+
+  // 한 주에 두 번 이상 바뀐 자산. 반복 변경은 확인할 이유가 있다.
+  const repeats = {};
+  rows.filter(r => r.field_name).forEach(row => {
+    const key = `${row.source}|${row.asset_key}`;
+    repeats[key] = repeats[key] || { source: row.source, asset: row.asset_key, count: 0, fields: new Set() };
+    repeats[key].count += 1;
+    repeats[key].fields.add(row.field_label || row.field_name);
+  });
+  const repeated = Object.values(repeats).filter(item => item.count >= 2)
+    .sort((a, b) => b.count - a.count).slice(0, 100);
+  document.getElementById('weekly-repeat-body').innerHTML = repeated.length
+    ? repeated.map(item => `<tr><td>${syncBadge(item.source)}</td>
+        <td class="mono">${syncEscape(item.asset)}</td>
+        <td><strong>${item.count}</strong></td>
+        <td>${syncEscape([...item.fields].join(', '))}</td></tr>`).join('')
+    : '<tr><td colspan="4" style="text-align:center" class="text-muted">두 번 이상 바뀐 자산이 없습니다.</td></tr>';
+}
+</script>

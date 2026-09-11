@@ -24,6 +24,18 @@ SECTION_ORDER = ("운영", "자산 관리", "연계 모듈", "설정")
 #: ``children`` 은 소메뉴이고, ``role`` 이 admin 이면 관리자에게만 보인다.
 PORTAL_MENU: tuple[dict[str, Any], ...] = (
     {"section": "운영", "page": "dashboard", "name": "통합 대시보드", "icon": "🏠"},
+    {
+        # 점검 주기별로 화면을 나눈다. 일간에서 모은 것을 주간이 묶고, 월간이 장표로 낸다.
+        "section": "운영",
+        "page": "daily_check",
+        "name": "시스템 파트",
+        "icon": "🖥️",
+        "children": (
+            {"page": "daily_check", "name": "일간 점검", "icon": "📅"},
+            {"page": "weekly_check", "name": "주간 점검", "icon": "🗓️"},
+            {"page": "monthly_check", "name": "월간 점검", "icon": "📆"},
+        ),
+    },
     {"section": "운영", "page": "report", "name": "보고서", "icon": "📝"},
     {
         "section": "설정",

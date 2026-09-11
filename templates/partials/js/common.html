@@ -21,6 +21,9 @@ function showPage(id) {
   if (id === 'admin_users') loadUsers();
   if (id === 'integration_settings') loadIntegrationSettings();
   if (id === 'dashboard') loadDashboard();
+  if (id === 'daily_check') loadDailyCheck();
+  if (id === 'weekly_check') loadWeeklyCheck();
+  if (id === 'monthly_check') loadMonthlyCheck();
   if (id === 'report') loadResourceUsage();
   if (id === 'asset_sync') loadAssetSyncDashboard();
   if (id === 'dashboard') loadModulePanels();
@@ -244,6 +247,9 @@ window.addEventListener('load', () => {
   if(page === 'asset_sync') { loadAssetSyncDashboard(); }
   if(page === 'integration_settings') { loadIntegrationSettings(); }
   if(page === 'report') { loadResourceUsage(); }
+  if(page === 'daily_check') { loadDailyCheck(); }
+  if(page === 'weekly_check') { loadWeeklyCheck(); }
+  if(page === 'monthly_check') { loadMonthlyCheck(); }
   const openModule = PORTAL_MODULES.find(m => m.location === 'REMOTE' && m.page === page);
   if(openModule) loadModulePage(openModule.id);
 });
