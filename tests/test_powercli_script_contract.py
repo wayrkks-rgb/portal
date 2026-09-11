@@ -148,3 +148,29 @@ def test_the_script_brackets_are_balanced(path: Path):
             assert depth[closing[char]] >= 0, f"{path.name}: '{char}' 가 더 많습니다"
         index += 1
     assert depth == {"{": 0, "(": 0, "[": 0}, f"{path.name}: 괄호가 맞지 않습니다 {depth}"
+
+
+def test_the_inventory_script_handles_several_vcenters_in_one_process():
+    """PowerCLI 모듈 로딩이 6~15초다. 통합기마다 프로세스를 띄우면 그만큼 곱해진다."""
+    text = code_only(INVENTORY)
+    assert "VCENTER_COUNT" in text, "여러 대를 받는 입구가 있어야 한다"
+    assert "$OutputDir" in text, "통합기별 결과를 담을 폴더를 받아야 한다"
+    assert "RESULT=" in text, "통합기별 성공·실패를 한 줄씩 알려야 한다"
+    # 모듈 로딩은 딱 한 번. 통합기 반복문 안에 있으면 의미가 없다.
+    assert text.count("Import-Module VMware.VimAutomation.Core") == 1
+    assert "MODULE_SECONDS=" in text, "모듈 로딩에 걸린 시간을 따로 알려야 판단할 수 있다"
+
+
+def test_one_vcenter_failing_does_not_abort_the_batch():
+    """한 대가 안 되면 나머지도 못 받는다면 묶은 의미가 없다."""
+    text = code_only(INVENTORY)
+    loop = text[text.index("for ($index = 1; $index -le $count"):]
+    assert "try {" in loop and "catch {" in loop, "통합기마다 예외를 잡아야 한다"
+    assert "FAILED" in loop
+
+
+def test_the_single_vcenter_path_still_works():
+    """연결 테스트는 통합기 1대 방식을 쓴다. 그 길이 막히면 설정 확인이 안 된다."""
+    text = code_only(INVENTORY)
+    assert "$OutputPath" in text
+    assert "Read-Target 'VCENTER_'" in text, "예전 환경변수 이름을 그대로 받아야 한다"

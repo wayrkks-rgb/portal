@@ -249,6 +249,159 @@ class PowerCLICollector:
                 time.sleep(3)
         return {"id": vc_id, "name": name, "status": "FAILED", "stage": self._classify_failure_stage(last_error), "network": network, "error": last_error, "returncode": None if proc is None else proc.returncode}
 
+    def _batch_environment(self, entries: list[dict[str, Any]]) -> dict[str, str]:
+        """여러 통합기의 접속정보를 번호를 붙여 환경변수에 담는다.
+
+        비밀번호를 명령행에 두면 작업관리자와 감사로그에 그대로 보인다. 파일에 쓰면
+        디스크에 남는다. 자식 프로세스 환경변수가 둘 다 피하는 길이다.
+        """
+        env = dict(os.environ)
+        env["VCENTER_COUNT"] = str(len(entries))
+        env["VCENTER_COLLECT_MODE"] = str(self.config.rvtools.get("collect_mode", "BULK")).upper()
+        for index, entry in enumerate(entries, 1):
+            resolved = self._effective_entry(entry)
+            prefix = f"VCENTER_{index}_"
+            env.update({
+                prefix + "ID": str(resolved.get("id") or resolved.get("name") or "UNKNOWN"),
+                prefix + "NAME": str(resolved.get("name") or resolved.get("id") or "UNKNOWN"),
+                prefix + "SERVER": str(resolved.get("server") or "").strip(),
+                prefix + "PORT": str(resolved.get("port") or 443),
+                prefix + "AUTH_MODE": str(resolved.get("auth_mode") or "CREDENTIAL").upper(),
+                prefix + "USERNAME": str(resolved.get("username") or ""),
+                prefix + "PASSWORD": str(resolved.get("password") or ""),
+                prefix + "IGNORE_CERT": "true" if bool(resolved.get("bypass_ssl_check", False)) else "false",
+            })
+        return env
+
+    _RESULT_PREFIX = "RESULT="
+
+    def _parse_batch_output(self, stdout: str) -> dict[str, dict[str, str]]:
+        """스크립트가 통합기별로 낸 RESULT= 줄을 읽는다.
+
+        형식: RESULT=<id>|SUCCESS|<건수>|<모드>|<단계별시간>
+              RESULT=<id>|FAILED|0||<오류>
+        """
+        parsed: dict[str, dict[str, str]] = {}
+        for line in (stdout or "").splitlines():
+            line = line.strip()
+            if not line.startswith(self._RESULT_PREFIX):
+                continue
+            parts = line[len(self._RESULT_PREFIX):].split("|")
+            if len(parts) < 5:
+                continue
+            vc_id, status, count, mode, detail = parts[0], parts[1], parts[2], parts[3], "|".join(parts[4:])
+            parsed[vc_id] = {"status": status, "count": count, "mode": mode, "detail": detail}
+        return parsed
+
+    def run_batch(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """한 PowerShell 프로세스로 여러 통합기를 수집한다."""
+        if not entries:
+            return []
+        if len(entries) == 1 and not bool(self.config.rvtools.get("batch_collection", True)):
+            return [self.run_one(entries[0])]
+
+        results: list[dict[str, Any]] = []
+        reachable: list[dict[str, Any]] = []
+        networks: dict[str, dict[str, Any]] = {}
+        for entry in entries:
+            resolved = self._effective_entry(entry)
+            vc_id = str(resolved.get("id") or resolved.get("name") or "UNKNOWN")
+            network = self.test_network(resolved)
+            networks[vc_id] = network
+            if network["status"] != "SUCCESS":
+                # 닿지 않는 통합기를 PowerShell 까지 보내 기다릴 이유가 없다.
+                results.append({**self._failed(entry, "NETWORK", str(network.get("error") or "")),
+                                "network": network})
+            else:
+                reachable.append(entry)
+        if not reachable:
+            return results
+
+        executable = self._resolve_executable()
+        script = self._resolve_script()
+        if not executable:
+            return results + [self._failed(e, "POWERSHELL", "PowerShell 실행파일을 찾을 수 없습니다.") for e in reachable]
+        if not script.exists():
+            return results + [self._failed(e, "SCRIPT", f"PowerCLI 수집 스크립트가 없습니다: {script}") for e in reachable]
+
+        temp_dir = self.config.resolve(self.config.rvtools.get("temp_dir", "data/temp/powercli"))
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        output_dir = temp_dir / f"batch_{stamp}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            env = self._batch_environment(reachable)
+        except PowerCLICollectionError as exc:
+            return results + [self._failed(e, "CONFIG", str(exc)) for e in reachable]
+
+        command = [
+            executable, "-NoLogo", "-NoProfile", "-NonInteractive",
+            "-ExecutionPolicy", "Bypass", "-File", str(script),
+            "-OutputDir", str(output_dir),
+        ]
+        # 여러 대를 한 프로세스가 맡으므로 제한시간도 그만큼 늘린다.
+        per_vcenter = int(self.config.rvtools.get("timeout_seconds", 1800))
+        timeout = per_vcenter * len(reachable)
+        ids = [str(self._effective_entry(e).get("id") or e.get("name")) for e in reachable]
+        LOGGER.info("PowerCLI 수집 시작: 통합기 %d대 %s", len(reachable), ids)
+
+        try:
+            proc = subprocess.run(
+                command, shell=False, capture_output=True, text=True,
+                timeout=timeout, cwd=str(self.config.root_dir), env=env,
+            )
+        except subprocess.TimeoutExpired:
+            return results + [self._failed(e, "POWERCLI", f"PowerCLI 실행시간 초과({timeout}초)") for e in reachable]
+        except OSError as exc:
+            return results + [self._failed(e, "POWERSHELL", str(exc)) for e in reachable]
+
+        stdout = proc.stdout or ""
+        parsed = self._parse_batch_output(stdout)
+        if stdout:
+            for line in stdout.splitlines():
+                if line.startswith(("MODULE_SECONDS=", "TIMING=", "BULK_FALLBACK=")):
+                    LOGGER.info("PowerCLI %s", line.strip())
+
+        if not parsed:
+            # 스크립트가 통합기별 결과를 내지 못했다. 전체 실패로 본다.
+            message = (proc.stderr or stdout or "PowerCLI 실행에 실패했습니다.")[-4000:]
+            stage = self._classify_failure_stage(message)
+            return results + [self._failed(e, stage, message) for e in reachable]
+
+        for entry in reachable:
+            resolved = self._effective_entry(entry)
+            vc_id = str(resolved.get("id") or resolved.get("name") or "UNKNOWN")
+            name = str(resolved.get("name") or vc_id)
+            info = parsed.get(vc_id)
+            if info is None:
+                results.append(self._failed(entry, "POWERCLI", "이 통합기의 수집 결과가 없습니다."))
+                continue
+            if info["status"] != "SUCCESS":
+                results.append({**self._failed(entry, self._classify_failure_stage(info["detail"]), info["detail"]),
+                                "network": networks.get(vc_id)})
+                continue
+            json_path = output_dir / f"{vc_id}.json"
+            try:
+                records = self._load_records(json_path)
+            except (PowerCLICollectionError, OSError, json.JSONDecodeError) as exc:
+                results.append(self._failed(entry, "POWERCLI", str(exc)))
+                continue
+            snapshot_path: Path | None = None
+            if bool(self.config.rvtools.get("export_xlsx", True)):
+                date_dir = datetime.now().strftime("%Y%m%d")
+                snapshot_dir = self.config.resolve(
+                    self.config.rvtools.get("snapshot_dir", "data/archive/vcenter")
+                ) / date_dir
+                snapshot_path = self._write_xlsx(records, snapshot_dir / f"vcenter_{vc_id}_{stamp}.xlsx")
+            LOGGER.info("PowerCLI 수집 완료: vcenter=%s %d건 (%s)", vc_id, len(records), info["detail"])
+            results.append({
+                "id": vc_id, "name": name, "status": "SUCCESS", "stage": "VALIDATED",
+                "network": networks.get(vc_id), "records": records, "row_count": len(records),
+                "json_file": str(json_path), "xlsx_file": str(snapshot_path) if snapshot_path else None,
+                "collect_mode": info["mode"], "timing": info["detail"], "attempt": 1,
+            })
+        return results
+
     def _parallel_limit(self, count: int) -> int:
         """동시에 수집할 통합기 수.
 
@@ -273,32 +426,65 @@ class PowerCLICollector:
                 configured = 4
         return max(1, min(configured, count))
 
+    def _batches(self, entries: list[dict[str, Any]], workers: int) -> list[list[dict[str, Any]]]:
+        """통합기를 프로세스별로 나눈다.
+
+        PowerCLI 모듈 로딩이 6~15초다. 통합기마다 프로세스를 띄우면 그 비용을 통합기
+        수만큼 낸다. 한 프로세스가 여러 대를 맡으면 한 번만 낸다.
+
+        돌아가며 나눠 담아(round-robin) 앞쪽 프로세스에만 몰리지 않게 한다.
+        """
+        groups: list[list[dict[str, Any]]] = [[] for _ in range(workers)]
+        for index, entry in enumerate(entries):
+            groups[index % workers].append(entry)
+        return [group for group in groups if group]
+
     def _run_all(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         workers = self._parallel_limit(len(entries))
-        if workers <= 1 or len(entries) <= 1:
-            return [self.run_one(entry) for entry in entries]
+        batched = bool(self.config.rvtools.get("batch_collection", True))
+        if not batched:
+            groups = [[entry] for entry in entries]
+        else:
+            groups = self._batches(entries, workers)
 
-        LOGGER.info("PowerCLI 수집을 %d대씩 동시에 진행합니다(총 %d대)", workers, len(entries))
-        # 결과 순서는 입력 순서를 따라야 한다. 로그와 화면이 들쑥날쑥하면 읽기 어렵다.
-        results: list[dict[str, Any] | None] = [None] * len(entries)
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="powercli") as pool:
-            futures = {pool.submit(self.run_one, entry): index for index, entry in enumerate(entries)}
-            for future in as_completed(futures):
-                index = futures[future]
-                entry = entries[index]
-                try:
-                    results[index] = future.result()
-                except Exception as exc:  # 한 대가 깨져도 나머지는 살려야 한다.
-                    vc_id = str(entry.get("id") or "UNKNOWN")
-                    LOGGER.exception("PowerCLI 수집 중 예외: vcenter=%s", vc_id)
-                    results[index] = {
-                        "id": vc_id,
-                        "name": str(entry.get("name") or vc_id),
-                        "status": "FAILED",
-                        "stage": "COLLECTOR",
-                        "error": str(exc),
-                    }
-        return [item for item in results if item is not None]
+        if len(groups) <= 1:
+            collected = [self.run_batch(group) for group in groups]
+        else:
+            LOGGER.info(
+                "PowerCLI 수집: 통합기 %d대를 프로세스 %d개로 나눠 동시에 진행합니다",
+                len(entries), len(groups),
+            )
+            collected: list[list[dict[str, Any]] | None] = [None] * len(groups)
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="powercli") as pool:
+                futures = {pool.submit(self.run_batch, group): index for index, group in enumerate(groups)}
+                for future in as_completed(futures):
+                    index = futures[future]
+                    try:
+                        collected[index] = future.result()
+                    except Exception as exc:  # 한 묶음이 깨져도 나머지는 살려야 한다.
+                        LOGGER.exception("PowerCLI 수집 중 예외")
+                        collected[index] = [self._failed(entry, "COLLECTOR", str(exc)) for entry in groups[index]]
+
+        # 결과 순서는 설정 순서를 따라야 한다. 로그와 화면이 들쑥날쑥하면 읽기 어렵다.
+        by_id: dict[str, dict[str, Any]] = {}
+        for group_results in collected:
+            for item in group_results or []:
+                by_id[str(item.get("id"))] = item
+        ordered: list[dict[str, Any]] = []
+        for entry in entries:
+            vc_id = str(self._effective_entry(entry).get("id") or entry.get("name") or "UNKNOWN")
+            ordered.append(by_id.get(vc_id) or self._failed(entry, "COLLECTOR", "수집 결과가 없습니다."))
+        return ordered
+
+    def _failed(self, entry: dict[str, Any], stage: str, error: str) -> dict[str, Any]:
+        vc_id = str(entry.get("id") or entry.get("name") or "UNKNOWN")
+        return {
+            "id": vc_id,
+            "name": str(entry.get("name") or vc_id),
+            "status": "FAILED",
+            "stage": stage,
+            "error": error,
+        }
 
     def collect_all(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         enabled = self.enabled_vcenters()

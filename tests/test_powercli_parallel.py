@@ -36,32 +36,36 @@ def make_collector(tmp_path: Path, count: int, **rvtools) -> PowerCLICollector:
     return PowerCLICollector(config)
 
 
-def fake_run_one(records_per_vc: int = 2, delay: float = DELAY):
-    """run_one 을 가로채 동시에 몇 개가 돌았는지 센다."""
-    state = {"peak": 0, "current": 0, "order": []}
+def fake_run_batch(records_per_vc: int = 2, delay: float = DELAY):
+    """run_batch 를 가로채 프로세스 몇 개가 동시에 돌았는지 센다.
+
+    한 호출이 PowerShell 프로세스 하나에 해당한다.
+    """
+    state = {"peak": 0, "current": 0, "calls": [], "sizes": []}
     lock = threading.Lock()
 
-    def run_one(entry, *, test_run: bool = False):
+    def run_batch(entries):
         with lock:
             state["current"] += 1
             state["peak"] = max(state["peak"], state["current"])
+            state["calls"].append([e["id"] for e in entries])
+            state["sizes"].append(len(entries))
         time.sleep(delay)
         with lock:
             state["current"] -= 1
-            state["order"].append(entry["id"])
-        return {
+        return [{
             "id": entry["id"], "name": entry["name"], "status": "SUCCESS",
             "records": [{"VM": f"{entry['id']}-vm{n}"} for n in range(records_per_vc)],
             "row_count": records_per_vc, "json_file": None, "xlsx_file": None,
-        }
+        } for entry in entries]
 
-    return run_one, state
+    return run_batch, state
 
 
 def test_several_vcenters_are_collected_at_the_same_time(tmp_path, monkeypatch):
     collector = make_collector(tmp_path, 4, parallel_collections=4)
-    run_one, state = fake_run_one()
-    monkeypatch.setattr(collector, "run_one", run_one)
+    run_batch, state = fake_run_batch()
+    monkeypatch.setattr(collector, "run_batch", run_batch)
 
     started = time.perf_counter()
     records, metadata = collector.collect_all()
@@ -73,18 +77,32 @@ def test_several_vcenters_are_collected_at_the_same_time(tmp_path, monkeypatch):
     assert metadata["success_scopes"] == ["vc_0001", "vc_0002", "vc_0003", "vc_0004"]
 
 
+def test_more_vcenters_than_workers_share_processes(tmp_path, monkeypatch):
+    """PowerCLI 모듈 로딩이 6~15초다. 통합기마다 프로세스를 띄우면 그만큼 곱해진다."""
+    collector = make_collector(tmp_path, 10, parallel_collections=4)
+    run_batch, state = fake_run_batch(delay=0.05)
+    monkeypatch.setattr(collector, "run_batch", run_batch)
+
+    collector.collect_all()
+
+    assert len(state["calls"]) == 4, f"프로세스가 {len(state['calls'])}개입니다. 4개로 묶여야 합니다."
+    assert sum(state["sizes"]) == 10
+    # 한 프로세스에만 몰리면 그 프로세스가 끝날 때까지 기다려야 한다.
+    assert max(state["sizes"]) - min(state["sizes"]) <= 1, f"고르지 않게 나눠졌습니다: {state['sizes']}"
+
+
 def test_the_result_order_follows_the_configured_order(tmp_path, monkeypatch):
     """끝나는 순서는 제각각이다. 화면과 로그는 설정 순서대로 보여야 읽을 수 있다."""
     collector = make_collector(tmp_path, 4, parallel_collections=4)
 
-    def run_one(entry, *, test_run: bool = False):
+    def run_batch(entries):
         # 뒤에 있는 통합기가 먼저 끝나게 만든다.
-        time.sleep(0.05 * (4 - int(entry["id"][-1])))
-        return {"id": entry["id"], "name": entry["name"], "status": "SUCCESS",
-                "records": [{"VM": entry["id"]}], "row_count": 1,
-                "json_file": None, "xlsx_file": None}
+        time.sleep(0.05 * (4 - int(entries[0]["id"][-1])))
+        return [{"id": e["id"], "name": e["name"], "status": "SUCCESS",
+                 "records": [{"VM": e["id"]}], "row_count": 1,
+                 "json_file": None, "xlsx_file": None} for e in entries]
 
-    monkeypatch.setattr(collector, "run_one", run_one)
+    monkeypatch.setattr(collector, "run_batch", run_batch)
     _, metadata = collector.collect_all()
     assert [item["id"] for item in metadata["results"]] == [
         "vc_0001", "vc_0002", "vc_0003", "vc_0004",
@@ -93,11 +111,22 @@ def test_the_result_order_follows_the_configured_order(tmp_path, monkeypatch):
 
 def test_setting_one_keeps_the_old_sequential_behaviour(tmp_path, monkeypatch):
     collector = make_collector(tmp_path, 3, parallel_collections=1)
-    run_one, state = fake_run_one(delay=0.05)
-    monkeypatch.setattr(collector, "run_one", run_one)
+    run_batch, state = fake_run_batch(delay=0.05)
+    monkeypatch.setattr(collector, "run_batch", run_batch)
 
     collector.collect_all()
     assert state["peak"] == 1
+    assert len(state["calls"]) == 1, "순차면 프로세스 하나가 전부 맡는다"
+
+
+def test_batching_can_be_turned_off(tmp_path, monkeypatch):
+    """새 방식이 환경에 맞지 않으면 1대씩 따로 띄울 수 있어야 한다."""
+    collector = make_collector(tmp_path, 4, parallel_collections=4, batch_collection=False)
+    run_batch, state = fake_run_batch(delay=0.02)
+    monkeypatch.setattr(collector, "run_batch", run_batch)
+
+    collector.collect_all()
+    assert state["sizes"] == [1, 1, 1, 1]
 
 
 @pytest.mark.parametrize("configured,count,expected", [
@@ -112,14 +141,19 @@ def test_the_parallel_limit_stays_sensible(tmp_path, configured, count, expected
 def test_one_vcenter_failing_does_not_stop_the_others(tmp_path, monkeypatch):
     collector = make_collector(tmp_path, 3, parallel_collections=3)
 
-    def run_one(entry, *, test_run: bool = False):
-        if entry["id"] == "vc_0002":
-            raise RuntimeError("vCenter 2 가 응답하지 않습니다")
-        return {"id": entry["id"], "name": entry["name"], "status": "SUCCESS",
-                "records": [{"VM": entry["id"]}], "row_count": 1,
-                "json_file": None, "xlsx_file": None}
+    def run_batch(entries):
+        out = []
+        for entry in entries:
+            if entry["id"] == "vc_0002":
+                out.append({"id": entry["id"], "name": entry["name"], "status": "FAILED",
+                            "error": "vCenter 2 가 응답하지 않습니다"})
+            else:
+                out.append({"id": entry["id"], "name": entry["name"], "status": "SUCCESS",
+                            "records": [{"VM": entry["id"]}], "row_count": 1,
+                            "json_file": None, "xlsx_file": None})
+        return out
 
-    monkeypatch.setattr(collector, "run_one", run_one)
+    monkeypatch.setattr(collector, "run_batch", run_batch)
     records, metadata = collector.collect_all()
 
     assert len(records) == 2
@@ -131,9 +165,9 @@ def test_one_vcenter_failing_does_not_stop_the_others(tmp_path, monkeypatch):
 def test_all_vcenters_failing_is_reported_as_an_error(tmp_path, monkeypatch):
     collector = make_collector(tmp_path, 2, parallel_collections=2)
     monkeypatch.setattr(
-        collector, "run_one",
-        lambda entry, *, test_run=False: {"id": entry["id"], "name": entry["name"],
-                                          "status": "FAILED", "error": "실패"},
+        collector, "run_batch",
+        lambda entries: [{"id": e["id"], "name": e["name"], "status": "FAILED", "error": "실패"}
+                         for e in entries],
     )
     with pytest.raises(PowerCLICollectionError, match="정상 수집된"):
         collector.collect_all()

@@ -63,24 +63,70 @@ class FakeOracleModule:
 
 
 def write_fake_powershell(path: Path) -> None:
+    """PowerShell 대신 실행되는 흉내 스크립트.
+
+    실제 PowerCLI 스크립트가 지켜야 하는 호출 계약을 여기서 같이 검증한다.
+    통합기 1대(VCENTER_SERVER + -OutputPath)와 여러 대(VCENTER_COUNT + -OutputDir)
+    두 방식을 모두 받는다.
+    """
     path.write_text(
         """#!/usr/bin/env python3
-import json, os
+import json, os, sys
 from pathlib import Path
-version=int(os.environ.get('FAKE_POWERCLI_VERSION','1'))
-vc=os.environ['VCENTER_ID']
-out=Path(os.environ['VCENTER_OUTPUT_JSON'])
-base='1' if vc=='vc_001' else '2'
-rows=[{
- 'VM':f'app-test-00{base}','Powerstate':'PoweredOn','CPUs':4 if version==1 else (8 if base=='1' else 4),
- 'Memory':16384,'DNS Name':f'app-test-00{base}.example.invalid','Primary IP Address':f'203.0.113.{10+int(base)}',
- 'VM UUID':f'00000000-0000-0000-0000-00000000000{base}','SMBIOS UUID':f'10000000-0000-0000-0000-00000000000{base}',
- 'VM ID':f'VirtualMachine-vm-{base}','VI SDK Server':vc,'Host':f'esx-{base}.example.invalid','Template':False,'SRM Placeholder':False
-}]
-if version>=2 and vc=='vc_001':
- rows.append({'VM':'vm-demo-003','Powerstate':'PoweredOn','CPUs':2,'Memory':4096,'DNS Name':'vm-demo-003.example.invalid','Primary IP Address':'203.0.113.33','VM UUID':'00000000-0000-0000-0000-000000000003','SMBIOS UUID':'10000000-0000-0000-0000-000000000003','VM ID':'VirtualMachine-vm-3','VI SDK Server':vc,'Host':'esx-1.example.invalid','Template':False,'SRM Placeholder':False})
-out.parent.mkdir(parents=True,exist_ok=True)
-out.write_text(json.dumps(rows),encoding='utf-8')
+
+version = int(os.environ.get('FAKE_POWERCLI_VERSION', '1'))
+
+
+def rows_for(vc):
+    base = '1' if vc == 'vc_001' else '2'
+    rows = [{
+        'VM': f'app-test-00{base}', 'Powerstate': 'PoweredOn',
+        'CPUs': 4 if version == 1 else (8 if base == '1' else 4),
+        'Memory': 16384, 'DNS Name': f'app-test-00{base}.example.invalid',
+        'Primary IP Address': f'203.0.113.{10 + int(base)}',
+        'VM UUID': f'00000000-0000-0000-0000-00000000000{base}',
+        'SMBIOS UUID': f'10000000-0000-0000-0000-00000000000{base}',
+        'VM ID': f'VirtualMachine-vm-{base}', 'VI SDK Server': vc,
+        'Host': f'esx-{base}.example.invalid', 'Template': False, 'SRM Placeholder': False,
+    }]
+    if version >= 2 and vc == 'vc_001':
+        rows.append({
+            'VM': 'vm-demo-003', 'Powerstate': 'PoweredOn', 'CPUs': 2, 'Memory': 4096,
+            'DNS Name': 'vm-demo-003.example.invalid', 'Primary IP Address': '203.0.113.33',
+            'VM UUID': '00000000-0000-0000-0000-000000000003',
+            'SMBIOS UUID': '10000000-0000-0000-0000-000000000003',
+            'VM ID': 'VirtualMachine-vm-3', 'VI SDK Server': vc,
+            'Host': 'esx-1.example.invalid', 'Template': False, 'SRM Placeholder': False,
+        })
+    return rows
+
+
+def argument(name):
+    argv = sys.argv
+    return argv[argv.index(name) + 1] if name in argv else None
+
+
+count = os.environ.get('VCENTER_COUNT')
+print('MODULE_SECONDS=0.1')
+if count:
+    output_dir = Path(argument('-OutputDir'))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for index in range(1, int(count) + 1):
+        vc = os.environ[f'VCENTER_{index}_ID']
+        assert os.environ[f'VCENTER_{index}_SERVER'], vc
+        rows = rows_for(vc)
+        (output_dir / f'{vc}.json').write_text(json.dumps(rows), encoding='utf-8')
+        print(f'RESULT={vc}|SUCCESS|{len(rows)}|BULK|connect=0.1s fetch=0.1s')
+    print('TIMING=module=0.1s vcenters=' + count)
+else:
+    vc = os.environ['VCENTER_ID']
+    out = Path(os.environ['VCENTER_OUTPUT_JSON'])
+    rows = rows_for(vc)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(rows), encoding='utf-8')
+    print(f'COLLECTED_COUNT={len(rows)}')
+    print('COLLECT_MODE=BULK')
+    print('TIMING=connect=0.1s fetch=0.1s')
 """,
         encoding="utf-8",
     )

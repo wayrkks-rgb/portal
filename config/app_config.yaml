@@ -122,6 +122,9 @@ vcenter:
   parallel_collections: 4
   # BULK: Get-View 로 한 번에 받는다(권장). COMPAT: 예전 방식(VM 하나당 왕복).
   collect_mode: BULK
+  # 한 프로세스가 여러 통합기를 맡는다. PowerCLI 모듈 로딩이 6~15초인데 통합기마다
+  # 프로세스를 띄우면 그 비용을 통합기 수만큼 낸다. false 면 1대씩 따로 띄운다.
+  batch_collection: true
   powershell_path: powershell.exe
   script_path: scripts/collect_vcenter_inventory.ps1
   incoming_dir: data/incoming/vcenter

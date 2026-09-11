@@ -1,32 +1,30 @@
 param(
-    [Parameter(Mandatory=$true)]
-    [string]$OutputPath
+    [string]$OutputPath = '',
+    [string]$OutputDir = ''
 )
 
 # vCenter VM 인벤토리를 수집한다.
 #
-# 속도가 중요하다. 통합기 1대에 VM 이 수백~수천 대이고, VM 하나당 API 왕복이 생기면
-# 그 수만큼 곱해진다. 그래서 두 가지를 지킨다.
+# 속도가 중요하다. 세 가지를 지킨다.
 #
 #   1. Get-View 로 필요한 속성만 '한 번에' 받는다. VM 수와 무관하게 왕복이 일정하다.
 #   2. PowerCLI 객체의 지연 속성($vm.VMHost 등)을 건드리지 않는다. 이것을 읽는 순간
-#      VM 하나당 별도 호출이 나간다. 예전 스크립트가 느렸던 주된 이유다.
+#      VM 하나당 별도 호출이 나간다.
+#   3. 한 프로세스가 여러 통합기를 처리한다. PowerCLI 모듈 로딩이 6~15초인데
+#      통합기마다 프로세스를 띄우면 그 비용을 통합기 수만큼 낸다. 한 번만 낸다.
 #
 # 출력 JSON 의 컬럼 이름은 파이썬 쪽이 그대로 읽으므로 바꾸지 않는다.
+#
+# 두 가지 호출 방식을 받는다.
+#   * 통합기 1대 : VCENTER_SERVER 등 + -OutputPath
+#   * 여러 대    : VCENTER_COUNT, VCENTER_1_SERVER ... + -OutputDir
+#                  통합기당 <OutputDir>/<id>.json 을 쓰고 RESULT= 줄을 한 줄씩 낸다.
 #
 # VCENTER_COLLECT_MODE=COMPAT 으로 두면 예전 방식(Get-VM)으로 돌린다. 새 방식이
 # 환경에 맞지 않을 때 소스를 고치지 않고 빠져나갈 길을 남긴다.
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-
-function Require-Env([string]$Name) {
-    $value = [Environment]::GetEnvironmentVariable($Name)
-    if ([string]::IsNullOrWhiteSpace($value)) {
-        throw "Required environment variable is missing: $Name"
-    }
-    return $value
-}
 
 function Get-EnvOrDefault([string]$Name, [string]$Default) {
     $value = [Environment]::GetEnvironmentVariable($Name)
@@ -39,16 +37,7 @@ function Lookup($map, $key) {
     return $null
 }
 
-$server = Require-Env 'VCENTER_SERVER'
-$port = [int](Get-EnvOrDefault 'VCENTER_PORT' '443')
-$authMode = (Get-EnvOrDefault 'VCENTER_AUTH_MODE' 'CREDENTIAL').ToUpperInvariant()
-$vcenterId = [Environment]::GetEnvironmentVariable('VCENTER_ID')
-$vcenterName = [Environment]::GetEnvironmentVariable('VCENTER_NAME')
-$ignoreCertificate = (Get-EnvOrDefault 'VCENTER_IGNORE_CERT' 'false').ToLowerInvariant() -eq 'true'
 $collectMode = (Get-EnvOrDefault 'VCENTER_COLLECT_MODE' 'BULK').ToUpperInvariant()
-
-$sdkServer = $server
-if (-not [string]::IsNullOrWhiteSpace($vcenterId)) { $sdkServer = $vcenterId }
 
 # 어느 단계에서 시간이 걸리는지 남긴다. 느릴 때 추측하지 않으려면 필요하다.
 $timer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -56,6 +45,9 @@ $marks = [ordered]@{}
 function Mark([string]$Name) {
     $script:marks[$Name] = [math]::Round($script:timer.Elapsed.TotalSeconds, 1)
     $script:timer.Restart()
+}
+function Timing-Text() {
+    return (($script:marks.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)s" }) -join ' ')
 }
 
 function Get-GuestIpList($guest) {
@@ -74,6 +66,7 @@ function Get-GuestIpList($guest) {
 }
 
 # 한 줄을 만든다. 컬럼 이름은 파이썬이 읽는 계약이므로 여기 한 곳에서만 정한다.
+# 통합기별로 달라지는 세 값은 Collect-One 이 script 범위에 미리 넣어둔다.
 function New-Row([hashtable]$Values) {
     $ips = @($Values.IpList)
     $primaryIp = $null
@@ -95,9 +88,9 @@ function New-Row([hashtable]$Values) {
         'VM ID' = $Values.VmId
         'SMBIOS UUID' = $Values.SmbiosUuid
         'VM UUID' = $Values.VmUuid
-        'VI SDK Server' = $sdkServer
-        'vCenter Display Name' = $vcenterName
-        'Collection Server' = $server
+        'VI SDK Server' = $script:sdkServer
+        'vCenter Display Name' = $script:vcenterName
+        'Collection Server' = $script:server
     }
     for ($i = 1; $i -le 8; $i++) {
         $value = $null
@@ -218,59 +211,123 @@ function Collect-Compat($viServer) {
     return @($rows)
 }
 
-Import-Module VMware.VimAutomation.Core -ErrorAction Stop
-Mark 'module'
-Set-PowerCLIConfiguration -Scope Session -ParticipateInCEIP:$false -Confirm:$false | Out-Null
-if ($ignoreCertificate) {
-    Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction Ignore -Confirm:$false | Out-Null
-}
+# 통합기 한 대를 수집해 JSON 으로 쓴다. 결과를 해시테이블로 돌려준다.
+function Collect-One([hashtable]$Target, [string]$JsonPath) {
+    $script:marks = [ordered]@{}
+    $script:timer.Restart()
+    $script:server = $Target.Server
+    $script:vcenterName = $Target.Name
+    $script:sdkServer = $Target.Server
+    if (-not [string]::IsNullOrWhiteSpace($Target.Id)) { $script:sdkServer = $Target.Id }
 
-$viServer = $null
-try {
-    if ($authMode -eq 'PASS_THROUGH') {
-        $viServer = Connect-VIServer -Server $server -Port $port -Force -NotDefault -ErrorAction Stop
+    if ($Target.IgnoreCert) {
+        Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction Ignore -Confirm:$false | Out-Null
     }
-    elseif ($authMode -eq 'CREDENTIAL') {
-        $username = Require-Env 'VCENTER_USERNAME'
-        $password = Require-Env 'VCENTER_PASSWORD'
-        $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
-        $credential = [System.Management.Automation.PSCredential]::new($username, $securePassword)
-        $viServer = Connect-VIServer -Server $server -Port $port -Credential $credential -Force -NotDefault -ErrorAction Stop
-    }
-    else {
-        throw "Unsupported VCENTER_AUTH_MODE: $authMode"
-    }
-    Mark 'connect'
 
-    $usedMode = $collectMode
-    if ($collectMode -eq 'COMPAT') {
-        $rows = Collect-Compat $viServer
-    }
-    else {
-        try {
-            $rows = Collect-Bulk $viServer
+    $viServer = $null
+    try {
+        if ($Target.AuthMode -eq 'PASS_THROUGH') {
+            $viServer = Connect-VIServer -Server $Target.Server -Port $Target.Port -Force -NotDefault -ErrorAction Stop
         }
-        catch {
-            # 새 방식이 막혔으면 수집을 포기하지 않고 예전 방식으로 한 번 더 시도한다.
-            Write-Output ("BULK_FALLBACK=" + $_.Exception.Message)
-            $usedMode = 'COMPAT'
+        elseif ($Target.AuthMode -eq 'CREDENTIAL') {
+            if ([string]::IsNullOrWhiteSpace($Target.Username) -or [string]::IsNullOrWhiteSpace($Target.Password)) {
+                throw "vCenter username/password is missing"
+            }
+            $securePassword = ConvertTo-SecureString $Target.Password -AsPlainText -Force
+            $credential = [System.Management.Automation.PSCredential]::new($Target.Username, $securePassword)
+            $viServer = Connect-VIServer -Server $Target.Server -Port $Target.Port -Credential $credential -Force -NotDefault -ErrorAction Stop
+        }
+        else {
+            throw "Unsupported VCENTER_AUTH_MODE: $($Target.AuthMode)"
+        }
+        Mark 'connect'
+
+        $usedMode = $collectMode
+        if ($collectMode -eq 'COMPAT') {
             $rows = Collect-Compat $viServer
         }
-    }
+        else {
+            try {
+                $rows = Collect-Bulk $viServer
+            }
+            catch {
+                # 새 방식이 막혔으면 수집을 포기하지 않고 예전 방식으로 한 번 더 시도한다.
+                Write-Output ("BULK_FALLBACK=" + $_.Exception.Message)
+                $usedMode = 'COMPAT'
+                $rows = Collect-Compat $viServer
+            }
+        }
 
-    $parent = Split-Path -Parent $OutputPath
-    if (-not [string]::IsNullOrWhiteSpace($parent)) {
-        New-Item -ItemType Directory -Path $parent -Force | Out-Null
-    }
-    @($rows) | ConvertTo-Json -Depth 8 | Set-Content -Path $OutputPath -Encoding UTF8
-    Mark 'write'
+        $parent = Split-Path -Parent $JsonPath
+        if (-not [string]::IsNullOrWhiteSpace($parent)) {
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        }
+        @($rows) | ConvertTo-Json -Depth 8 | Set-Content -Path $JsonPath -Encoding UTF8
+        Mark 'write'
 
-    Write-Output ("COLLECTED_COUNT=" + @($rows).Count)
-    Write-Output ("COLLECT_MODE=" + $usedMode)
-    Write-Output ("TIMING=" + (($marks.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)s" }) -join ' '))
-}
-finally {
-    if ($null -ne $viServer) {
-        Disconnect-VIServer -Server $viServer -Confirm:$false -Force -ErrorAction SilentlyContinue | Out-Null
+        return @{ Status = 'SUCCESS'; Count = @($rows).Count; Mode = $usedMode; Timing = (Timing-Text) }
+    }
+    finally {
+        if ($null -ne $viServer) {
+            Disconnect-VIServer -Server $viServer -Confirm:$false -Force -ErrorAction SilentlyContinue | Out-Null
+        }
     }
 }
+
+function Read-Target([string]$Prefix) {
+    $port = 443
+    $portText = [Environment]::GetEnvironmentVariable($Prefix + 'PORT')
+    if (-not [string]::IsNullOrWhiteSpace($portText)) { $port = [int]$portText }
+    return @{
+        Id         = [Environment]::GetEnvironmentVariable($Prefix + 'ID')
+        Name       = [Environment]::GetEnvironmentVariable($Prefix + 'NAME')
+        Server     = [Environment]::GetEnvironmentVariable($Prefix + 'SERVER')
+        Port       = $port
+        AuthMode   = (Get-EnvOrDefault ($Prefix + 'AUTH_MODE') 'CREDENTIAL').ToUpperInvariant()
+        Username   = [Environment]::GetEnvironmentVariable($Prefix + 'USERNAME')
+        Password   = [Environment]::GetEnvironmentVariable($Prefix + 'PASSWORD')
+        IgnoreCert = (Get-EnvOrDefault ($Prefix + 'IGNORE_CERT') 'false').ToLowerInvariant() -eq 'true'
+    }
+}
+
+# 모듈 로딩은 한 번만. 이 프로세스가 맡은 통합기 전부가 이 비용을 나눠 쓴다.
+Import-Module VMware.VimAutomation.Core -ErrorAction Stop
+Set-PowerCLIConfiguration -Scope Session -ParticipateInCEIP:$false -Confirm:$false | Out-Null
+$moduleSeconds = [math]::Round($timer.Elapsed.TotalSeconds, 1)
+Write-Output ("MODULE_SECONDS=" + $moduleSeconds)
+
+$countText = [Environment]::GetEnvironmentVariable('VCENTER_COUNT')
+if ([string]::IsNullOrWhiteSpace($countText)) {
+    # 통합기 1대. 예전 호출 방식과 같다(연결 테스트가 이 길을 쓴다).
+    if ([string]::IsNullOrWhiteSpace($OutputPath)) { throw "-OutputPath is required" }
+    $target = Read-Target 'VCENTER_'
+    if ([string]::IsNullOrWhiteSpace($target.Server)) { throw "Required environment variable is missing: VCENTER_SERVER" }
+    $result = Collect-One $target $OutputPath
+    Write-Output ("COLLECTED_COUNT=" + $result.Count)
+    Write-Output ("COLLECT_MODE=" + $result.Mode)
+    Write-Output ("TIMING=" + $result.Timing)
+    exit 0
+}
+
+# 여러 대. 한 대가 실패해도 나머지는 계속한다.
+if ([string]::IsNullOrWhiteSpace($OutputDir)) { throw "-OutputDir is required when VCENTER_COUNT is set" }
+New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
+$count = [int]$countText
+$failures = 0
+for ($index = 1; $index -le $count; $index++) {
+    $target = Read-Target ("VCENTER_" + $index + "_")
+    $vcId = $target.Id
+    if ([string]::IsNullOrWhiteSpace($vcId)) { $vcId = "vc$index" }
+    $jsonPath = Join-Path $OutputDir ($vcId + '.json')
+    try {
+        $result = Collect-One $target $jsonPath
+        Write-Output ("RESULT=" + $vcId + "|SUCCESS|" + $result.Count + "|" + $result.Mode + "|" + $result.Timing)
+    }
+    catch {
+        $failures++
+        $message = ($_.Exception.Message -replace '[\r\n|]', ' ')
+        Write-Output ("RESULT=" + $vcId + "|FAILED|0||" + $message)
+    }
+}
+Write-Output ("TIMING=module=" + $moduleSeconds + "s vcenters=" + $count + " failed=" + $failures)
+exit 0
