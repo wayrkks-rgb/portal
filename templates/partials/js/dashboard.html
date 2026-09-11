@@ -131,6 +131,15 @@ function memoryChangeValue(field,eventType,value){
   const isMemory=String(eventType||'')==='RV_MEMORY_CHANGED'||String(field||'').toUpperCase().includes('MEMORY')||String(field||'').toUpperCase().includes('MEM');
   return isMemory?memoryGbValue(value):syncEscape(value==null||value===''?'-':String(value));
 }
+// 업무명이 붙어 있으면 그것을 크게, 원래 이름은 작게 보여준다. 원래 이름은
+// vCenter 화면에서 찾을 때 필요하므로 지우지 않는다.
+function resourceName(displayName, rawName){
+  const raw=rawName||'';
+  if(!raw)return '-';
+  if(!displayName||displayName===raw)return syncEscape(raw);
+  return `${syncEscape(displayName)}<div class="text-xs text-muted mono">${syncEscape(raw)}</div>`;
+}
+
 function resourceQuery(){
   const q=new URLSearchParams({start:document.getElementById('resource-start').value,end:document.getElementById('resource-end').value});
   [['vcenter_id','resource-vcenter'],['cluster_name','resource-cluster'],['esxi_host','resource-host']].forEach(([k,id])=>{const v=document.getElementById(id).value;if(v)q.set(k,v)});return q;
@@ -147,7 +156,7 @@ function renderResourceFilters(filters){
 function renderResourceUsage(data){
   const sum=data.summary||{};document.getElementById('resource-host-count').textContent=dashboardNumber(sum.host_count);document.getElementById('resource-vm-count').textContent=dashboardNumber(sum.vm_count);document.getElementById('resource-scale-count').textContent=dashboardNumber(Number(sum.cpu_changed||0)+Number(sum.memory_changed||0));document.getElementById('resource-vm-change-count').textContent=dashboardNumber(Number(sum.vm_added||0)+Number(sum.vm_removed||0));
   const hosts=data.hosts||[],vms=data.vms||[],changes=data.changes||[];
-  document.getElementById('resource-host-body').innerHTML=hosts.length?hosts.map(r=>`<tr onclick="selectResourceHost('${String(r.esxi_host||'').replace(/'/g,"\'")}')" style="cursor:pointer"><td>${syncEscape(r.service_name||'-')}</td><td>${syncEscape(r.vcenter_id||'-')}</td><td>${syncEscape(r.cluster_name||'-')}</td><td><strong>${syncEscape(r.esxi_host||'-')}</strong></td><td>${dashboardNumber(r.vm_count)}</td><td>${resourceValue(r.allocated_cpu_cores,' Core')}</td><td>${memoryGbValue(r.allocated_memory_mb)}</td><td>${resourceValue(r.cpu_max_pct,'%')}</td><td>${resourceValue(r.cpu_avg_pct,'%')}</td><td>${resourceValue(r.mem_max_pct,'%')}</td><td>${resourceValue(r.mem_avg_pct,'%')}</td></tr>`).join(''):'<tr><td colspan="11" style="text-align:center">수집된 통합기 자원사용률이 없습니다.</td></tr>';
+  document.getElementById('resource-host-body').innerHTML=hosts.length?hosts.map(r=>`<tr onclick="selectResourceHost('${String(r.esxi_host||'').replace(/'/g,"\'")}')" style="cursor:pointer"><td>${syncEscape(r.service_name||'-')}</td><td>${syncEscape(r.vcenter_display_name||r.vcenter_id||'-')}</td><td>${resourceName(r.cluster_display_name,r.cluster_name)}</td><td><strong>${resourceName(r.esxi_display_name,r.esxi_host)}</strong></td><td>${dashboardNumber(r.vm_count)}</td><td>${resourceValue(r.allocated_cpu_cores,' Core')}</td><td>${memoryGbValue(r.allocated_memory_mb)}</td><td>${resourceValue(r.cpu_max_pct,'%')}</td><td>${resourceValue(r.cpu_avg_pct,'%')}</td><td>${resourceValue(r.mem_max_pct,'%')}</td><td>${resourceValue(r.mem_avg_pct,'%')}</td></tr>`).join(''):'<tr><td colspan="11" style="text-align:center">수집된 통합기 자원사용률이 없습니다.</td></tr>';
   document.getElementById('resource-vm-body').innerHTML=vms.length?vms.map(r=>`<tr><td>${syncEscape(r.service_name||'-')}</td><td>${syncEscape(r.cluster_name||'-')}</td><td>${syncEscape(r.esxi_host||'-')}</td><td><strong>${syncEscape(r.vm_name||'-')}</strong></td><td>${syncBadge(r.power_state||'-')}</td><td>${resourceValue(r.allocated_cpu_cores,' Core')}</td><td>${memoryGbValue(r.allocated_memory_mb)}</td><td>${resourceValue(r.cpu_max_pct,'%')}</td><td>${resourceValue(r.cpu_avg_pct,'%')}</td><td>${resourceValue(r.mem_max_pct,'%')}</td><td>${resourceValue(r.mem_avg_pct,'%')}</td></tr>`).join(''):'<tr><td colspan="11" style="text-align:center">수집된 VM 자원사용률이 없습니다.</td></tr>';
   const eventName={RV_NEW:'신규 VM',RV_REMOVED:'삭제 VM',RV_CPU_CHANGED:'CPU 변경',RV_MEMORY_CHANGED:'MEM 변경',RV_HOST_CHANGED:'통합기 이동',RV_VCENTER_CHANGED:'vCenter 이동'};
   document.getElementById('resource-change-body').innerHTML=changes.length?changes.map(r=>`<tr><td>${dashboardDateText(r.detected_at)}</td><td>${syncEscape(r.vcenter_id||'-')}</td><td>${syncEscape(r.esxi_host||'-')}</td><td>${syncEscape(r.vm_name||'-')}</td><td>${syncBadge(eventName[r.event_type]||r.event_type)}</td><td>${syncEscape(r.field_name||'-')}</td><td>${memoryChangeValue(r.field_name,r.event_type,r.old_value)}</td><td>${memoryChangeValue(r.field_name,r.event_type,r.new_value)}</td></tr>`).join(''):'<tr><td colspan="8" style="text-align:center">선택 기간의 VM 구성 변경이 없습니다.</td></tr>';

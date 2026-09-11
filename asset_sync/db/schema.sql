@@ -394,3 +394,20 @@ CREATE TABLE IF NOT EXISTS user_module_permission (
     UNIQUE(user_id, module_id)
 );
 CREATE INDEX IF NOT EXISTS idx_user_module_permission_module ON user_module_permission(module_id, permission);
+
+-- vCenter 구성요소의 업무명. 클러스터·ESXi·데이터스토어 이름은 vCenter 가 붙인
+-- 것이라(vc_0001, esxi-07) 보고서에서 무엇인지 알 수 없다. 업무에서 쓰는 이름은
+-- 여기에 따로 둔다. 수집 결과는 건드리지 않으므로 다시 수집해도 남는다.
+--   scope: CLUSTER | ESXI | DATASTORE | VCENTER
+CREATE TABLE IF NOT EXISTS vcenter_display_name (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope TEXT NOT NULL,
+    vcenter_id TEXT NOT NULL DEFAULT '',
+    object_key TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    note TEXT,
+    updated_by TEXT,
+    updated_at TEXT NOT NULL,
+    UNIQUE(scope, vcenter_id, object_key)
+);
+CREATE INDEX IF NOT EXISTS idx_vcenter_display_scope ON vcenter_display_name(scope, vcenter_id);

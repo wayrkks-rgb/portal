@@ -1,4 +1,5 @@
 from .change_presenter import present_all
+from .display_name_service import DisplayNameError, DisplayNameService, SCOPES as DISPLAY_NAME_SCOPES
 from .collection_service import CollectionService
 from .automated_report_service import AutomatedReportService
 from .dashboard_service import DashboardService
@@ -16,7 +17,7 @@ from .snapshot_service import SnapshotService
 from .sync_service import ChangeSyncService
 
 __all__ = [
-    "present_all",
+    "present_all", "DisplayNameService", "DisplayNameError", "DISPLAY_NAME_SCOPES",
     "AutomatedReportService", "CollectionService", "DashboardService", "DiffService", "ExportService", "PeriodService", "OverrideService",
     "DataQualityService", "ReconciliationService", "SnapshotService", "ChangeSyncService", "DailyComparisonService",
     "IntegratedDashboardService", "ReconciliationExceptionService", "VMResourceUsageExportService",

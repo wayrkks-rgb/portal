@@ -253,6 +253,60 @@ class AssetRepository:
         rows = self.conn.execute("SELECT * FROM collection_run ORDER BY started_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
 
+    def display_names(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM vcenter_display_name ORDER BY scope, vcenter_id, object_key"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def replace_display_names(
+        self, saved: list[dict[str, Any]], removed: list[dict[str, Any]]
+    ) -> None:
+        """업무명을 한 번에 반영한다. 빈 이름으로 들어온 건은 지정을 해제한다."""
+        for row in removed:
+            self.conn.execute(
+                "DELETE FROM vcenter_display_name WHERE scope=? AND vcenter_id=? AND object_key=?",
+                (row["scope"], row["vcenter_id"], row["object_key"]),
+            )
+        for row in saved:
+            # 같은 대상에 두 번 붙일 수 없다. 지우고 다시 넣으면 방언 차이를 피할 수 있다.
+            self.conn.execute(
+                "DELETE FROM vcenter_display_name WHERE scope=? AND vcenter_id=? AND object_key=?",
+                (row["scope"], row["vcenter_id"], row["object_key"]),
+            )
+            self.conn.execute(
+                "INSERT INTO vcenter_display_name("
+                "scope, vcenter_id, object_key, display_name, note, updated_by, updated_at"
+                ") VALUES(?,?,?,?,?,?,?)",
+                (row["scope"], row["vcenter_id"], row["object_key"], row["display_name"],
+                 row["note"] or None, row["updated_by"], row["updated_at"]),
+            )
+
+    def vcenter_objects(self, limit: int = 2000) -> dict[str, list[dict[str, Any]]]:
+        """이름을 붙일 수 있는 대상 목록을 최신 수집 결과에서 모은다.
+
+        대상이 없으면 화면에서 무엇에 이름을 붙여야 하는지 알 수 없으므로,
+        수집된 것에서 클러스터·ESXi 를 뽑아 제시한다.
+        """
+        clusters = self.conn.execute(
+            "SELECT DISTINCT vcenter AS vcenter_id, cluster_name AS object_key"
+            " FROM rv_asset_snapshot"
+            " WHERE cluster_name IS NOT NULL AND cluster_name <> ''"
+            " ORDER BY vcenter, cluster_name LIMIT ?",
+            (limit,),
+        ).fetchall()
+        hosts = self.conn.execute(
+            "SELECT DISTINCT vcenter AS vcenter_id, cluster_name, esxi_host AS object_key"
+            " FROM rv_asset_snapshot"
+            " WHERE esxi_host IS NOT NULL AND esxi_host <> ''"
+            " ORDER BY vcenter, cluster_name, esxi_host LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return {
+            "CLUSTER": [dict(row) for row in clusters],
+            "ESXI": [dict(row) for row in hosts],
+        }
+
     def change_events_for_pair(
         self, snapshot_id: int, previous_snapshot_id: int, limit: int = 2000
     ) -> list[dict[str, Any]]:

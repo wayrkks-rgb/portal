@@ -203,6 +203,32 @@ DR vCenter,&lt;VCENTER_ADDRESS_002&gt;,DR"></textarea>
         그때는 <span class="mono">scripts\register_daily_task.bat</span> 을 <strong>관리자 권한으로</strong> 한 번 실행하세요.
       </div>
     </div>
+
+    <div class="card">
+      <div class="integration-card-head">
+        <div>
+          <div class="card-title" style="margin-bottom:4px"><span class="icon">🏷️</span> 통합기·ESXi 업무명</div>
+          <div class="text-xs text-muted">vCenter 가 붙인 이름(vc_0001, esxi-07) 대신 보고서에 쓸 업무명을 지정합니다.</div>
+        </div>
+        <div class="integration-card-actions">
+          <button type="button" class="btn btn-secondary btn-sm" onclick="loadDisplayNames()">다시 불러오기</button>
+          <button type="button" class="btn btn-primary btn-sm" id="btn-save-display-names" onclick="saveDisplayNames()">업무명 저장</button>
+        </div>
+      </div>
+      <div id="display-name-result" class="action-result" aria-live="polite"></div>
+      <div class="alert alert-info">
+        <strong>통합기 = 클러스터</strong> 입니다. 연동은 클러스터 단위로 하고, 그 안의 여러 ESXi 가 하나의 통합기를 이룹니다.
+        보고서의 한 줄은 클러스터 하나이고 ESXi 는 그 구성요소입니다.<br>
+        업무명을 비우면 지정이 해제되고 원래 이름이 쓰입니다. 수집 결과와 따로 저장하므로 다시 수집해도 남습니다.
+      </div>
+      <div class="table-wrap" style="max-height:420px;overflow:auto">
+        <table><thead><tr>
+          <th>구분</th><th>vCenter</th><th>원래 이름</th><th>업무명</th><th>비고</th>
+        </tr></thead><tbody id="display-name-body">
+          <tr><td colspan="5" style="text-align:center" class="text-muted">불러오는 중…</td></tr>
+        </tbody></table>
+      </div>
+    </div>
   </div>
 </div>
 {% endif %}

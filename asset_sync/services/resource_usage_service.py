@@ -13,6 +13,7 @@ from openpyxl.styles import Font, PatternFill
 from ..collectors.powercli_resource_collector import PowerCLIResourceUsageCollector
 from ..config import AppConfig
 from ..repositories import AssetRepository
+from .display_name_service import DisplayNameService
 from ..utils.hashing import canonical_json
 
 
@@ -362,6 +363,9 @@ class VMResourceUsageExportService:
         hosts = self._aggregate(host_rows, ["vcenter_id", "service_name", "cluster_name", "esxi_host"], host=True)
         vms = self._aggregate(vm_rows, ["vcenter_id", "service_name", "vm_uuid", "vm_name"], host=False)
         changes = self._vm_configuration_changes(start_day, end_day, vcenter_id, esxi_host)
+        # vc_0001 · esxi-07 같은 이름으로는 보고서에서 무엇인지 알 수 없다. 업무명이
+        # 붙어 있으면 그것을 같이 내려보낸다.
+        self._apply_display_names(hosts, vms, changes)
         return {
             "period": {"start": start_day.isoformat(), "end": end_day.isoformat()},
             "hosts": hosts,
@@ -376,6 +380,22 @@ class VMResourceUsageExportService:
                 "vm_removed": sum(1 for r in changes if r["event_type"] == "RV_REMOVED"),
             },
         }
+
+    def _apply_display_names(self, *row_groups: list[dict[str, Any]]) -> None:
+        """통합기(클러스터)·ESXi 업무명을 각 행에 붙인다.
+
+        원래 이름은 지우지 않는다. vCenter 화면에서 찾을 때 필요하다.
+        """
+        resolver = DisplayNameService(self.repo).resolver()
+        for rows in row_groups:
+            for row in rows:
+                vcenter = row.get("vcenter_id") or ""
+                if row.get("cluster_name"):
+                    row["cluster_display_name"] = resolver.name("CLUSTER", row["cluster_name"], vcenter)
+                if row.get("esxi_host"):
+                    row["esxi_display_name"] = resolver.name("ESXI", row["esxi_host"], vcenter)
+                if vcenter:
+                    row["vcenter_display_name"] = resolver.name("VCENTER", vcenter, vcenter)
 
     def export_xlsx(self, start: str, end: str, target_dir: Path, **filters: Any) -> Path:
         data = self.summary(start, end, **filters)

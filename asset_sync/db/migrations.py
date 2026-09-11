@@ -120,9 +120,56 @@ def _add_audit_module_id(conn: Any) -> bool:
     return changed
 
 
+def _add_vcenter_display_name(conn: Any) -> bool:
+    """통합기(클러스터)·ESXi·데이터스토어에 업무명을 붙일 표.
+
+    이미 운영 중인 DB 에는 CREATE TABLE 이 돌지 않으므로 여기서 만든다.
+    새 DB 는 schema.sql 로 이미 갖고 있어 아무 일도 하지 않는다.
+    """
+    if table_exists(conn, "vcenter_display_name"):
+        return False
+    mysql = _engine(conn) == "mysql"
+    if mysql:
+        apply_step(conn, """
+            CREATE TABLE vcenter_display_name (
+                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                scope VARCHAR(16) NOT NULL,
+                vcenter_id VARCHAR(64) NOT NULL DEFAULT '',
+                object_key VARCHAR(255) NOT NULL,
+                display_name VARCHAR(255) NOT NULL,
+                note VARCHAR(500),
+                updated_by VARCHAR(128),
+                updated_at VARCHAR(32) NOT NULL,
+                UNIQUE KEY uq_vcenter_display_name (scope, vcenter_id, object_key),
+                KEY idx_vcenter_display_scope (scope, vcenter_id)
+            ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """)
+    else:
+        apply_step(conn, """
+            CREATE TABLE vcenter_display_name (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope TEXT NOT NULL,
+                vcenter_id TEXT NOT NULL DEFAULT '',
+                object_key TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                note TEXT,
+                updated_by TEXT,
+                updated_at TEXT NOT NULL,
+                UNIQUE(scope, vcenter_id, object_key)
+            )
+        """)
+        apply_step(
+            conn,
+            "CREATE INDEX IF NOT EXISTS idx_vcenter_display_scope"
+            " ON vcenter_display_name(scope, vcenter_id)",
+        )
+    return True
+
+
 #: 통합 웹(포털)이 소유하는 마이그레이션. 이름 앞에 ``core/`` 가 붙는다.
 CORE_MIGRATIONS: list[Migration] = [
     ("audit_module_id", "audit_log.module_id 추가", _add_audit_module_id),
+    ("vcenter_display_name", "통합기·ESXi·데이터스토어 업무명 표 추가", _add_vcenter_display_name),
 ]
 
 

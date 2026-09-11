@@ -637,6 +637,74 @@ function buildVCenterPayload(){
   return {vcenter:{activate_powercli:true,vcenters:cleanVcenters}};
 }
 
+// ── 통합기·ESXi 업무명 ──
+// 수집된 대상(클러스터·ESXi)과 이미 지정된 업무명을 합쳐 한 표로 보여준다.
+// 아직 이름을 안 붙인 대상도 보여야 한다. 안 보이면 무엇에 붙일지 알 수 없다.
+let displayNameRows=[];
+
+async function loadDisplayNames(){
+  const body=document.getElementById('display-name-body');
+  if(!body)return;
+  const res=await integrationFetch('/api/asset-sync/admin/display-names');
+  if(!res._ok){
+    body.innerHTML=`<tr><td colspan="5" class="text-error">업무명을 불러오지 못했습니다: ${escapeHtml(res.error||'')}</td></tr>`;
+    return;
+  }
+  const saved=new Map((res.names||[]).map(n=>[`${n.scope}|${n.vcenter_id}|${n.object_key}`,n]));
+  const rows=[];
+  for(const scope of ['CLUSTER','ESXI']){
+    for(const item of (res.objects||{})[scope]||[]){
+      const key=`${scope}|${item.vcenter_id||''}|${item.object_key}`;
+      const hit=saved.get(key);
+      rows.push({scope,vcenter_id:item.vcenter_id||'',object_key:item.object_key,
+                 display_name:hit?hit.display_name:'',note:hit?(hit.note||''):''});
+      saved.delete(key);
+    }
+  }
+  // 수집 목록에 더 없는(삭제된) 대상도 남겨둔다. 지우려면 업무명을 비우면 된다.
+  for(const n of saved.values())
+    rows.push({scope:n.scope,vcenter_id:n.vcenter_id||'',object_key:n.object_key,
+               display_name:n.display_name,note:n.note||'',orphan:true});
+
+  displayNameRows=rows;
+  const label={VCENTER:'vCenter',CLUSTER:'통합기',ESXI:'ESXi',DATASTORE:'데이터스토어'};
+  body.innerHTML=rows.length?rows.map((r,i)=>`<tr>
+    <td>${escapeHtml(label[r.scope]||r.scope)}${r.orphan?' <span class="badge badge-yellow">수집 없음</span>':''}</td>
+    <td class="mono">${escapeHtml(r.vcenter_id||'-')}</td>
+    <td class="mono">${escapeHtml(r.object_key)}</td>
+    <td><input class="form-input display-name-input" data-index="${i}" value="${escapeHtml(r.display_name)}"
+               placeholder="예: Linux 통합기 #1"></td>
+    <td><input class="form-input display-note-input" data-index="${i}" value="${escapeHtml(r.note)}"
+               placeholder="비고"></td></tr>`).join('')
+    :'<tr><td colspan="5" style="text-align:center" class="text-muted">수집된 통합기가 없습니다. vCenter 수집을 먼저 실행하세요.</td></tr>';
+}
+
+async function saveDisplayNames(){
+  document.querySelectorAll('.display-name-input').forEach(el=>{
+    displayNameRows[Number(el.dataset.index)].display_name=el.value;
+  });
+  document.querySelectorAll('.display-note-input').forEach(el=>{
+    displayNameRows[Number(el.dataset.index)].note=el.value;
+  });
+  setButtonBusy('btn-save-display-names',true,'저장 중','업무명 저장');
+  const res=await integrationFetch('/api/asset-sync/admin/display-names',{
+    method:'PUT',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({names:displayNameRows.map(({scope,vcenter_id,object_key,display_name,note})=>
+      ({scope,vcenter_id,object_key,display_name,note}))})
+  });
+  setButtonBusy('btn-save-display-names',false,'','업무명 저장');
+  if(res.status!=='SUCCESS'){
+    setActionResult('display-name-result',{state:'error',title:'업무명 저장 실패',
+      summary:res.error||'저장 중 오류가 발생했습니다.',meta:[`HTTP ${res._httpStatus||0}`,res.stage||'SAVE']});
+    return;
+  }
+  setActionResult('display-name-result',{state:'success',title:'업무명 저장 완료',summary:res.message,
+    meta:[`지정 ${res.saved_count}`,`해제 ${res.removed_count}`],
+    details:['보고서와 월간 점검 장표에 이 이름이 쓰입니다.']});
+  integrationToast(res.message,'success');
+  loadDisplayNames();
+}
+
 // Windows 작업이 실제로 등록돼 있는지 보여준다. 설정만 저장하고 등록을 안 했으면
 // 시각을 아무리 바꿔도 배치가 돌지 않는다.
 async function loadScheduleStatus(){
@@ -726,6 +794,7 @@ async function loadIntegrationSettings(showMessage=false){
   document.getElementById('int-schedule-time').value=res.scheduler.daily_time||'07:00';
   document.getElementById('int-schedule-name').value=res.scheduler.task_name||'AssetDailyCollection';
   loadScheduleStatus();
+  loadDisplayNames();
   document.getElementById('int-mask-logs').value=String(res.security.mask_ip_in_logs&&res.security.mask_hostname_in_logs&&res.security.mask_user_id_in_logs);
   integrationVcenters=(vc.vcenters||[]).map(v=>({...v,test_status:'미실행',test_message:'저장된 설정을 불러왔습니다.'}));
   renderVCenterCards();

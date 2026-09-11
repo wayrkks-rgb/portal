@@ -26,6 +26,7 @@ from .. import scheduler as schedule_module
 from ..config import AppConfig, load_config
 from ..db.manager import DatabaseManager
 from ..repositories import AssetRepository
+from ..services import DISPLAY_NAME_SCOPES, DisplayNameError, DisplayNameService
 from ..settings_store import LocalSettingsStore, SettingsValidationError
 from ..web_common import admin_required
 
@@ -225,6 +226,38 @@ def create_admin_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprin
             "error": str(exc),
             "details": ["Oracle 데이터 딕셔너리 조회 단계에서 실패했습니다."],
         }), status_code
+
+    @bp.route("/api/asset-sync/admin/display-names", methods=["GET", "PUT"])
+    @admin_required
+    def display_names() -> Any:
+        """통합기(클러스터)·ESXi 의 업무명을 읽고 저장한다.
+
+        vCenter 가 붙인 이름으로는 보고서에서 무엇인지 알 수 없다. 업무명은 수집
+        결과와 따로 두므로 다시 수집해도 남는다.
+        """
+        with manager.connect() as conn:
+            service = DisplayNameService(AssetRepository(conn))
+            if request.method == "GET":
+                repo = AssetRepository(conn)
+                return jsonify({
+                    "scopes": DISPLAY_NAME_SCOPES,
+                    "names": service.all(),
+                    # 수집된 대상을 같이 내려보낸다. 무엇에 이름을 붙일지 알아야 한다.
+                    "objects": repo.vcenter_objects(),
+                })
+            payload = request.get_json(silent=True) or {}
+            items = payload.get("names") if isinstance(payload.get("names"), list) else []
+            user = str(session.get("user", {}).get("username") or "ADMIN")
+            try:
+                result = service.save_many(items, user)
+            except DisplayNameError as exc:
+                return jsonify({"status": "FAILED", "stage": "VALIDATION", "error": str(exc)}), 400
+            conn.commit()
+        return jsonify({
+            "status": "SUCCESS",
+            **result,
+            "message": f"업무명 {result['saved_count']}건 저장, {result['removed_count']}건 해제했습니다.",
+        })
 
     @bp.route("/api/asset-sync/admin/schedule", methods=["GET"])
     @admin_required

@@ -449,3 +449,20 @@ CREATE TABLE IF NOT EXISTS user_module_permission (
     KEY idx_user_module_permission_module (module_id, permission),
     CONSTRAINT fk_user_module_permission_user FOREIGN KEY (user_id) REFERENCES app_user(id) ON DELETE CASCADE
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- vCenter 구성요소의 업무명. 클러스터·ESXi·데이터스토어 이름은 vCenter 가 붙인
+-- 것이라(vc_0001, esxi-07) 보고서에서 무엇인지 알 수 없다. 업무에서 쓰는 이름은
+-- 여기에 따로 둔다. 수집 결과는 건드리지 않으므로 다시 수집해도 남는다.
+--   scope: CLUSTER | ESXI | DATASTORE | VCENTER
+CREATE TABLE IF NOT EXISTS vcenter_display_name (
+    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    scope VARCHAR(16) NOT NULL,
+    vcenter_id VARCHAR(64) NOT NULL DEFAULT '',
+    object_key VARCHAR(255) NOT NULL,
+    display_name VARCHAR(255) NOT NULL,
+    note VARCHAR(500),
+    updated_by VARCHAR(128),
+    updated_at VARCHAR(32) NOT NULL,
+    UNIQUE KEY uq_vcenter_display_name (scope, vcenter_id, object_key),
+    KEY idx_vcenter_display_scope (scope, vcenter_id)
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
