@@ -253,6 +253,29 @@ class AssetRepository:
         rows = self.conn.execute("SELECT * FROM collection_run ORDER BY started_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
 
+    def change_events_for_pair(
+        self, snapshot_id: int, previous_snapshot_id: int, limit: int = 2000
+    ) -> list[dict[str, Any]]:
+        """이 스냅샷 짝을 비교해 이미 저장해 둔 변경 이벤트를 읽는다.
+
+        수집할 때 한 번 계산해 저장해 두는데도 화면이 매번 스냅샷 두 개를 다시 읽어
+        파이썬으로 재비교하고 있었다. 저장된 게 있으면 그걸 쓰는 것이 맞다.
+        """
+        rows = self.conn.execute(
+            "SELECT * FROM change_event WHERE snapshot_id=? AND previous_snapshot_id=?"
+            " ORDER BY id LIMIT ?",
+            (snapshot_id, previous_snapshot_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_change_events_for_pair(self, snapshot_id: int, previous_snapshot_id: int) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS total FROM change_event"
+            " WHERE snapshot_id=? AND previous_snapshot_id=?",
+            (snapshot_id, previous_snapshot_id),
+        ).fetchone()
+        return int(row["total"]) if row else 0
+
     def changes(self, source: str | None = None, limit: int = 500, start: str | None = None, end: str | None = None) -> list[dict[str, Any]]:
         clauses = ["1=1"]
         params: list[Any] = []

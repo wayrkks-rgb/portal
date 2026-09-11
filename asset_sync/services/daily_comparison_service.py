@@ -52,7 +52,9 @@ class DailyComparisonService:
                 "events": [],
             }
 
-        pair = DiffService(self.config, self.repo).compare_pair(source, int(current["id"]), int(previous["id"]))
+        raw_events, source_of_events = self._events_for(
+            source, int(current["id"]), int(previous["id"]), limit
+        )
         events: list[dict[str, Any]] = []
         type_counts: Counter[str] = Counter()
         categories: dict[str, set[str]] = {
@@ -62,7 +64,7 @@ class DailyComparisonService:
             "STATUS_CHANGED": set(),
             "COLLECTION_GAP": set(),
         }
-        for raw in pair["events"][:limit]:
+        for raw in raw_events:
             # 화면용 표현(라벨·요약)을 여기서 붙인다. 코드값과 원본 JSON 을 그대로
             # 내보내면 표가 읽을 수 없게 된다.
             item = present(raw)
@@ -88,8 +90,24 @@ class DailyComparisonService:
             },
             "counts": {key: len(value) for key, value in categories.items()},
             "event_type_counts": dict(type_counts),
+            "events_from": source_of_events,
             "events": events,
         }
+
+    def _events_for(
+        self, source: str, snapshot_id: int, previous_snapshot_id: int, limit: int
+    ) -> tuple[list[dict[str, Any]], str]:
+        """변경 이벤트를 가져온다. 저장된 것이 있으면 다시 계산하지 않는다.
+
+        수집할 때 같은 짝을 이미 비교해 저장해 둔다. 그런데도 화면을 열 때마다
+        스냅샷 두 개를 전부 읽어 파이썬으로 재비교하면, 자산이 늘수록 그 시간이
+        그대로 대기시간이 된다. 저장된 것이 없을 때만(예: 전일과 비교하는 첫 화면,
+        수집 당시 이벤트 생성을 보류한 경우) 계산한다.
+        """
+        if self.repo.count_change_events_for_pair(snapshot_id, previous_snapshot_id):
+            return self.repo.change_events_for_pair(snapshot_id, previous_snapshot_id, limit), "STORED"
+        pair = DiffService(self.config, self.repo).compare_pair(source, snapshot_id, previous_snapshot_id)
+        return pair["events"][:limit], "RECOMPUTED"
 
     @staticmethod
     def _category(source: str, event_type: str) -> str | None:
