@@ -116,6 +116,12 @@ itsm:
   - CM_REG_DTTM
 vcenter:
   collection_mode: POWERCLI
+  # 통합기를 동시에 몇 대씩 수집할지. 대기시간의 대부분이 PowerCLI 모듈 로딩과
+  # vCenter 응답 기다림이라, 동시에 돌리면 거의 한 대 시간에 끝난다.
+  # PowerShell 프로세스 하나가 수백 MB 를 쓰므로 WAS 메모리를 보고 정한다. 1 = 순차.
+  parallel_collections: 4
+  # BULK: Get-View 로 한 번에 받는다(권장). COMPAT: 예전 방식(VM 하나당 왕복).
+  collect_mode: BULK
   powershell_path: powershell.exe
   script_path: scripts/collect_vcenter_inventory.ps1
   incoming_dir: data/incoming/vcenter

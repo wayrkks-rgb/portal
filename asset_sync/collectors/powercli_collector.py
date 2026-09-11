@@ -7,6 +7,7 @@ import shutil
 import socket
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -104,6 +105,9 @@ class PowerCLICollector:
                 "VCENTER_PASSWORD": password,
                 "VCENTER_IGNORE_CERT": "true" if bool(resolved.get("bypass_ssl_check", False)) else "false",
                 "VCENTER_OUTPUT_JSON": str(output_json),
+                # BULK(기본)은 Get-View 로 한 번에 받는다. 새 방식이 환경에 맞지 않으면
+                # 설정에서 COMPAT 으로 바꿔 예전 방식으로 돌릴 수 있다.
+                "VCENTER_COLLECT_MODE": str(self.config.rvtools.get("collect_mode", "BULK")).upper(),
             }
         )
         return env
@@ -245,11 +249,62 @@ class PowerCLICollector:
                 time.sleep(3)
         return {"id": vc_id, "name": name, "status": "FAILED", "stage": self._classify_failure_stage(last_error), "network": network, "error": last_error, "returncode": None if proc is None else proc.returncode}
 
+    def _parallel_limit(self, count: int) -> int:
+        """동시에 수집할 통합기 수.
+
+        한 대씩 순서대로 하면 통합기가 늘어나는 만큼 그대로 늘어난다. 대기시간의
+        대부분이 PowerCLI 모듈 로딩과 vCenter 응답 기다림이라, 동시에 돌리면
+        거의 한 대 시간에 끝난다.
+
+        다만 무제한으로 띄우면 WAS 메모리와 vCenter 쪽 부담이 커진다. PowerShell
+        프로세스 하나가 수백 MB 를 쓰므로 기본을 4 로 두고 설정으로 바꿀 수 있게 한다.
+        1 로 두면 예전처럼 순서대로 돈다.
+        """
+        raw = self.config.rvtools.get("parallel_collections", 4)
+        # 값이 없으면 기본값, 숫자가 아니면 기본값. 0 이나 음수는 '순차' 로 본다
+        # (설정에 0 을 적은 사람은 병렬을 끄고 싶은 것이다).
+        if raw in (None, ""):
+            configured = 4
+        else:
+            try:
+                configured = int(raw)
+            except (TypeError, ValueError):
+                LOGGER.warning("parallel_collections 값이 숫자가 아닙니다(%r). 기본값 4 를 씁니다.", raw)
+                configured = 4
+        return max(1, min(configured, count))
+
+    def _run_all(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        workers = self._parallel_limit(len(entries))
+        if workers <= 1 or len(entries) <= 1:
+            return [self.run_one(entry) for entry in entries]
+
+        LOGGER.info("PowerCLI 수집을 %d대씩 동시에 진행합니다(총 %d대)", workers, len(entries))
+        # 결과 순서는 입력 순서를 따라야 한다. 로그와 화면이 들쑥날쑥하면 읽기 어렵다.
+        results: list[dict[str, Any] | None] = [None] * len(entries)
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="powercli") as pool:
+            futures = {pool.submit(self.run_one, entry): index for index, entry in enumerate(entries)}
+            for future in as_completed(futures):
+                index = futures[future]
+                entry = entries[index]
+                try:
+                    results[index] = future.result()
+                except Exception as exc:  # 한 대가 깨져도 나머지는 살려야 한다.
+                    vc_id = str(entry.get("id") or "UNKNOWN")
+                    LOGGER.exception("PowerCLI 수집 중 예외: vcenter=%s", vc_id)
+                    results[index] = {
+                        "id": vc_id,
+                        "name": str(entry.get("name") or vc_id),
+                        "status": "FAILED",
+                        "stage": "COLLECTOR",
+                        "error": str(exc),
+                    }
+        return [item for item in results if item is not None]
+
     def collect_all(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         enabled = self.enabled_vcenters()
         if not enabled:
             raise PowerCLICollectionError("활성화된 vCenter가 없습니다. 연동정보 관리에서 먼저 등록하세요.")
-        results = [self.run_one(entry) for entry in enabled]
+        results = self._run_all(enabled)
         records: list[dict[str, Any]] = []
         success_scopes: list[str] = []
         failed_scopes: dict[str, str] = {}
