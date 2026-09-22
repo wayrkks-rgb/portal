@@ -121,11 +121,22 @@ function initResourceUsageDates(){
   const s=document.getElementById('resource-start'),e=document.getElementById('resource-end');if(s&&!s.value)s.value=iso(start);if(e&&!e.value)e.value=iso(end);
 }
 function resourceValue(value,suffix=''){return value==null||value===''?'-':`${Number(value).toLocaleString()}${suffix}`;}
+// 1GB 이상은 반올림해 정수로 적는다. ESXi 는 하이퍼바이저 몫을 뺀 값을 알려주므로
+// 1TB 장비가 1023.66GB 로 나온다. 장표에는 1024 로 적어야 한다.
 function memoryGbValue(value){
   if(value==null||value==='')return '-';
   const gb=Number(value)/1024;
   if(!Number.isFinite(gb))return syncEscape(String(value));
-  return `${gb.toLocaleString(undefined,{minimumFractionDigits:0,maximumFractionDigits:2})} GB`;
+  const shown=Math.abs(gb)>=1?Math.round(gb):Number(gb.toFixed(2));
+  return `${shown.toLocaleString()} GB`;
+}
+// 할당률. 100% 를 넘으면 오버커밋이므로 눈에 띄게 한다.
+function allocationValue(value){
+  if(value==null||value==='')return '-';
+  const pct=Number(value);
+  if(!Number.isFinite(pct))return '-';
+  const cls=pct>=100?'text-error':(pct>=80?'text-warning':'');
+  return `<span class="${cls}">${pct.toLocaleString()}%</span>`;
 }
 function memoryChangeValue(field,eventType,value){
   const isMemory=String(eventType||'')==='RV_MEMORY_CHANGED'||String(field||'').toUpperCase().includes('MEMORY')||String(field||'').toUpperCase().includes('MEM');
@@ -154,9 +165,11 @@ function renderResourceFilters(filters){
   [['resource-vcenter',filters.vcenters||[]],['resource-cluster',filters.clusters||[]],['resource-host',filters.hosts||[]]].forEach(([id,values])=>{const el=document.getElementById(id),current=el.value;el.innerHTML='<option value="">전체</option>'+values.map(v=>`<option value="${syncEscape(v)}">${syncEscape(v)}</option>`).join('');if(values.includes(current))el.value=current;});
 }
 function renderResourceUsage(data){
-  const sum=data.summary||{};document.getElementById('resource-host-count').textContent=dashboardNumber(sum.host_count);document.getElementById('resource-vm-count').textContent=dashboardNumber(sum.vm_count);document.getElementById('resource-scale-count').textContent=dashboardNumber(Number(sum.cpu_changed||0)+Number(sum.memory_changed||0));document.getElementById('resource-vm-change-count').textContent=dashboardNumber(Number(sum.vm_added||0)+Number(sum.vm_removed||0));
-  const hosts=data.hosts||[],vms=data.vms||[],changes=data.changes||[];
-  document.getElementById('resource-host-body').innerHTML=hosts.length?hosts.map(r=>`<tr onclick="selectResourceHost('${String(r.esxi_host||'').replace(/'/g,"\'")}')" style="cursor:pointer"><td>${syncEscape(r.service_name||'-')}</td><td>${syncEscape(r.vcenter_display_name||r.vcenter_id||'-')}</td><td>${resourceName(r.cluster_display_name,r.cluster_name)}</td><td><strong>${resourceName(r.esxi_display_name,r.esxi_host)}</strong></td><td>${dashboardNumber(r.vm_count)}</td><td>${resourceValue(r.allocated_cpu_cores,' Core')}</td><td>${memoryGbValue(r.allocated_memory_mb)}</td><td>${resourceValue(r.cpu_max_pct,'%')}</td><td>${resourceValue(r.cpu_avg_pct,'%')}</td><td>${resourceValue(r.mem_max_pct,'%')}</td><td>${resourceValue(r.mem_avg_pct,'%')}</td></tr>`).join(''):'<tr><td colspan="11" style="text-align:center">수집된 통합기 자원사용률이 없습니다.</td></tr>';
+  const sum=data.summary||{};document.getElementById('resource-host-count').textContent=dashboardNumber(sum.cluster_count!=null?sum.cluster_count:sum.host_count);document.getElementById('resource-vm-count').textContent=dashboardNumber(sum.vm_count);document.getElementById('resource-scale-count').textContent=dashboardNumber(Number(sum.cpu_changed||0)+Number(sum.memory_changed||0));document.getElementById('resource-vm-change-count').textContent=dashboardNumber(Number(sum.vm_added||0)+Number(sum.vm_removed||0));
+  const hosts=data.hosts||[],clusters=data.clusters||[],vms=data.vms||[],changes=data.changes||[];
+  const clusterBody=document.getElementById('resource-cluster-body');
+  if(clusterBody)clusterBody.innerHTML=clusters.length?clusters.map(r=>`<tr><td>${syncEscape(r.service_name||'-')}</td><td>${syncEscape(r.vcenter_display_name||r.vcenter_id||'-')}</td><td><strong>${resourceName(r.cluster_display_name,r.cluster_name)}</strong></td><td>${dashboardNumber(r.host_count)}</td><td>${dashboardNumber(r.vm_count)}</td><td>${resourceValue(r.allocated_cpu_cores,' Core')}</td><td>${memoryGbValue(r.allocated_memory_mb)}</td><td>${resourceValue(r.assigned_cpu_cores,' Core')}</td><td>${memoryGbValue(r.assigned_memory_mb)}</td><td>${allocationValue(r.cpu_alloc_pct)}</td><td>${allocationValue(r.mem_alloc_pct)}</td><td>${resourceValue(r.cpu_max_pct,'%')}</td><td>${resourceValue(r.cpu_avg_pct,'%')}</td><td>${resourceValue(r.mem_max_pct,'%')}</td><td>${resourceValue(r.mem_avg_pct,'%')}</td></tr>`).join(''):'<tr><td colspan="15" style="text-align:center">수집된 통합기 자원사용률이 없습니다.</td></tr>';
+  document.getElementById('resource-host-body').innerHTML=hosts.length?hosts.map(r=>`<tr onclick="selectResourceHost('${String(r.esxi_host||'').replace(/'/g,"\'")}')" style="cursor:pointer"><td>${syncEscape(r.service_name||'-')}</td><td>${syncEscape(r.vcenter_display_name||r.vcenter_id||'-')}</td><td>${resourceName(r.cluster_display_name,r.cluster_name)}</td><td><strong>${resourceName(r.esxi_display_name,r.esxi_host)}</strong></td><td>${dashboardNumber(r.vm_count)}</td><td>${resourceValue(r.allocated_cpu_cores,' Core')}</td><td>${memoryGbValue(r.allocated_memory_mb)}</td><td>${resourceValue(r.assigned_cpu_cores,' Core')}</td><td>${memoryGbValue(r.assigned_memory_mb)}</td><td>${allocationValue(r.cpu_alloc_pct)}</td><td>${allocationValue(r.mem_alloc_pct)}</td><td>${resourceValue(r.cpu_max_pct,'%')}</td><td>${resourceValue(r.cpu_avg_pct,'%')}</td><td>${resourceValue(r.mem_max_pct,'%')}</td><td>${resourceValue(r.mem_avg_pct,'%')}</td></tr>`).join(''):'<tr><td colspan="15" style="text-align:center">수집된 ESXi 자원사용률이 없습니다.</td></tr>';
   document.getElementById('resource-vm-body').innerHTML=vms.length?vms.map(r=>`<tr><td>${syncEscape(r.service_name||'-')}</td><td>${syncEscape(r.cluster_name||'-')}</td><td>${syncEscape(r.esxi_host||'-')}</td><td><strong>${syncEscape(r.vm_name||'-')}</strong></td><td>${syncBadge(r.power_state||'-')}</td><td>${resourceValue(r.allocated_cpu_cores,' Core')}</td><td>${memoryGbValue(r.allocated_memory_mb)}</td><td>${resourceValue(r.cpu_max_pct,'%')}</td><td>${resourceValue(r.cpu_avg_pct,'%')}</td><td>${resourceValue(r.mem_max_pct,'%')}</td><td>${resourceValue(r.mem_avg_pct,'%')}</td></tr>`).join(''):'<tr><td colspan="11" style="text-align:center">수집된 VM 자원사용률이 없습니다.</td></tr>';
   const eventName={RV_NEW:'신규 VM',RV_REMOVED:'삭제 VM',RV_CPU_CHANGED:'CPU 변경',RV_MEMORY_CHANGED:'MEM 변경',RV_HOST_CHANGED:'통합기 이동',RV_VCENTER_CHANGED:'vCenter 이동'};
   document.getElementById('resource-change-body').innerHTML=changes.length?changes.map(r=>`<tr><td>${dashboardDateText(r.detected_at)}</td><td>${syncEscape(r.vcenter_id||'-')}</td><td>${syncEscape(r.esxi_host||'-')}</td><td>${syncEscape(r.vm_name||'-')}</td><td>${syncBadge(eventName[r.event_type]||r.event_type)}</td><td>${syncEscape(r.field_name||'-')}</td><td>${memoryChangeValue(r.field_name,r.event_type,r.old_value)}</td><td>${memoryChangeValue(r.field_name,r.event_type,r.new_value)}</td></tr>`).join(''):'<tr><td colspan="8" style="text-align:center">선택 기간의 VM 구성 변경이 없습니다.</td></tr>';

@@ -363,23 +363,105 @@ class VMResourceUsageExportService:
         hosts = self._aggregate(host_rows, ["vcenter_id", "service_name", "cluster_name", "esxi_host"], host=True)
         vms = self._aggregate(vm_rows, ["vcenter_id", "service_name", "vm_uuid", "vm_name"], host=False)
         changes = self._vm_configuration_changes(start_day, end_day, vcenter_id, esxi_host)
+        # 사용률과 별개로 할당률을 붙인다. 증설 판단은 할당률로 한다.
+        self._apply_allocation(hosts, vms)
+        clusters = self._roll_up_clusters(hosts)
         # vc_0001 · esxi-07 같은 이름으로는 보고서에서 무엇인지 알 수 없다. 업무명이
         # 붙어 있으면 그것을 같이 내려보낸다.
-        self._apply_display_names(hosts, vms, changes)
+        self._apply_display_names(hosts, vms, changes, clusters)
         return {
             "period": {"start": start_day.isoformat(), "end": end_day.isoformat()},
             "hosts": hosts,
+            "clusters": clusters,
             "vms": vms,
             "changes": changes,
             "filters": self._available_filters(),
             "summary": {
-                "host_count": len(hosts), "vm_count": len(vms),
+                "host_count": len(hosts), "vm_count": len(vms), "cluster_count": len(clusters),
                 "cpu_changed": sum(1 for r in changes if r["event_type"] == "RV_CPU_CHANGED"),
                 "memory_changed": sum(1 for r in changes if r["event_type"] == "RV_MEMORY_CHANGED"),
                 "vm_added": sum(1 for r in changes if r["event_type"] == "RV_NEW"),
                 "vm_removed": sum(1 for r in changes if r["event_type"] == "RV_REMOVED"),
             },
         }
+
+    def _apply_allocation(self, hosts: list[dict[str, Any]], vms: list[dict[str, Any]]) -> None:
+        """통합기별 VM 할당량과 할당률을 붙인다.
+
+        사용률(cpu_avg_pct 등)은 '실제로 쓴 양' 이고, 할당률은 'VM 에게 나눠준 양' 이다.
+        둘은 다르다. 메모리 1TB 짜리 통합기에 4GB 씩 10 대를 만들었다면 사용률이 5%
+        라도 할당률은 40/1024 = 3.9% 다. 더 만들 수 있는지는 할당률로만 알 수 있다.
+
+        VM 목록에 없는(NOT_IN_CURRENT_INVENTORY) 행은 이미 지워진 VM 이므로 뺀다.
+        """
+        assigned: dict[tuple[str, str], dict[str, int]] = defaultdict(
+            lambda: {"cpu": 0, "memory_mb": 0, "vm_count": 0}
+        )
+        for vm in vms:
+            if str(vm.get("inventory_status") or "CURRENT") != "CURRENT":
+                continue
+            host = str(vm.get("esxi_host") or "")
+            if not host:
+                continue
+            bucket = assigned[(str(vm.get("vcenter_id") or ""), host)]
+            bucket["cpu"] += int(vm.get("allocated_cpu_cores") or 0)
+            bucket["memory_mb"] += int(vm.get("allocated_memory_mb") or 0)
+            bucket["vm_count"] += 1
+
+        for row in hosts:
+            bucket = assigned.get((str(row.get("vcenter_id") or ""), str(row.get("esxi_host") or "")))
+            cpu = int(bucket["cpu"]) if bucket else 0
+            memory_mb = int(bucket["memory_mb"]) if bucket else 0
+            row.update({
+                "assigned_cpu_cores": cpu,
+                "assigned_memory_mb": memory_mb,
+                "assigned_memory_gb": self._mb_to_gb(memory_mb),
+                "assigned_vm_count": int(bucket["vm_count"]) if bucket else 0,
+                "cpu_alloc_pct": self._ratio(cpu, row.get("allocated_cpu_cores")),
+                "mem_alloc_pct": self._ratio(memory_mb, row.get("allocated_memory_mb")),
+            })
+
+    def _roll_up_clusters(self, hosts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """통합기(클러스터) 단위 합. 통합기 한 대는 ESXi 여러 대의 묶음이다.
+
+        ESXi 한 줄만 봐서는 통합기 전체에 얼마가 남았는지 알 수 없으므로 여기서 묶는다.
+        """
+        grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+        for row in hosts:
+            grouped[(
+                str(row.get("vcenter_id") or ""),
+                str(row.get("service_name") or ""),
+                str(row.get("cluster_name") or ""),
+            )].append(row)
+
+        result: list[dict[str, Any]] = []
+        for (vcenter_id, service_name, cluster_name), members in grouped.items():
+            capacity_cpu = sum(int(m.get("allocated_cpu_cores") or 0) for m in members)
+            capacity_mem = sum(int(m.get("allocated_memory_mb") or 0) for m in members)
+            assigned_cpu = sum(int(m.get("assigned_cpu_cores") or 0) for m in members)
+            assigned_mem = sum(int(m.get("assigned_memory_mb") or 0) for m in members)
+            result.append({
+                "vcenter_id": vcenter_id or None,
+                "service_name": service_name or None,
+                "cluster_name": cluster_name or None,
+                "host_count": len(members),
+                "vm_count": sum(int(m.get("vm_count") or 0) for m in members),
+                "allocated_cpu_cores": capacity_cpu,
+                "allocated_memory_mb": capacity_mem,
+                "allocated_memory_gb": self._mb_to_gb(capacity_mem),
+                "assigned_cpu_cores": assigned_cpu,
+                "assigned_memory_mb": assigned_mem,
+                "assigned_memory_gb": self._mb_to_gb(assigned_mem),
+                "cpu_alloc_pct": self._ratio(assigned_cpu, capacity_cpu),
+                "mem_alloc_pct": self._ratio(assigned_mem, capacity_mem),
+                "cpu_max_pct": self._max(members, "cpu_max_pct"),
+                "cpu_avg_pct": self._weighted_avg(members, "cpu_avg_pct"),
+                "mem_max_pct": self._max(members, "mem_max_pct"),
+                "mem_avg_pct": self._weighted_avg(members, "mem_avg_pct"),
+                "sample_count": sum(int(m.get("sample_count") or 0) for m in members),
+            })
+        result.sort(key=lambda r: (str(r.get("service_name") or ""), str(r.get("cluster_name") or "")))
+        return result
 
     def _apply_display_names(self, *row_groups: list[dict[str, Any]]) -> None:
         """통합기(클러스터)·ESXi 업무명을 각 행에 붙인다.
@@ -407,9 +489,22 @@ class VMResourceUsageExportService:
         self._write_sheet(ws_host, [
             ("서비스명", "service_name"), ("vCenter", "vcenter_id"), ("Cluster", "cluster_name"),
             ("통합기", "esxi_host"), ("VM 대수", "vm_count"), ("실제 CPU Core", "allocated_cpu_cores"),
-            ("실제 Memory GB", "allocated_memory_gb"), ("CPU MAX %", "cpu_max_pct"),
+            ("실제 Memory GB", "allocated_memory_gb"),
+            ("VM 할당 CPU Core", "assigned_cpu_cores"), ("VM 할당 Memory GB", "assigned_memory_gb"),
+            ("CPU 할당률 %", "cpu_alloc_pct"), ("MEM 할당률 %", "mem_alloc_pct"),
+            ("CPU MAX %", "cpu_max_pct"),
             ("CPU AVG %", "cpu_avg_pct"), ("MEM MAX %", "mem_max_pct"), ("MEM AVG %", "mem_avg_pct"),
         ], data["hosts"])
+        ws_cluster = wb.create_sheet("ClusterResourceUsage")
+        self._write_sheet(ws_cluster, [
+            ("서비스명", "service_name"), ("vCenter", "vcenter_id"), ("통합기(Cluster)", "cluster_name"),
+            ("ESXi 대수", "host_count"), ("VM 대수", "vm_count"),
+            ("실제 CPU Core", "allocated_cpu_cores"), ("실제 Memory GB", "allocated_memory_gb"),
+            ("VM 할당 CPU Core", "assigned_cpu_cores"), ("VM 할당 Memory GB", "assigned_memory_gb"),
+            ("CPU 할당률 %", "cpu_alloc_pct"), ("MEM 할당률 %", "mem_alloc_pct"),
+            ("CPU MAX %", "cpu_max_pct"), ("CPU AVG %", "cpu_avg_pct"),
+            ("MEM MAX %", "mem_max_pct"), ("MEM AVG %", "mem_avg_pct"),
+        ], data["clusters"])
         ws_vm = wb.create_sheet("VMsResource")
         self._write_sheet(ws_vm, [
             ("서비스명", "service_name"), ("vCenter", "vcenter_id"), ("Cluster", "cluster_name"),
@@ -470,6 +565,7 @@ class VMResourceUsageExportService:
                 "allocated_cpu_cores": latest.get("allocated_cpu_cores"),
                 "allocated_memory_mb": latest.get("allocated_memory_mb"),
                 "allocated_memory_gb": self._mb_to_gb(latest.get("allocated_memory_mb")),
+                "inventory_status": latest.get("inventory_status"),
                 "cpu_max_pct": self._max(group, "cpu_max_pct"),
                 "cpu_avg_pct": self._weighted_avg(group, "cpu_avg_pct"),
                 "mem_max_pct": self._max(group, "mem_max_pct"),
@@ -581,9 +677,27 @@ class VMResourceUsageExportService:
 
     @staticmethod
     def _mb_to_gb(value: Any) -> float | None:
+        """MB 를 GB 로. 1GB 이상이면 정수로 반올림한다.
+
+        ESXi 는 하이퍼바이저가 쓰는 만큼을 뺀 값을 알려준다. 1TB 짜리 장비가
+        1048234MB = 1023.66GB 로 나오는 식이다. 장표에는 1024 로 적어야 하므로
+        여기서 반올림한다. 512MB 같은 작은 VM 은 0 이 되면 안 되니 소수로 둔다.
+        """
         if value in (None, ""):
             return None
-        return round(float(str(value).replace(",", "").strip()) / 1024, 2)
+        gb = float(str(value).replace(",", "").strip()) / 1024
+        return float(round(gb)) if abs(gb) >= 1 else round(gb, 2)
+
+    @staticmethod
+    def _ratio(assigned: Any, capacity: Any) -> float | None:
+        """할당률(%). 용량을 모르면 비율도 없다 -- 0 으로 적으면 여유가 있다고 읽힌다."""
+        try:
+            total = float(capacity or 0)
+        except (TypeError, ValueError):
+            return None
+        if total <= 0:
+            return None
+        return round(float(assigned or 0) / total * 100, 2)
 
     @staticmethod
     def _write_sheet(ws: Any, columns: list[tuple[str, str]], rows: list[dict[str, Any]]) -> None:
@@ -593,11 +707,13 @@ class VMResourceUsageExportService:
             cell.fill = PatternFill("solid", fgColor="ED7D31")
         for row in rows:
             ws.append([row.get(key) for _, key in columns])
+        # 표시 형식. '0.##' 은 16 을 "16." 으로 보여준다 -- 엑셀이 소수점 자리가
+        # 비어도 점은 찍기 때문이다. General 은 16 을 "16", 0.5 를 "0.5" 로 적는다.
         for index, (_, key) in enumerate(columns, start=1):
-            if key.endswith("_gb"):
+            if key.endswith("_gb") or key.endswith("_pct"):
                 for cell in ws.iter_cols(min_col=index, max_col=index, min_row=2):
                     for item in cell:
-                        item.number_format = '0.##'
+                        item.number_format = "General"
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
         for column in ws.columns:

@@ -15,10 +15,44 @@
     <div id="weekly-alert"></div>
 
     <div class="grid-4 mb-4">
-      <div class="stat-card"><div class="stat-value text-success" id="weekly-created">-</div><div class="stat-label">신규 생성</div></div>
-      <div class="stat-card"><div class="stat-value text-error" id="weekly-removed">-</div><div class="stat-label">삭제</div></div>
-      <div class="stat-card"><div class="stat-value" id="weekly-changed">-</div><div class="stat-label">자원·정보 변경</div></div>
-      <div class="stat-card"><div class="stat-value" id="weekly-net">-</div><div class="stat-label">순증감</div></div>
+      <div class="stat-card clickable-stat" onclick="filterWeekly('created')">
+        <div class="stat-value text-success" id="weekly-created">-</div>
+        <div class="stat-label">신규 생성</div><div class="stat-delta">눌러서 내역 보기</div></div>
+      <div class="stat-card clickable-stat" onclick="filterWeekly('removed')">
+        <div class="stat-value text-error" id="weekly-removed">-</div>
+        <div class="stat-label">삭제</div><div class="stat-delta">눌러서 내역 보기</div></div>
+      <div class="stat-card clickable-stat" onclick="filterWeekly('changed')">
+        <div class="stat-value" id="weekly-changed">-</div>
+        <div class="stat-label">자원·정보 변경</div><div class="stat-delta">눌러서 내역 보기</div></div>
+      <div class="stat-card clickable-stat" onclick="filterWeekly('all')">
+        <div class="stat-value" id="weekly-net">-</div>
+        <div class="stat-label">순증감</div><div class="stat-delta">눌러서 전체 보기</div></div>
+    </div>
+
+    <div class="card">
+      <div class="flex justify-between items-center mb-4">
+        <div class="card-title" style="margin-bottom:0"><span class="icon">📄</span> 주간 변경 내역</div>
+        <div class="flex gap-2 items-center">
+          <select class="form-select" id="weekly-detail-filter" style="width:150px" onchange="renderWeeklyDetail()">
+            <option value="all">전체</option>
+            <option value="created">신규 생성</option>
+            <option value="removed">삭제</option>
+            <option value="changed">자원·정보 변경</option>
+          </select>
+          <select class="form-select" id="weekly-detail-source" style="width:130px" onchange="renderWeeklyDetail()">
+            <option value="">출처 전체</option>
+            <option value="ITSM">ITSM</option>
+            <option value="RVTOOLS">vCenter</option>
+          </select>
+          <input class="form-input" id="weekly-detail-search" style="width:180px" placeholder="자산·항목 검색"
+                 oninput="renderWeeklyDetail()">
+        </div>
+      </div>
+      <div id="weekly-detail-basis" class="text-xs text-muted mb-4"></div>
+      <div class="table-wrap" style="max-height:460px;overflow:auto">
+        <table><thead><tr><th>일시</th><th>출처</th><th>분류</th><th>자산</th><th>항목</th><th>이전</th><th>현재</th></tr></thead>
+        <tbody id="weekly-detail-body"></tbody></table>
+      </div>
     </div>
 
     <div class="grid-2">

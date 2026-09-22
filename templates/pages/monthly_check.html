@@ -30,11 +30,25 @@
     </div>
 
     <div class="tab-panel" id="monthly-panel-integrated">
+      <div id="monthly-integrated-alert"></div>
       <div class="card">
-        <div class="card-title"><span class="icon">🖥️</span> 통합서버 자원사용현황</div>
-        <div class="alert alert-info" style="margin-bottom:0">
-          보고서의 통합기별 자원사용현황을 이 화면으로 옮기는 작업이 진행 중입니다.
-          당장은 <strong>보고서</strong> 메뉴에서 같은 내용을 볼 수 있습니다.
+        <div class="flex justify-between items-center mb-4">
+          <div class="card-title" style="margin-bottom:0"><span class="icon">🖥️</span> 통합서버 자원사용현황</div>
+          <div class="text-xs text-muted" id="monthly-integrated-basis"></div>
+        </div>
+        <div class="text-xs text-muted mb-4">
+          실제 자원은 통합기가 가진 용량, 할당은 그 위 VM 에게 나눠준 양입니다.
+          <strong>할당률</strong>은 할당 ÷ 실제이며, 더 만들 수 있는지는 사용률이 아니라 할당률로 봅니다.
+          <strong>C</strong> 는 CPU Core, <strong>G</strong> 는 Memory GB 입니다.
+        </div>
+        <div class="table-wrap"><table id="monthly-integrated-table"></table></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title"><span class="icon">🔀</span> 통합기별 VM 생성 · 삭제</div>
+        <div class="table-wrap" style="max-height:360px;overflow:auto">
+          <table><thead><tr><th>통합기</th><th>생성</th><th>삭제</th><th>순증감</th><th>VM 명</th></tr></thead>
+          <tbody id="monthly-integrated-moves"></tbody></table>
         </div>
       </div>
     </div>

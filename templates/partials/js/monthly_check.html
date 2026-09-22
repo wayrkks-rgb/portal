@@ -106,13 +106,41 @@ function renderEosl(eosl) {
     `${eosl.criteria.eosl_field} 기준 · ${eosl.criteria.base_year}년 기준 · ${eosl.criteria.no_plan_year} = 계획 없음`;
 }
 
+function monthRange(month) {
+  const now = new Date();
+  const [year, index] = month
+    ? month.split('-').map(Number)
+    : [now.getFullYear(), now.getMonth() + 1];
+  const pad = n => String(n).padStart(2, '0');
+  const last = new Date(year, index, 0);        // 다음 달 0일 = 이번 달 말일
+  const isThisMonth = year === now.getFullYear() && index === now.getMonth() + 1;
+  const end = isThisMonth ? now : last;
+  return {
+    year, month: index,
+    start: `${year}-${pad(index)}-01`,
+    end: `${end.getFullYear()}-${pad(end.getMonth() + 1)}-${pad(end.getDate())}`,
+  };
+}
+
+function previousMonthRange(range) {
+  const previous = new Date(range.year, range.month - 2, 1);
+  return monthRange(`${previous.getFullYear()}-${String(previous.getMonth() + 1).padStart(2, '0')}`);
+}
+
 async function loadMonthlyCheck() {
   const alertEl = document.getElementById('monthly-alert');
   if (!alertEl) return;
   const month = document.getElementById('monthly-month').value;
   alertEl.innerHTML = '<div class="alert alert-info"><span class="loading"></span> 서버 현황 집계 중...</div>';
-  const res = await fetch('/api/asset-sync/server-status' + (month ? `?month=${month}` : ''))
-    .then(r => r.json());
+  // 통합서버 자원사용현황은 다른 표를 쓰므로 따로 받는다. 한쪽이 없어도 다른 쪽은 보인다.
+  loadMonthlyIntegrated(month);
+  let res;
+  try {
+    res = await apiFetch('/api/asset-sync/server-status' + (month ? `?month=${month}` : ''));
+  } catch (error) {
+    alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(error.message)}</div>`;
+    return;
+  }
   if (res.error) {
     alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(res.error)}</div>`;
     return;
@@ -146,5 +174,124 @@ async function loadMonthlyCheck() {
     <td>${syncEscape(item.service_name || '-')}</td>
     <td>${syncEscape(item.location || '-')}</td></tr>`).join('')
     : '<tr><td colspan="5" style="text-align:center" class="text-muted">제외된 자산이 없습니다.</td></tr>';
+}
+
+// ── 통합서버 자원사용현황 ─────────────────────────────────────────────
+// 양식대로 전월과 당월을 한 줄에 놓고 비교한다. 자원은 "128C / 896G" 처럼 한 칸에
+// 적는다. 07시 배치가 쌓아 둔 일별 값을 그대로 쓰므로 여기서 새로 수집하지 않는다.
+const MONTHLY_CLUSTER_KEY = row => `${row.vcenter_id || ''}|${row.cluster_name || ''}`;
+
+function resourcePair(cores, memoryMb) {
+  const core = cores == null ? '-' : `${Number(cores).toLocaleString()}C`;
+  const memory = memoryMb == null ? '-' : `${Math.round(Number(memoryMb) / 1024).toLocaleString()}G`;
+  return `${core} / ${memory}`;
+}
+
+function allocationPair(cpuPct, memPct) {
+  const text = value => value == null ? '-' : `${Number(value).toLocaleString()}%`;
+  const mark = value => value != null && Number(value) >= 100 ? 'text-error'
+    : (value != null && Number(value) >= 80 ? 'text-warning' : '');
+  return `<span class="${mark(cpuPct)}">${text(cpuPct)}</span> / <span class="${mark(memPct)}">${text(memPct)}</span>`;
+}
+
+function clusterLabel(row) {
+  const name = row.cluster_display_name || row.cluster_name || '(클러스터 없음)';
+  const raw = row.cluster_name || '';
+  return name === raw ? syncEscape(name)
+    : `${syncEscape(name)}<div class="text-xs text-muted mono">${syncEscape(raw)}</div>`;
+}
+
+function renderMonthlyIntegrated(current, previous, range) {
+  const table = document.getElementById('monthly-integrated-table');
+  const rows = current.clusters || [];
+  const before = new Map((previous && previous.clusters || []).map(r => [MONTHLY_CLUSTER_KEY(r), r]));
+
+  table.innerHTML = `<thead>
+    <tr>
+      <th rowspan="2">통합기</th><th rowspan="2">서비스명</th>
+      <th colspan="2">VM 대수</th>
+      <th rowspan="2">실제 자원<div class="text-xs text-muted">C / G</div></th>
+      <th colspan="2">VM 할당 (C / G)</th>
+      <th colspan="2">할당률 (CPU / MEM)</th>
+      <th rowspan="2">사용률 MAX<div class="text-xs text-muted">CPU / MEM</div></th>
+      <th rowspan="2">사용률 AVG<div class="text-xs text-muted">CPU / MEM</div></th>
+    </tr>
+    <tr><th>전월</th><th>당월</th><th>전월</th><th>당월</th><th>전월</th><th>당월</th></tr>
+  </thead><tbody>${
+    rows.length ? rows.map(row => {
+      const old = before.get(MONTHLY_CLUSTER_KEY(row)) || {};
+      const vmDelta = Number(row.vm_count || 0) - Number(old.vm_count || 0);
+      return `<tr>
+        <td><strong>${clusterLabel(row)}</strong></td>
+        <td>${syncEscape(row.service_name || '-')}</td>
+        <td class="text-muted">${old.vm_count == null ? '-' : Number(old.vm_count).toLocaleString()}</td>
+        <td><strong>${Number(row.vm_count || 0).toLocaleString()}</strong>${deltaText(vmDelta)}</td>
+        <td>${resourcePair(row.allocated_cpu_cores, row.allocated_memory_mb)}</td>
+        <td class="text-muted">${old.assigned_cpu_cores == null ? '-' : resourcePair(old.assigned_cpu_cores, old.assigned_memory_mb)}</td>
+        <td><strong>${resourcePair(row.assigned_cpu_cores, row.assigned_memory_mb)}</strong></td>
+        <td class="text-muted">${old.cpu_alloc_pct == null && old.mem_alloc_pct == null ? '-' : allocationPair(old.cpu_alloc_pct, old.mem_alloc_pct)}</td>
+        <td>${allocationPair(row.cpu_alloc_pct, row.mem_alloc_pct)}</td>
+        <td>${row.cpu_max_pct == null ? '-' : Number(row.cpu_max_pct).toLocaleString() + '%'} / ${row.mem_max_pct == null ? '-' : Number(row.mem_max_pct).toLocaleString() + '%'}</td>
+        <td>${row.cpu_avg_pct == null ? '-' : Number(row.cpu_avg_pct).toLocaleString() + '%'} / ${row.mem_avg_pct == null ? '-' : Number(row.mem_avg_pct).toLocaleString() + '%'}</td>
+      </tr>`;
+    }).join('')
+    : '<tr><td colspan="11" style="text-align:center" class="text-muted">수집된 통합기 자원사용률이 없습니다. 07시 자동배치가 한 번은 돌아야 합니다.</td></tr>'
+  }</tbody>`;
+
+  document.getElementById('monthly-integrated-basis').textContent =
+    `${range.start} ~ ${range.end} 집계 · 통합기 ${rows.length.toLocaleString()}개`
+    + (before.size ? ` · 전월 ${before.size.toLocaleString()}개와 비교` : ' · 비교할 전월 없음');
+}
+
+function renderMonthlyIntegratedMoves(current) {
+  const body = document.getElementById('monthly-integrated-moves');
+  // 변경 이력은 ESXi 이름만 갖고 있다. 통합기(클러스터) 이름은 통합기 표에서 찾는다.
+  const clusterOf = new Map((current.hosts || []).map(h => [
+    `${h.vcenter_id || ''}|${h.esxi_host || ''}`,
+    h.cluster_display_name || h.cluster_name || h.esxi_host || '-',
+  ]));
+  const moves = new Map();
+  (current.changes || []).forEach(change => {
+    if (change.event_type !== 'RV_NEW' && change.event_type !== 'RV_REMOVED') return;
+    const name = clusterOf.get(`${change.vcenter_id || ''}|${change.esxi_host || ''}`)
+      || change.esxi_host || '(통합기 미상)';
+    if (!moves.has(name)) moves.set(name, {created: [], removed: []});
+    moves.get(name)[change.event_type === 'RV_NEW' ? 'created' : 'removed'].push(change.vm_name || change.asset_key);
+  });
+
+  const rows = [...moves.entries()].sort((a, b) =>
+    (b[1].created.length + b[1].removed.length) - (a[1].created.length + a[1].removed.length));
+  body.innerHTML = rows.length ? rows.map(([name, item]) => {
+    const net = item.created.length - item.removed.length;
+    const names = [...item.created.map(n => `+${n}`), ...item.removed.map(n => `-${n}`)];
+    return `<tr>
+      <td><strong>${syncEscape(name)}</strong></td>
+      <td class="text-success">${item.created.length.toLocaleString()}</td>
+      <td class="text-error">${item.removed.length.toLocaleString()}</td>
+      <td><strong>${net > 0 ? '+' : ''}${net.toLocaleString()}</strong></td>
+      <td class="text-xs">${syncEscape(names.slice(0, 20).join(', '))}${names.length > 20 ? ` 외 ${names.length - 20}건` : ''}</td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="5" style="text-align:center" class="text-muted">이 달에 생성·삭제된 VM 이 없습니다.</td></tr>';
+}
+
+async function loadMonthlyIntegrated(month) {
+  const alertEl = document.getElementById('monthly-integrated-alert');
+  if (!alertEl) return;
+  const range = monthRange(month);
+  const previousRange = previousMonthRange(range);
+  alertEl.innerHTML = '<div class="alert alert-info"><span class="loading"></span> 통합서버 자원사용현황 집계 중...</div>';
+  try {
+    const url = r => `/api/asset-sync/resource-usage?start=${r.start}&end=${r.end}`;
+    // 전월이 없어도 당월은 보여야 한다.
+    const [current, previous] = await Promise.all([
+      apiFetch(url(range)),
+      apiFetch(url(previousRange)).catch(() => null),
+    ]);
+    alertEl.innerHTML = '';
+    renderMonthlyIntegrated(current, previous, range);
+    renderMonthlyIntegratedMoves(current);
+  } catch (error) {
+    alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(error.message)}</div>`;
+  }
 }
 </script>
