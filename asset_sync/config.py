@@ -26,6 +26,7 @@ class AppConfig:
     retention: dict[str, Any] = field(default_factory=dict)
     security: dict[str, Any] = field(default_factory=dict)
     scheduler: dict[str, Any] = field(default_factory=dict)
+    hmc: dict[str, Any] = field(default_factory=dict)
     server_status: dict[str, Any] = field(default_factory=dict)
 
     def resolve(self, value: str | Path) -> Path:
@@ -273,6 +274,15 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             "daily_time": "07:00",
             "task_name": "AssetDailyCollection",
         },
+        # AIX HMC. vCenter 와 달리 별도 프로그램 없이 HTTPS 로 직접 읽는다.
+        # 계정·비밀번호는 config/app_config.local.yaml 에만 저장한다.
+        "hmc": {
+            "enabled": False,
+            "port": 12443,
+            "timeout_seconds": 30,
+            "verify_tls": False,
+            "endpoints": [],
+        },
         # 월간 점검의 서버 현황·EOSL 집계 기준. 대수가 ITSM 총 건수와 다를 때
         # 어느 쪽이 틀렸는지 따질 수 있어야 하므로 기준을 설정으로 드러낸다.
         "server_status": {
@@ -368,5 +378,6 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         retention=merged["retention"],
         security=merged["security"],
         scheduler=merged["scheduler"],
+        hmc=merged["hmc"],
         server_status=merged["server_status"],
     )

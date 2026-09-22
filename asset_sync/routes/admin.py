@@ -11,6 +11,7 @@ from flask import Blueprint, jsonify, render_template, request, session
 
 from ..collectors import (
     FILTER_OPERATORS,
+    HMCCollector,
     OracleCatalogBrowser,
     OracleCatalogError,
     OracleConnectionError,
@@ -93,6 +94,105 @@ def create_admin_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprin
         except OSError as exc:
             LOGGER.exception("vCenter settings save failed")
             return jsonify({"success": False, "stage": "SAVE", "error": f"vCenter 설정 저장 실패: {exc}"}), 500
+
+    # ── AIX HMC ────────────────────────────────────────────────────────
+    # vCenter 는 PowerCLI 라는 별도 프로그램을 거치지만 HMC 는 HTTPS 하나로 끝난다.
+    # 그래서 설치할 것도, 실행 경로 설정도 없고 접속 정보만 받는다.
+    @bp.route("/api/asset-sync/admin/settings/hmc", methods=["PUT"])
+    @admin_required
+    def save_hmc_settings() -> Any:
+        try:
+            payload = request.get_json(silent=True) or {}
+            saved = settings_store.save_hmc(payload)
+            return jsonify({
+                "success": True,
+                "message": "AIX HMC 설정을 저장했습니다.",
+                "hmc": saved["hmc"],
+            })
+        except (SettingsValidationError, ValueError, TypeError) as exc:
+            return jsonify({"success": False, "stage": "VALIDATION", "error": str(exc)}), 400
+        except OSError as exc:
+            LOGGER.exception("HMC settings save failed")
+            return jsonify({"success": False, "stage": "SAVE", "error": f"HMC 설정 저장 실패: {exc}"}), 500
+
+    def _hmc_test_config(entries: list[dict[str, Any]]) -> AppConfig:
+        """저장 전에도 테스트할 수 있어야 한다. 화면에서 온 값으로 설정을 임시로 만든다.
+
+        비밀번호를 비워 보냈으면 이미 저장된 값을 쓴다. 화면은 비밀번호를 돌려받지
+        못하므로, 주소만 고쳐 테스트할 때 빈 비밀번호로 시도하면 안 된다.
+        """
+        current = load_config()
+        saved = {
+            str(item.get("id") or ""): item
+            for item in (current.hmc.get("endpoints") or [])
+        }
+        merged = []
+        for entry in entries:
+            item = dict(entry)
+            if not str(item.get("password") or ""):
+                item["password"] = str(saved.get(str(item.get("id") or ""), {}).get("password", ""))
+            merged.append(item)
+        test_cfg = copy.deepcopy(current)
+        test_cfg.hmc = dict(current.hmc)
+        test_cfg.hmc["endpoints"] = merged
+        return test_cfg
+
+    @bp.route("/api/asset-sync/admin/test/hmc", methods=["POST"])
+    @admin_required
+    def test_hmc() -> Any:
+        payload = request.get_json(silent=True) or {}
+        try:
+            submitted = payload.get("entry")
+            if isinstance(submitted, dict):
+                return jsonify(HMCCollector(_hmc_test_config([submitted])).test_one(submitted))
+            current_cfg = load_config()
+            hmc_id = str(payload.get("hmc_id") or "")
+            entries = current_cfg.hmc.get("endpoints") or []
+            entry = next((item for item in entries if str(item.get("id")) == hmc_id), None) if hmc_id else None
+            if entry is None:
+                entry = next((item for item in entries if bool(item.get("enabled", True))), None)
+            if entry is None:
+                raise RuntimeError("테스트할 활성 HMC 가 없습니다.")
+            return jsonify(HMCCollector(current_cfg).test_one(entry))
+        except Exception as exc:
+            return jsonify({"status": "FAILED", "stage": "SERVER", "error": str(exc)}), 500
+
+    @bp.route("/api/asset-sync/admin/test/hmc/all", methods=["POST"])
+    @admin_required
+    def test_all_hmc() -> Any:
+        payload = request.get_json(silent=True) or {}
+        try:
+            submitted = payload.get("entries")
+            if isinstance(submitted, list):
+                entries = [dict(i) for i in submitted if isinstance(i, dict) and bool(i.get("enabled", True))]
+                if not entries:
+                    return jsonify({"status": "FAILED", "error": "테스트할 활성 HMC 가 없습니다."}), 400
+                return jsonify(HMCCollector(_hmc_test_config(entries)).test_all())
+            return jsonify(HMCCollector(load_config()).test_all())
+        except Exception as exc:
+            return jsonify({"status": "FAILED", "error": str(exc)}), 500
+
+    @bp.route("/api/asset-sync/admin/hmc/preview", methods=["POST"])
+    @admin_required
+    def preview_hmc() -> Any:
+        """받아올 값을 먼저 보여 준다. 매핑이 맞는지는 실제 값으로만 확인된다."""
+        payload = request.get_json(silent=True) or {}
+        try:
+            entry = payload.get("entry")
+            if isinstance(entry, dict):
+                collector = HMCCollector(_hmc_test_config([entry]))
+                return jsonify(collector.collect_one(entry))
+            current_cfg = load_config()
+            hmc_id = str(payload.get("hmc_id") or "")
+            entries = current_cfg.hmc.get("endpoints") or []
+            target = next((i for i in entries if str(i.get("id")) == hmc_id), None) if hmc_id else None
+            if target is None:
+                target = next((i for i in entries if bool(i.get("enabled", True))), None)
+            if target is None:
+                raise RuntimeError("등록된 활성 HMC 가 없습니다.")
+            return jsonify(HMCCollector(current_cfg).collect_one(target))
+        except Exception as exc:
+            return jsonify({"status": "FAILED", "error": str(exc)}), 500
 
     @bp.route("/api/asset-sync/admin/settings/runtime", methods=["PUT"])
     @admin_required

@@ -155,6 +155,17 @@ vcenter:
     timeout_seconds: 3600
     output_dir: data/archive/vcenter_resource
     source_format: JSON
+hmc:
+  # AIX HMC. vCenter 와 달리 설치할 프로그램이 없다. HTTPS 로 직접 읽는다.
+  # 접속 정보는 관리 → 연계 설정 화면에서 넣는다. 비밀번호는 여기가 아니라
+  # config/app_config.local.yaml 에 저장된다.
+  enabled: false
+  # REST API 포트. 웹 콘솔(443)·SSH(22) 와 다르다.
+  port: 12443
+  timeout_seconds: 30
+  # HMC 는 보통 자체 서명 인증서를 쓴다. 사내 CA 로 바꿨으면 true.
+  verify_tls: false
+  endpoints: []
 matching:
   use_identity_map_first: true
   auto_remember_exact_match: true

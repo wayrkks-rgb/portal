@@ -1,3 +1,5 @@
+from .hmc_client import HMCClient, HMCError
+from .hmc_collector import HMCCollector
 from .itsm_file_collector import ITSMFileCollector
 from .oracle_catalog import OracleCatalogBrowser, OracleCatalogError
 from .oracle_connection import OracleConnectionError, oracle_connection
@@ -8,6 +10,9 @@ from .powercli_resource_collector import PowerCLIResourceUsageCollector
 from .synthetic_collectors import SyntheticITSMCollector, SyntheticRVToolsCollector
 
 __all__ = [
+    "HMCClient",
+    "HMCCollector",
+    "HMCError",
     "ITSMFileCollector",
     "OracleCatalogBrowser",
     "OracleCatalogError",

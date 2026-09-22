@@ -244,12 +244,75 @@ class LocalSettingsStore:
                 "daily_time": str(cfg.scheduler.get("daily_time", "07:00")),
                 "task_name": str(cfg.scheduler.get("task_name", "AssetDailyCollection")),
             },
+            "hmc": {
+                "enabled": bool(cfg.hmc.get("enabled", False)),
+                "port": int(cfg.hmc.get("port", 12443)),
+                "timeout_seconds": int(cfg.hmc.get("timeout_seconds", 30)),
+                "verify_tls": bool(cfg.hmc.get("verify_tls", False)),
+                "endpoints": [self._public_hmc(item) for item in cfg.hmc.get("endpoints", []) or []],
+            },
             "files": {
                 "app_local_exists": self.app_local_path.exists(),
                 "vcenters_local_exists": self.vcenters_local_path.exists(),
                 "env_exists": self.env_path.exists(),
             },
         }
+
+    @staticmethod
+    def _public_hmc(item: dict[str, Any]) -> dict[str, Any]:
+        """비밀번호는 내보내지 않는다. 등록됐는지 여부만 알려준다."""
+        result = {k: v for k, v in (item or {}).items() if k != "password"}
+        result["password_configured"] = bool((item or {}).get("password"))
+        return result
+
+    def save_hmc(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """AIX HMC 접속 정보만 저장한다. Oracle·vCenter 설정은 건드리지 않는다.
+
+        비밀번호를 비워서 보내면 이미 저장된 값을 그대로 둔다. 화면이 비밀번호를
+        되돌려 받지 못하므로, 다른 항목만 고칠 때 비밀번호가 지워지면 안 된다.
+        """
+        from .collectors.hmc_collector import normalize_endpoint
+
+        section = dict(payload.get("hmc") or {})
+        submitted = list(section.pop("endpoints", payload.get("endpoints", [])) or [])
+        current = load_config().hmc or {}
+        existing = {
+            str(item.get("id") or ""): item
+            for item in current.get("endpoints", []) or []
+            if str(item.get("id") or "").strip()
+        }
+
+        seen: set[str] = set()
+        endpoints: list[dict[str, Any]] = []
+        for raw in submitted:
+            if not isinstance(raw, Mapping):
+                continue
+            entry = normalize_endpoint(dict(raw))
+            if not entry["id"]:
+                raise SettingsValidationError("HMC 식별자(id)를 입력하세요.")
+            if entry["id"] in seen:
+                raise SettingsValidationError(f"HMC 식별자가 중복됩니다: {entry['id']}")
+            if not entry["host"]:
+                raise SettingsValidationError(f"{entry['id']}: HMC 주소를 입력하세요.")
+            if not entry["username"]:
+                raise SettingsValidationError(f"{entry['id']}: 조회 계정을 입력하세요.")
+            if not entry["password"]:
+                entry["password"] = str(existing.get(entry["id"], {}).get("password", ""))
+            if not entry["password"]:
+                raise SettingsValidationError(f"{entry['id']}: 비밀번호를 입력하세요.")
+            seen.add(entry["id"])
+            endpoints.append(entry)
+
+        local_yaml = _read_yaml_dict(self.app_local_path)
+        local_yaml["hmc"] = {
+            "enabled": bool(section.get("enabled", current.get("enabled", False))),
+            "port": int(section.get("port", current.get("port", 12443)) or 12443),
+            "timeout_seconds": int(section.get("timeout_seconds", current.get("timeout_seconds", 30)) or 30),
+            "verify_tls": bool(section.get("verify_tls", current.get("verify_tls", False))),
+            "endpoints": endpoints,
+        }
+        _atomic_write(self.app_local_path, yaml.safe_dump(local_yaml, allow_unicode=True, sort_keys=False))
+        return self.public_settings()
 
     @staticmethod
     def _public_vcenter(item: dict[str, Any]) -> dict[str, Any]:
