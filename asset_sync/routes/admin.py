@@ -28,6 +28,7 @@ from ..config import AppConfig, load_config
 from ..db.manager import DatabaseManager
 from ..repositories import AssetRepository
 from ..services import DISPLAY_NAME_SCOPES, DisplayNameError, DisplayNameService
+from ..services import asset_scope
 from ..settings_store import LocalSettingsStore, SettingsValidationError
 from ..web_common import admin_required
 
@@ -94,6 +95,51 @@ def create_admin_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprin
         except OSError as exc:
             LOGGER.exception("vCenter settings save failed")
             return jsonify({"success": False, "stage": "SAVE", "error": f"vCenter 설정 저장 실패: {exc}"}), 500
+
+    # ── 자산 제외 ───────────────────────────────────────────────────────
+    # ITSM·vCenter 가 주는 것을 전부 세면 실물 서버가 아닌 것까지 들어간다. 어느
+    # 화면이든 같은 수가 나와야 하므로 판단은 asset_scope 한 곳에만 둔다.
+    @bp.route("/api/asset-sync/admin/asset-exclusions", methods=["GET", "POST"])
+    @admin_required
+    def asset_exclusions() -> Any:
+        with manager.connect() as conn:
+            repo = AssetRepository(conn)
+            if request.method == "GET":
+                source = request.args.get("source")
+                rules = asset_scope.list_rules(repo, source)
+                return jsonify({
+                    "rules": rules,
+                    "counts": {
+                        mode: sum(1 for r in rules if str(r.get("mode")) == mode)
+                        for mode in asset_scope.MODES
+                    },
+                    "reason_labels": asset_scope.REASON_LABELS,
+                })
+
+            payload = request.get_json(silent=True) or {}
+            user = str(session["user"].get("username") or session["user"].get("id") or "")
+            try:
+                changed = asset_scope.save_rules(
+                    repo,
+                    payload.get("source") or "ITSM",
+                    payload.get("items") or [],
+                    mode=payload.get("mode") or "EXCLUDE",
+                    reason=str(payload.get("reason") or ""),
+                    updated_by=user,
+                )
+            except asset_scope.AssetScopeError as exc:
+                return jsonify({"success": False, "error": str(exc)}), 400
+            # 누가 무엇을 자산에서 뺐는지는 남아야 한다. 대수가 달라지는 일이다.
+            repo.audit(
+                user, "ASSET_EXCLUSION", "asset_exclusion",
+                str(payload.get("source") or "ITSM"), str(payload.get("reason") or ""),
+                None, {"mode": payload.get("mode"), "count": changed,
+                       "keys": [str(i.get("asset_key") if isinstance(i, dict) else i)
+                                for i in (payload.get("items") or [])][:200]},
+                module_id=MODULE_ID,
+            )
+            conn.commit()
+            return jsonify({"success": True, "changed": changed})
 
     # ── AIX HMC ────────────────────────────────────────────────────────
     # vCenter 는 PowerCLI 라는 별도 프로그램을 거치지만 HMC 는 HTTPS 하나로 끝난다.

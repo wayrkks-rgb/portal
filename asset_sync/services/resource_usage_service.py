@@ -13,8 +13,19 @@ from openpyxl.styles import Font, PatternFill
 from ..collectors.powercli_resource_collector import PowerCLIResourceUsageCollector
 from ..config import AppConfig
 from ..repositories import AssetRepository
+from .change_presenter import present
 from .display_name_service import DisplayNameService
 from ..utils.hashing import canonical_json
+
+#: 변경 유형을 화면 문구로. 코드를 그대로 두면 받은 사람이 읽을 수 없다.
+CHANGE_LABELS = {
+    "RV_NEW": "VM 신규 생성",
+    "RV_REMOVED": "VM 삭제",
+    "RV_CPU_CHANGED": "vCPU 변경",
+    "RV_MEMORY_CHANGED": "메모리 변경",
+    "RV_HOST_CHANGED": "통합기(ESXi) 이동",
+    "RV_VCENTER_CHANGED": "vCenter 이동",
+}
 
 
 class VMResourceUsageExportService:
@@ -515,9 +526,10 @@ class VMResourceUsageExportService:
         ], data["vms"])
         ws_change = wb.create_sheet("VMChangeHistory")
         self._write_sheet(ws_change, [
-            ("변경일시", "detected_at"), ("vCenter", "vcenter_id"), ("통합기", "esxi_host"),
-            ("VM명", "vm_name"), ("변경유형", "event_type"), ("변경필드", "field_name"),
-            ("이전값", "old_value_display"), ("현재값", "new_value_display"),
+            ("변경일시", "detected_at"), ("변경유형", "change_label"), ("VM명", "vm_name"),
+            ("호스트명", "hostname"), ("IP", "primary_ip"), ("OS", "os_family"),
+            ("vCenter", "vcenter_id"), ("통합기", "esxi_host"),
+            ("변경항목", "field_label"), ("이전값", "old_value_display"), ("현재값", "new_value_display"),
         ], self._change_export_rows(data["changes"]))
         wb.save(target)
         wb.close()
@@ -603,13 +615,44 @@ class VMResourceUsageExportService:
                 continue
             if esxi_host and host != esxi_host and event.get("old_value") != esxi_host and event.get("new_value") != esxi_host:
                 continue
-            result.append({
-                "detected_at": event.get("detected_at"), "asset_key": event.get("asset_key"),
-                "vcenter_id": vc, "esxi_host": host, "vm_name": vm.get("vm_name") or event.get("asset_key"),
-                "event_type": event.get("event_type"), "field_name": event.get("field_name"),
-                "old_value": event.get("old_value"), "new_value": event.get("new_value"),
+            # 자산키(vc|uuid) 만 적으면 무엇이 바뀐 건지 읽을 수 없다. 이름·IP·
+            # OS 를 붙이고, 값은 코드·원본 JSON 이 아니라 사람이 읽는 표현으로 바꾼다.
+            row = present({
+                "source": "RVTOOLS",
+                "detected_at": event.get("detected_at"),
+                "asset_key": event.get("asset_key"),
+                "event_type": event.get("event_type"),
+                "field_name": event.get("field_name"),
+                "old_value": event.get("old_value"),
+                "new_value": event.get("new_value"),
             })
+            fallback = self._record_from_event(event)
+            row.update({
+                "vcenter_id": vc or str(fallback.get("vcenter") or ""),
+                "esxi_host": host or str(fallback.get("esxi_host") or ""),
+                "vm_name": vm.get("vm_name") or fallback.get("vm_name") or event.get("asset_key"),
+                "hostname": vm.get("normalized_hostname") or fallback.get("normalized_hostname"),
+                "primary_ip": vm.get("primary_ip") or fallback.get("primary_ip"),
+                "os_family": vm.get("os_family") or fallback.get("os_family"),
+                "power_state": vm.get("power_state") or fallback.get("power_state"),
+                "change_label": CHANGE_LABELS.get(str(event.get("event_type")), str(event.get("event_type") or "")),
+            })
+            result.append(row)
         return result
+
+    @staticmethod
+    def _record_from_event(event: dict[str, Any]) -> dict[str, Any]:
+        """삭제된 VM 은 지금 스냅샷에 없다. 이벤트가 들고 있는 원본에서 찾는다."""
+        for side in ("new_value", "old_value"):
+            text = event.get(side)
+            if isinstance(text, str) and text.strip().startswith("{"):
+                try:
+                    parsed = json.loads(text)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(parsed, dict):
+                    return parsed
+        return {}
 
     def _distinct(self, column: str, where: str = "") -> list[str]:
         # 컬럼명으로 읽는다. MySQL 커서는 dict 를 돌려주므로 위치 색인은 쓸 수 없다.
@@ -650,16 +693,24 @@ class VMResourceUsageExportService:
 
     @classmethod
     def _change_export_rows(cls, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """엑셀에 쓸 모양으로. 값은 이미 present() 가 읽을 수 있게 만들어 두었다.
+
+        생성·삭제 이벤트는 값 자리에 원본 전체(JSON)가 들어 있다. 그걸 그대로
+        셀에 넣으면 무엇이 바뀐 건지 알 수 없으므로 요약 문장을 쓴다.
+        """
         result: list[dict[str, Any]] = []
         for source in rows:
             row = dict(source)
+            row.setdefault("change_label", row.get("event_type"))
+            row.setdefault("field_label", row.get("field_name") or "")
             is_memory = row.get("event_type") == "RV_MEMORY_CHANGED" or "MEMORY" in str(row.get("field_name") or "").upper()
-            if is_memory:
-                row["old_value_display"] = cls._memory_change_display(row.get("old_value"))
-                row["new_value_display"] = cls._memory_change_display(row.get("new_value"))
-            else:
-                row["old_value_display"] = row.get("old_value")
-                row["new_value_display"] = row.get("new_value")
+            for side in ("old", "new"):
+                display = row.get(f"{side}_display")
+                if is_memory and not str(display or "").endswith("GB"):
+                    display = cls._memory_change_display(row.get(f"{side}_value"))
+                if display in (None, ""):
+                    display = row.get(f"{side}_value")
+                row[f"{side}_value_display"] = display
             result.append(row)
         return result
 

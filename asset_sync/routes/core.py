@@ -19,6 +19,8 @@ from ..services import (
     IntegratedDashboardService, PeriodService, ReconciliationExceptionService,
     ReconciliationService, ServerStatusService, VMResourceUsageExportService, present_all,
 )
+from ..services.asset_scope import AssetScope
+from ..services.change_presenter import attach_identity
 from ..web_common import admin_required, login_required
 
 
@@ -42,8 +44,21 @@ def _month_end(month: str | None) -> date:
     return next_month - timedelta(days=1)
 
 
+def _include_all() -> bool:
+    """화면이 [전체 자산] 을 켰는가.
+
+    평소에는 실제 자산만 센다. 원본 전체가 필요할 때만 켜고, 켠 상태라는 것이
+    응답에 같이 담겨 화면이 그 사실을 표시한다.
+    """
+    return str(request.args.get("include_all") or "").lower() in {"1", "true", "yes", "on"}
+
+
 def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint:
     bp = Blueprint("asset_sync_core", __name__)
+
+    def scope_for(conn: Any) -> AssetScope:
+        """모든 화면이 같은 기준을 쓰도록 한 곳에서 만든다."""
+        return AssetScope.load(cfg, AssetRepository(conn), include_all=_include_all())
 
     @bp.route("/asset-sync")
     @login_required
@@ -71,7 +86,7 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
     def dashboard_summary() -> Any:
         try:
             with manager.connect() as conn:
-                result = IntegratedDashboardService(AssetRepository(conn)).summary(
+                result = IntegratedDashboardService(AssetRepository(conn), scope_for(conn)).summary(
                     start=request.args.get("start"),
                     end=request.args.get("end"),
                     detail_limit=min(int(request.args.get("limit", 500)), 5000),
@@ -122,7 +137,7 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
             # 전월 말일 기준. 그 날짜까지의 마지막 스냅샷이 전월 값이 된다.
             previous_day = base_day.replace(day=1) - timedelta(days=1)
             previous = repo.snapshot_on_or_before("ITSM", previous_day.isoformat())
-            service = ServerStatusService(cfg, repo)
+            service = ServerStatusService(cfg, repo, include_all=_include_all())
             result = service.status(int(current["id"]), int(previous["id"]) if previous else None)
             result["eosl"] = service.eosl(int(current["id"]))
             if previous:
@@ -134,6 +149,69 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
             "period": {"base_day": base_day.isoformat()},
         })
         return jsonify(result)
+
+    @bp.route("/api/asset-sync/assets")
+    @login_required
+    def asset_list() -> Any:
+        """자산 한 건씩의 목록.
+
+        화면에서 OS·위치의 대수를 눌렀을 때 그 숫자가 실제로 무엇인지 보여준다.
+        같은 목록을 자산 제외 관리에서도 쓴다 -- 제외할 대상을 고르려면 먼저
+        찾아야 하고, 찾는 기준은 호스트명·IP·업무명 무엇이든 될 수 있다.
+        """
+        try:
+            base_day = _month_end(request.args.get("month"))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        term = str(request.args.get("q") or "").strip().lower()
+        wanted_os = str(request.args.get("os_group") or "").strip()
+        wanted_location = str(request.args.get("location") or "").strip().upper()
+        kind = str(request.args.get("kind") or "").strip().lower()      # physical | logical
+        state = str(request.args.get("state") or "").strip().lower()    # included | excluded
+        limit = min(int(request.args.get("limit", 500)), 20000)
+
+        with manager.connect() as conn:
+            repo = AssetRepository(conn)
+            snapshot = repo.snapshot_on_or_before("ITSM", base_day.isoformat())
+            if not snapshot:
+                return jsonify({"status": "NO_SNAPSHOT", "items": [], "total": 0,
+                                "message": "해당 기간까지의 ITSM 스냅샷이 없습니다."})
+            # 목록은 제외된 것도 함께 보여야 한다. 제외 사유를 달고 나온다.
+            service = ServerStatusService(cfg, repo, include_all=True)
+            rows = service.records(int(snapshot["id"]))
+            criteria = service.describe_criteria()
+
+        def keep(item: dict[str, Any]) -> bool:
+            if wanted_os and item.get("os_group") != wanted_os:
+                return False
+            if wanted_location and str(item.get("location") or "").upper() != wanted_location:
+                return False
+            if kind == "physical" and not item.get("physical"):
+                return False
+            if kind == "logical" and item.get("physical"):
+                return False
+            if state == "included" and item.get("exclude_reason"):
+                return False
+            if state == "excluded" and not item.get("exclude_reason"):
+                return False
+            if not term:
+                return True
+            # 호스트명·IP·업무명뿐 아니라 담긴 값 전부에서 찾는다. 운영자가 무엇으로
+            # 기억하고 있을지 모르기 때문이다.
+            return term in " ".join(
+                str(value).lower() for value in item.values() if value not in (None, "")
+            )
+
+        matched = [item for item in rows if keep(item)]
+        return jsonify({
+            "status": "SUCCESS",
+            "as_of": snapshot["snapshot_date"],
+            "total": len(matched),
+            "snapshot_total": len(rows),
+            "truncated": len(matched) > limit,
+            "items": matched[:limit],
+            "criteria": criteria,
+        })
 
     @bp.route("/api/collection-runs")
     @bp.route("/api/asset-sync/collection-runs")
@@ -150,7 +228,9 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         limit = min(int(request.args.get("limit", 2000)), 10000)
         try:
             with manager.connect() as conn:
-                return jsonify(DailyComparisonService(cfg, AssetRepository(conn)).latest(source, limit))
+                return jsonify(DailyComparisonService(
+                    cfg, AssetRepository(conn), scope_for(conn)
+                ).latest(source, limit))
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
 
@@ -161,11 +241,18 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         source = request.args.get("source")
         limit = min(int(request.args.get("limit", 500)), 10000)
         with manager.connect() as conn:
-            rows = AssetRepository(conn).changes(
+            repo = AssetRepository(conn)
+            rows = repo.changes(
                 source=source,
                 limit=limit,
                 start=request.args.get("start"),
                 end=request.args.get("end"),
+            )
+            # 자산코드만 있으면 어느 서버인지 알 수 없다. 호스트명·IP·업무명을
+            # 붙이고, 자산에서 뺀 대상의 변경은 여기서도 뺀다.
+            rows = attach_identity(
+                rows, repo,
+                scope=None if _include_all() else scope_for(conn),
             )
         # 코드값·원본 JSON 을 그대로 내보내면 화면에서 읽을 수 없다.
         return jsonify(present_all(rows))
@@ -345,7 +432,8 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         try:
             with manager.connect() as conn:
                 path = AutomatedReportService(
-                    AssetRepository(conn), cfg.resolve("data/export/automated_reports")
+                    AssetRepository(conn), cfg.resolve("data/export/automated_reports"),
+                    scope_for(conn),
                 ).generate(report_type, request.args.get("start"), request.args.get("end"))
             return send_file(path, as_attachment=True, download_name=path.name)
         except ValueError as exc:

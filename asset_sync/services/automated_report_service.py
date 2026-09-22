@@ -13,7 +13,7 @@ from openpyxl.utils import get_column_letter
 
 from ..normalization.code_maps import ASSET_STATUS, SERVER_CATEGORY
 from ..repositories import AssetRepository
-from .integrated_dashboard_service import ACTIVE_STATUS, PHYSICAL_CATEGORY
+from .asset_scope import PHYSICAL_CATEGORY, AssetScope, location as scope_location
 
 
 class AutomatedReportService:
@@ -21,9 +21,17 @@ class AutomatedReportService:
 
     REPORT_TYPES = {"server_status", "physical", "eosl", "resource_usage"}
 
-    def __init__(self, repository: AssetRepository, output_dir: Path) -> None:
+    def __init__(
+        self,
+        repository: AssetRepository,
+        output_dir: Path,
+        scope: AssetScope | None = None,
+    ) -> None:
         self.repo = repository
         self.output_dir = Path(output_dir)
+        # 보고서도 화면과 같은 대상을 뽑아야 한다. 보고서만 다른 수가 나오면
+        # 그 보고서를 받은 사람이 화면을 믿지 못한다.
+        self.scope = scope or AssetScope.load(None, repository)
 
     def generate(self, report_type: str, start: str | None = None, end: str | None = None) -> Path:
         report_type = report_type.strip().lower()
@@ -31,14 +39,23 @@ class AutomatedReportService:
             raise ValueError("지원 보고서는 server_status, physical, eosl, resource_usage입니다.")
         start_day, end_day = self._period(start, end)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        path = self.output_dir / f"{report_type}_{end_day.strftime('%Y%m%d')}_{datetime.now().strftime('%H%M%S')}.xlsx"
+        # 원본 전체로 뽑았으면 파일 이름으로 바로 알 수 있어야 한다. 대수가 다른
+        # 파일이 같은 이름으로 돌아다니면 어느 것이 맞는지 따질 수 없다.
+        marker = "_전체자산" if self.scope.include_all else ""
+        path = self.output_dir / (
+            f"{report_type}{marker}_{end_day.strftime('%Y%m%d')}"
+            f"_{datetime.now().strftime('%H%M%S')}.xlsx"
+        )
         if report_type == "resource_usage":
             workbook = self._resource_usage(start_day, end_day)
         else:
             snapshot = self.repo.latest_snapshot("ITSM")
             if not snapshot:
                 raise ValueError("정상 ITSM 스냅샷이 없습니다.")
-            records = [r for r in self.repo.load_itsm_records(int(snapshot["id"])).values() if r.get("status_code") in ACTIVE_STATUS]
+            records = [
+                record for record in self.repo.load_itsm_records(int(snapshot["id"])).values()
+                if self.scope.decide_itsm(record).included
+            ]
             if report_type == "server_status":
                 workbook = self._server_status(records, start_day, end_day)
             elif report_type == "physical":
@@ -57,7 +74,9 @@ class AutomatedReportService:
         status = Counter(ASSET_STATUS.get(str(r.get("status_code")), "미정") for r in records)
         os_count = Counter(str(r.get("os_family") or "미정") for r in records)
         summary = [
-            ("기준일", date.today().isoformat()), ("전체", len(records)),
+            ("기준일", date.today().isoformat()),
+            ("집계 기준", "제외 자산 포함(원본 전체)" if self.scope.include_all else "실제 자산만(화면과 동일)"),
+            ("전체", len(records)),
             ("운영", status.get("운영", 0)), ("대기", status.get("대기", 0)),
             ("물리", category.get("물리", 0)), ("논리", category.get("논리", 0)),
             ("IDC", location.get("IDC", 0)), ("DR", location.get("DR", 0)),
@@ -206,15 +225,14 @@ class AutomatedReportService:
         gb = cls._mb_to_gb(value)
         return f"{gb:g} GB" if gb is not None else value
 
-    @staticmethod
-    def _write_asset_detail(ws: Any, records: list[dict[str, Any]]) -> None:
+    def _write_asset_detail(self, ws: Any, records: list[dict[str, Any]]) -> None:
         ws.append(["자산ID", "서버명", "Hostname", "IP", "상태", "물리/논리", "위치", "OS", "OS버전", "CPU Core", "Memory GB", "EOSL", "제조사", "모델"])
         for record in records:
             raw = record.get("raw", {})
             ws.append([
                 record.get("cm_id"), raw.get("CM_NAME"), record.get("normalized_hostname"), record.get("primary_ip"),
                 ASSET_STATUS.get(str(record.get("status_code")), "미정"), SERVER_CATEGORY.get(str(record.get("server_category_code")), "미정"),
-                AutomatedReportService._location(record), record.get("os_family"), record.get("os_version"), record.get("cpu_cores"),
+                self._location(record), record.get("os_family"), record.get("os_version"), record.get("cpu_cores"),
                 AutomatedReportService._mb_to_gb(record.get("memory_mb")), record.get("eos_value"), raw.get("CM_MAKE_NAME"), raw.get("CM_MODEL_NAME"),
             ])
         AutomatedReportService._style(ws)
@@ -231,10 +249,9 @@ class AutomatedReportService:
             width = min(max(len(str(cell.value or "")) for cell in column) + 2, 45)
             ws.column_dimensions[get_column_letter(column[0].column)].width = max(width, 10)
 
-    @staticmethod
-    def _location(record: dict[str, Any]) -> str:
-        raw = record.get("raw", {}) or {}
-        return "DR" if str(raw.get("CM_DR_YN") or "").upper() in {"Y", "YES", "1"} or str(record.get("environment_code") or "") == "CMOWNCATCD0040" or "DR" in str(raw.get("CM_PLACE") or "").upper() else "IDC"
+    def _location(self, record: dict[str, Any]) -> str:
+        """설치 위치. 판정은 asset_scope 한 곳에서만 한다."""
+        return scope_location(record.get("raw") or {}, self.scope.criteria)
 
     @staticmethod
     def _eos_bucket(value: Any) -> str:

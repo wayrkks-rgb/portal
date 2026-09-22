@@ -163,3 +163,77 @@ def present(event: Mapping[str, Any]) -> dict[str, Any]:
 
 def present_all(events: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return [present(event) for event in events]
+
+
+#: 자산을 알아보는 데 쓰는 값. 출처마다 컬럼 이름이 다르다.
+_IDENTITY = {
+    "ITSM": (("hostname", "normalized_hostname", "CM_HOSTNAME"),
+             ("primary_ip", "primary_ip", "CM_IP"),
+             ("service_name", None, "CM_NAME")),
+    "RVTOOLS": (("hostname", "normalized_hostname", None),
+                ("primary_ip", "primary_ip", None),
+                ("service_name", "vm_name", None)),
+}
+
+
+def attach_identity(
+    events: list[Mapping[str, Any]],
+    repository: Any,
+    *,
+    scope: Any = None,
+) -> list[dict[str, Any]]:
+    """변경 내역에 자산을 알아볼 수 있는 값을 붙인다.
+
+    저장된 이벤트는 자산코드(CM0001234)만 들고 있다. 코드만 봐서는 어느 서버인지
+    알 수 없으므로 호스트명·IP·업무명을 스냅샷에서 찾아 붙인다.
+
+    스냅샷은 한 번만 읽는다. 이벤트마다 읽으면 수천 번을 읽게 된다. -- 예전에
+    ``setdefault(sid, load(sid))`` 로 적었다가, 기본값이 먼저 계산되는 바람에
+    캐시가 아무 일도 못 하고 21 초가 걸린 적이 있다. 그래서 명시적으로 확인한다.
+
+    ``scope`` 를 주면 자산에서 뺀 대상의 변경은 내역에서도 빠진다. 대수가 다른
+    화면과 같아야 하듯, 변경 건수도 같은 대상에서 나와야 한다.
+    """
+    cache: dict[int, dict[str, dict[str, Any]]] = {}
+
+    def snapshot(source: str, snapshot_id: Any) -> dict[str, dict[str, Any]]:
+        if not snapshot_id:
+            return {}
+        key = int(snapshot_id)
+        if key not in cache:
+            loader = repository.load_rv_records if source == "RVTOOLS" else repository.load_itsm_records
+            try:
+                cache[key] = loader(key)
+            except Exception:
+                cache[key] = {}
+        return cache[key]
+
+    result: list[dict[str, Any]] = []
+    for event in events:
+        row = dict(event)
+        source = str(row.get("source") or "").upper()
+        asset_key = str(row.get("asset_key") or "")
+        record = (snapshot(source, row.get("snapshot_id")).get(asset_key)
+                  or snapshot(source, row.get("previous_snapshot_id")).get(asset_key)
+                  or {})
+        if not record:
+            # 생성·삭제 이벤트는 원본 전체를 값으로 들고 있다. 거기서라도 찾는다.
+            record = _parse(row.get("new_value")) or _parse(row.get("old_value")) or {}
+            record = {"raw": record} if record else {}
+        raw = record.get("raw") or record
+
+        if scope is not None and source == "ITSM" and record:
+            if not scope.decide_itsm(record).included:
+                continue
+
+        for name, column, raw_key in _IDENTITY.get(source, ()):
+            value = record.get(column) if column else None
+            if value in (None, "") and raw_key:
+                value = raw.get(raw_key)
+            row[name] = value if value not in (None, "") else None
+        # 화면에서 한 칸으로 보여줄 이름. 업무명 > 호스트명 > 자산코드 순이다.
+        row["asset_label"] = str(
+            row.get("service_name") or row.get("hostname") or asset_key or "-"
+        )
+        result.append(row)
+    return result

@@ -42,7 +42,11 @@ def _seed(root: Path, event_count: int):
     manager.initialize()
     now = datetime.now().isoformat()
     today = datetime.now().date().isoformat()
-    raw = json.dumps({"CM_NAME": "srv", "CM_HOSTNAME": "host"}, ensure_ascii=False)
+    # 실물 서버라면 OS·OS버전·EOSL 이 전부 비어 있을 수 없다. 셋 다 비면
+    # 자산으로 세지 않으므로(asset_scope), 실제와 같은 모양으로 넣는다.
+    raw = json.dumps({"CM_NAME": "srv", "CM_HOSTNAME": "host", "CM_OS": "CMCIOSCD010",
+                      "CM_OS_VERSION": "8.6", "CM_EOL_DT": "2030-01-01",
+                      "CM_PLACE": "IDC-1F"}, ensure_ascii=False)
 
     with manager.connect() as conn:
         repo = AssetRepository(conn)

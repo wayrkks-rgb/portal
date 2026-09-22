@@ -23,12 +23,25 @@ import pytest
 from asset_sync.config import AppConfig
 from asset_sync.db.manager import create_manager
 from asset_sync.repositories import AssetRepository
-from asset_sync.services.server_status_service import (
+from asset_sync.services.asset_scope import (
+    DEFAULT_OS_GROUPS,
     OTHER_GROUP,
-    ServerStatusService,
-    eosl_year,
-    os_group,
+    criteria_from,
+    parse_year,
+    os_group as _os_group,
 )
+from asset_sync.services.server_status_service import ServerStatusService
+
+CRITERIA = criteria_from(None)
+
+
+def eosl_year(value):
+    """예전 시그니처. 값 하나로 연도를 읽는다."""
+    return parse_year(value)
+
+
+def os_group(os_family, groups=None):
+    return _os_group(os_family, CRITERIA)
 
 PHYSICAL = "CMSVRCATCD010"
 LOGICAL = "CMSVRCATCD020"

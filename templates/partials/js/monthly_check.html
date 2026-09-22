@@ -37,13 +37,27 @@ function renderStatusTable(elementId, table, delta, unitLabel) {
   }).join('');
   const second = flat.filter(([label]) => label).map(([, m]) => `<th>${syncEscape(m)}</th>`).join('');
 
+  // 숫자를 누르면 그 숫자를 이루는 자산이 하나씩 보인다. 대수가 맞는지 따지려면
+  // 숫자만으로는 안 된다.
+  const kind = elementId.includes('physical') ? 'physical' : '';
   const rows = ['IDC','DR','계'].map(name => {
     const values = table.rows[name] || {};
     const cells = flat.map(([, column]) => {
-      const text = Number(values[column] || 0).toLocaleString();
+      const count = Number(values[column] || 0);
+      const text = count.toLocaleString();
       const change = delta && delta[name] ? deltaText(delta[name][column]) : '';
       const strong = column === '소계' || name === '계';
-      return `<td>${strong ? '<strong>' + text + '</strong>' : text}${change}</td>`;
+      const filter = JSON.stringify({
+        location: name === '계' ? '' : name,
+        os_group: column === '소계' ? '' : column,
+        kind, state: 'included',
+      }).replace(/"/g, '&quot;');
+      const label = `${name} · ${column} ${text}대`;
+      const inner = strong ? `<strong>${text}</strong>` : text;
+      const cell = count
+        ? `<a href="javascript:void(0)" onclick="openAssetBrowser(${filter},'${label}')">${inner}</a>`
+        : inner;
+      return `<td>${cell}${change}</td>`;
     }).join('');
     return `<tr><td><strong>${name}</strong></td>${cells}</tr>`;
   }).join('');
@@ -104,6 +118,42 @@ function renderEosl(eosl) {
   element.innerHTML = head + `<tbody>${rows}</tbody>`;
   document.getElementById('monthly-eosl-basis').textContent =
     `${eosl.criteria.eosl_field} 기준 · ${eosl.criteria.base_year}년 기준 · ${eosl.criteria.no_plan_year} = 계획 없음`;
+  renderEoslDiagnosis(eosl.diagnosis || {}, eosl.criteria || {});
+}
+
+// 표가 온통 '계획 없음' 이거나 '미사용' 이면, 그게 실제 데이터인지 컬럼을 잘못
+// 짚은 것인지 표만 봐서는 알 수 없다. 어디서 읽었고 원래 값이 어떻게 생겼는지
+// 같이 보여준다.
+function renderEoslDiagnosis(diagnosis, criteria) {
+  const holder = document.getElementById('monthly-eosl-diagnosis');
+  if (!holder) return;
+  const byField = diagnosis.by_field || {};
+  const entries = Object.entries(byField).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) { holder.innerHTML = ''; return; }
+
+  const missing = Number(byField['(값 없음)'] || 0);
+  const total = entries.reduce((sum, [, n]) => sum + Number(n || 0), 0);
+  const unreadable = diagnosis.unreadable_samples || [];
+
+  const lines = entries.map(([name, count]) => {
+    const samples = (diagnosis.samples || {})[name] || [];
+    return `<div>· <strong>${syncEscape(name)}</strong> ${Number(count).toLocaleString()}건`
+      + (samples.length ? ` <span class="text-muted mono">예: ${syncEscape(samples.join(', '))}</span>` : '')
+      + '</div>';
+  }).join('');
+
+  let verdict = '';
+  if (missing === total) {
+    verdict = `<div class="alert alert-error" style="margin-bottom:8px">❌ EOSL 값을 한 건도 읽지 못했습니다.
+      찾아본 컬럼: <span class="mono">${syncEscape((diagnosis.checked_fields || []).join(', '))}</span>.
+      ITSM 조회 SQL 에 EOSL 컬럼이 빠졌거나 이름이 다릅니다.</div>`;
+  } else if (missing > total / 2) {
+    verdict = `<div class="alert alert-warning" style="margin-bottom:8px">⚠️ 절반 이상(${missing.toLocaleString()}건)이 EOSL 값 없이 들어옵니다.</div>`;
+  } else if (unreadable.length) {
+    verdict = `<div class="alert alert-warning" style="margin-bottom:8px">⚠️ 값은 있는데 연도를 못 읽은 것이 있습니다:
+      <span class="mono">${syncEscape(unreadable.join(', '))}</span></div>`;
+  }
+  holder.innerHTML = verdict + `<div class="text-xs text-muted">EOSL 값 출처${lines}</div>`;
 }
 
 function monthRange(month) {
@@ -165,15 +215,38 @@ async function loadMonthlyCheck() {
 
   document.getElementById('monthly-excluded-reason').textContent =
     `제외 기준: ${res.excluded.reason}`;
+  renderMonthlyExcluded(res.excluded.items || [], res.scope || {});
+}
+
+// 제외한 자산. 왜 빠졌는지 따지려면 판단에 쓴 값이 보여야 한다.
+function renderMonthlyExcluded(items, scope) {
   const body = document.getElementById('monthly-excluded-body');
-  const items = res.excluded.items || [];
-  body.innerHTML = items.length ? items.map(item => `<tr>
-    <td class="mono">${syncEscape(item.cm_id || '-')}</td>
-    <td>${syncEscape(item.hostname || '-')}</td>
-    <td class="mono">${syncEscape(item.primary_ip || '-')}</td>
-    <td>${syncEscape(item.service_name || '-')}</td>
-    <td>${syncEscape(item.location || '-')}</td></tr>`).join('')
-    : '<tr><td colspan="5" style="text-align:center" class="text-muted">제외된 자산이 없습니다.</td></tr>';
+  if (!body) return;
+  const shown = items.slice(0, 300);
+  body.innerHTML = shown.length ? shown.map(item => {
+    const fields = Object.entries(item.exclude_fields || {}).map(([name, value]) =>
+      `<span class="${value == null || value === '' ? 'text-error' : ''}">${syncEscape(name)}=${value == null || value === '' ? '(빔)' : syncEscape(value)}</span>`
+    ).join(' · ');
+    return `<tr>
+      <td class="mono">${syncEscape(item.cm_id || '-')}</td>
+      <td>${syncEscape(item.service_name || '-')}</td>
+      <td>${syncEscape(item.hostname || '-')}</td>
+      <td class="mono">${syncEscape(item.primary_ip || '-')}</td>
+      <td>${syncEscape(item.location || '-')}</td>
+      <td>${syncEscape(item.exclude_label || item.exclude_reason || '-')}
+        ${item.manual_note ? `<div class="text-xs text-muted">${syncEscape(item.manual_note)}</div>` : ''}</td>
+      <td class="text-xs mono">${fields}</td></tr>`;
+  }).join('')
+    : '<tr><td colspan="7" style="text-align:center" class="text-muted">제외된 자산이 없습니다.</td></tr>';
+
+  const reasons = Object.entries((scope.by_reason || {}))
+    .map(([, item]) => `${item.label} ${Number(item.count).toLocaleString()}건`).join(' · ');
+  document.getElementById('monthly-excluded-summary').innerHTML =
+    `ITSM 전체 ${Number(scope.snapshot_total || 0).toLocaleString()}건 중 `
+    + `자산 <strong>${Number(scope.selected || 0).toLocaleString()}건</strong> · `
+    + `제외 ${Number(scope.excluded || 0).toLocaleString()}건`
+    + (reasons ? ` (${syncEscape(reasons)})` : '')
+    + (items.length > shown.length ? ` · 아래 목록은 ${shown.length}건까지만 표시` : '');
 }
 
 // ── 통합서버 자원사용현황 ─────────────────────────────────────────────

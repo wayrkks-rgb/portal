@@ -466,3 +466,23 @@ CREATE TABLE IF NOT EXISTS vcenter_display_name (
     UNIQUE KEY uq_vcenter_display_name (scope, vcenter_id, object_key),
     KEY idx_vcenter_display_scope (scope, vcenter_id)
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 실제 자산 카운트에서 뺄(또는 자동으로 빠진 것을 다시 넣을) 대상.
+-- ITSM 과 vCenter 가 주는 것을 전부 세면 실물 서버가 아닌 것까지 들어간다.
+-- 어느 화면이든 같은 수가 나와야 하므로 판단은 여기 한 곳에만 둔다.
+--   source: ITSM | RVTOOLS
+--   mode  : EXCLUDE(자산에서 뺀다) | INCLUDE(자동으로 빠진 것을 다시 넣는다)
+CREATE TABLE IF NOT EXISTS asset_exclusion (
+    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    source VARCHAR(16) NOT NULL,
+    asset_key VARCHAR(255) NOT NULL,
+    mode VARCHAR(16) NOT NULL DEFAULT 'EXCLUDE',
+    reason VARCHAR(500),
+    hostname VARCHAR(255),
+    primary_ip VARCHAR(64),
+    service_name VARCHAR(255),
+    updated_by VARCHAR(128),
+    updated_at VARCHAR(32) NOT NULL,
+    UNIQUE KEY uq_asset_exclusion (source, asset_key),
+    KEY idx_asset_exclusion_source (source, mode)
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

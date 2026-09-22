@@ -2,7 +2,10 @@
 
 월간 점검 장표 두 개를 같은 데이터로 만든다. 첨부 양식에서 물리서버 소계(925)와
 EOSL 서버 행 합계가 같고, 전체 소계(2,668)와 EOSL OS 행 합계가 같다. 즉 한 번 고른
-대상을 두 장표가 함께 쓴다. 여기서 한 번만 고른다.
+대상을 두 장표가 함께 쓴다.
+
+**무엇을 셀지는 여기서 정하지 않는다.** ``asset_scope`` 가 정한다. 통합 대시보드·
+일간·주간 점검·보고서가 같은 모듈을 쓰므로 화면마다 대수가 달라질 수 없다.
 
 집계 기준을 코드에 묻어두지 않는다. 대수가 ITSM 총 건수와 다를 때 어느 쪽이 틀렸는지
 따질 수 있어야 하므로, 무엇을 어떤 기준으로 세고 무엇을 뺐는지 결과에 같이 담는다.
@@ -10,143 +13,55 @@ EOSL 서버 행 합계가 같고, 전체 소계(2,668)와 EOSL OS 행 합계가 
 
 from __future__ import annotations
 
-import re
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import date
-from typing import Any, Iterable, Mapping
+from typing import Any
 
-#: OS 묶음. 양식의 열 순서와 같다. 여기 어디에도 맞지 않으면 '기타' 다.
-#: 값은 normalize_os 가 내는 os_family 다(OS_CODES 로 코드를 풀고 난 뒤의 값).
-DEFAULT_OS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("HP", ("HP-UX",)),
-    ("IBM", ("AIX",)),
-    ("Linux", ("Linux Redhat", "CentOS", "Rocky", "Ubuntu", "Oracle Linux", "Debian", "SUSE")),
-    ("Windows", ("WINDOWS",)),
+from .asset_scope import (
+    LOCATIONS,
+    LOGICAL_CATEGORY,
+    NO_PLAN_YEAR,
+    OTHER_GROUP,
+    PHYSICAL_CATEGORY,
+    AssetScope,
+    criteria_from,
+    eosl_year,
+    os_group,
+    parse_year,
 )
-OTHER_GROUP = "기타"
 
-#: 설치 위치. 양식의 행 순서와 같다.
-LOCATIONS = ("IDC", "DR")
-
-#: 물리/논리 구분 코드.
-PHYSICAL_CATEGORY = "CMSVRCATCD010"
-LOGICAL_CATEGORY = "CMSVRCATCD020"
-
-#: 서버 현황에서 뺄지 판단할 컬럼. 이 값들이 **모두** 비어 있으면 서버로 보지 않는다.
-DEFAULT_EXCLUDE_WHEN_ALL_EMPTY = ("CM_OS", "CM_OS_VERSION", "CM_EOL_DT")
-
-#: EOSL 날짜 컬럼. 연도만 본다.
-DEFAULT_EOSL_FIELD = "CM_EOL_DT"
-
-#: 설치 위치 컬럼과, DR 로 볼 값의 조각.
-DEFAULT_LOCATION_FIELD = "CM_PLACE"
-DEFAULT_DR_KEYWORDS = ("DR", "재해", "재해복구")
-
-#: 계획 없음으로 볼 연도.
-NO_PLAN_YEAR = 9999
-
-
-def _settings(config: Any) -> dict[str, Any]:
-    """설정에서 서버 현황 기준을 꺼낸다. 없으면 기본값을 쓴다."""
-    section = dict(getattr(config, "server_status", None) or {})
-    groups = section.get("os_groups")
-    if isinstance(groups, Mapping) and groups:
-        os_groups = tuple(
-            (str(name), tuple(str(token) for token in tokens or ()))
-            for name, tokens in groups.items()
-        )
-    else:
-        os_groups = DEFAULT_OS_GROUPS
-    return {
-        "exclude_when_all_empty": tuple(
-            str(name).upper() for name in
-            (section.get("exclude_when_all_empty") or DEFAULT_EXCLUDE_WHEN_ALL_EMPTY)
-        ),
-        "eosl_field": str(section.get("eosl_field") or DEFAULT_EOSL_FIELD).upper(),
-        "location_field": str(section.get("location_field") or DEFAULT_LOCATION_FIELD).upper(),
-        "dr_keywords": tuple(str(token) for token in (section.get("dr_keywords") or DEFAULT_DR_KEYWORDS)),
-        "os_groups": os_groups,
-    }
-
-
-def _blank(value: Any) -> bool:
-    text = str(value or "").strip()
-    return text == "" or text.lower() in {"-", "nan", "none", "null"}
-
-
-def os_group(os_family: Any, groups: Iterable[tuple[str, tuple[str, ...]]]) -> str:
-    """OS 를 양식의 열로 묶는다. 어디에도 없으면 기타다."""
-    text = str(os_family or "").strip().lower()
-    if not text:
-        return OTHER_GROUP
-    for name, tokens in groups:
-        for token in tokens:
-            if token.strip().lower() in text:
-                return name
-    return OTHER_GROUP
-
-
-def eosl_year(value: Any) -> int | None:
-    """EOSL 값에서 연도만 뽑는다. 연도를 못 읽으면 None 이다."""
-    if _blank(value):
-        return None
-    match = re.search(r"(\d{4})", str(value))
-    return int(match.group(1)) if match else None
+#: 예전 이름으로 import 하던 곳이 있어 남겨 둔다.
+DEFAULT_OS_GROUPS = criteria_from(None).os_groups
 
 
 class ServerStatusService:
     """ITSM 스냅샷에서 서버 현황·EOSL 현황을 만든다."""
 
-    def __init__(self, config: Any, repository: Any) -> None:
+    def __init__(self, config: Any, repository: Any, *, include_all: bool = False) -> None:
         self.config = config
         self.repo = repository
-        self.settings = _settings(config)
+        self.scope = AssetScope.load(config, repository, include_all=include_all)
+        self.criteria = self.scope.criteria
+        self.include_all = include_all
 
     # ── 대상 고르기 ─────────────────────────────────────────────────────
-    def _classify(self, record: Mapping[str, Any]) -> dict[str, Any]:
-        raw = record.get("raw") or {}
-        location = self._location(raw)
-        return {
-            "cm_id": record.get("CM_ID") or record.get("cm_id"),
-            "hostname": record.get("normalized_hostname") or raw.get("CM_HOSTNAME"),
-            "primary_ip": record.get("primary_ip") or raw.get("CM_IP"),
-            "service_name": raw.get("CM_NAME"),
-            "location": location,
-            "physical": str(record.get("server_category_code") or "") == PHYSICAL_CATEGORY,
-            "os_group": os_group(record.get("os_family"), self.settings["os_groups"]),
-            "os_family": record.get("os_family"),
-            "eosl_year": eosl_year(raw.get(self.settings["eosl_field"])),
-            "eosl_value": raw.get(self.settings["eosl_field"]),
-        }
-
-    def _location(self, raw: Mapping[str, Any]) -> str:
-        """설치 위치를 IDC/DR 로 가른다. 판단 근거는 설정에 있다."""
-        text = str(raw.get(self.settings["location_field"]) or "")
-        upper = text.upper()
-        for token in self.settings["dr_keywords"]:
-            if token.upper() in upper:
-                return "DR"
-        return "IDC"
-
-    def _is_server(self, record: Mapping[str, Any]) -> bool:
-        """서버로 볼지. 기준 컬럼이 모두 비어 있으면 서버가 아니다."""
-        raw = record.get("raw") or {}
-        return not all(_blank(raw.get(name)) for name in self.settings["exclude_when_all_empty"])
-
     def select(self, snapshot_id: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """(집계 대상, 제외 대상). 제외한 것도 화면에 보여야 하므로 함께 돌려준다."""
         records = self.repo.load_itsm_records(snapshot_id).values()
-        included: list[dict[str, Any]] = []
-        excluded: list[dict[str, Any]] = []
-        for record in records:
-            item = self._classify(record)
-            (included if self._is_server(record) else excluded).append(item)
-        return included, excluded
+        return self.scope.split_itsm(records)
+
+    def records(self, snapshot_id: int) -> list[dict[str, Any]]:
+        """한 건씩 펼친 전체 목록. 제외된 것도 사유를 달고 들어 있다.
+
+        화면에서 OS·위치를 눌러 그 대수의 실물이 무엇인지 볼 때 쓴다.
+        """
+        records = self.repo.load_itsm_records(snapshot_id).values()
+        return [self.scope.describe_itsm(record) for record in records]
 
     # ── 서버 현황 ───────────────────────────────────────────────────────
     def _table(self, items: list[dict[str, Any]]) -> dict[str, Any]:
         """양식의 한 표. 행은 IDC·DR·계, 열은 OS 묶음과 소계다."""
-        columns = [name for name, _ in self.settings["os_groups"]] + [OTHER_GROUP]
+        columns = [name for name, _ in self.criteria.os_groups] + [OTHER_GROUP]
         counts: dict[str, Counter[str]] = {location: Counter() for location in LOCATIONS}
         for item in items:
             counts[item["location"]][item["os_group"]] += 1
@@ -185,35 +100,36 @@ class ServerStatusService:
 
         all_table = self._table(included)
         physical_table = self._table(physical)
+        records = list(self.repo.load_itsm_records(snapshot_id).values())
         return {
             "criteria": self.describe_criteria(),
             "counts": {"selected": len(included), "excluded": len(excluded), "physical": len(physical)},
+            "scope": self.scope.summary(records),
             "all": {"table": all_table, "delta": self._delta(all_table, previous_all)},
             "physical": {"table": physical_table, "delta": self._delta(physical_table, previous_physical)},
-            # 제외한 대상은 목록으로 보여야 한다. 빠진 이유를 확인할 수 있어야 하므로
-            # 호스트명·IP·업무명을 함께 담는다.
+            # 제외한 대상은 목록으로 보여야 한다. 왜 빠졌는지 따지려면 판단에 쓴
+            # 값(CM_OS·CM_OS_VERSION·CM_EOL_DT)이 비어 있는 것까지 보여야 한다.
             "excluded": {
                 "count": len(excluded),
-                "reason": f"{', '.join(self.settings['exclude_when_all_empty'])} 가 모두 비어 있음",
-                "items": [
-                    {key: item[key] for key in ("cm_id", "hostname", "primary_ip", "service_name", "location")}
-                    for item in excluded
-                ],
+                "reason": self.describe_exclusion(),
+                "items": excluded,
             },
         }
 
+    def describe_exclusion(self) -> str:
+        fields = ", ".join(self.criteria.exclude_when_all_empty)
+        return (
+            f"상태가 운영·대기가 아니거나({', '.join(self.criteria.active_status)}) "
+            f"{fields} 가 모두 비어 있거나, 수동으로 제외한 자산"
+        )
+
     def describe_criteria(self) -> dict[str, Any]:
         """무엇을 어떤 기준으로 셌는지. 화면에 그대로 보여준다."""
-        return {
-            "exclude_when_all_empty": list(self.settings["exclude_when_all_empty"]),
-            "eosl_field": self.settings["eosl_field"],
-            "location_field": self.settings["location_field"],
-            "dr_keywords": list(self.settings["dr_keywords"]),
-            "os_groups": {name: list(tokens) for name, tokens in self.settings["os_groups"]},
-            "other_group": OTHER_GROUP,
-            "physical_code": PHYSICAL_CATEGORY,
-            "logical_code": LOGICAL_CATEGORY,
-        }
+        criteria = self.criteria.public()
+        # 예전 화면이 eosl_field(단수) 를 읽는다. 실제로 쓰는 첫 후보를 준다.
+        criteria["eosl_field"] = self.criteria.eosl_fields[0] if self.criteria.eosl_fields else ""
+        criteria["include_all"] = self.include_all
+        return criteria
 
     # ── 신규·삭제 상세 ──────────────────────────────────────────────────
     def movements(self, snapshot_id: int, previous_snapshot_id: int) -> dict[str, Any]:
@@ -256,12 +172,44 @@ class ServerStatusService:
         included, _ = self.select(snapshot_id)
         physical = [item for item in included if item["physical"]]
         return {
-            "criteria": {"eosl_field": self.settings["eosl_field"], "base_year": year,
-                         "no_plan_year": NO_PLAN_YEAR},
+            "criteria": {
+                "eosl_field": self.criteria.eosl_fields[0] if self.criteria.eosl_fields else "",
+                "eosl_fields": list(self.criteria.eosl_fields),
+                "base_year": year, "no_plan_year": NO_PLAN_YEAR,
+            },
             "columns": self.eosl_columns(year),
             # 양식에서 '서버' 행은 물리서버, 'OS' 행은 전체서버다.
             "physical": {"label": "서버", **self._eosl_row(physical, year)},
             "all": {"label": "OS", **self._eosl_row(included, year)},
+            "diagnosis": self.eosl_diagnosis(included),
+        }
+
+    def eosl_diagnosis(self, items: list[dict[str, Any]]) -> dict[str, Any]:
+        """EOSL 값이 어디서 왔고 어떻게 읽혔는지.
+
+        표가 온통 '계획 없음' 이거나 '미사용' 이면, 그게 실제 데이터인지 컬럼을
+        잘못 짚은 것인지 표만 봐서는 알 수 없다. 어느 컬럼에서 몇 건을 읽었고
+        원래 값이 어떻게 생겼는지 같이 내려보내 화면에서 바로 확인하게 한다.
+        """
+        fields: Counter[str] = Counter()
+        samples: dict[str, list[str]] = {}
+        unreadable: list[str] = []
+        for item in items:
+            name = item.get("eosl_field") or "(값 없음)"
+            fields[name] += 1
+            if item.get("eosl_field"):
+                bucket = samples.setdefault(name, [])
+                text = str(item.get("eosl_value"))
+                if len(bucket) < 5 and text not in bucket:
+                    bucket.append(text)
+                if item.get("eosl_year") is None and len(unreadable) < 10:
+                    unreadable.append(text)
+        return {
+            "by_field": dict(fields),
+            "samples": samples,
+            # 값은 있는데 연도를 못 읽은 것. 형식이 예상과 다르다는 뜻이다.
+            "unreadable_samples": unreadable,
+            "checked_fields": list(self.criteria.eosl_fields),
         }
 
     @staticmethod

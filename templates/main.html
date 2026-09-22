@@ -133,11 +133,15 @@ scripts.html / widget.html 을 두면 자동으로 include 된다(module_templat
 {% include "modules/_generic.html" %}
 
 {% include "pages/admin_users.html" %}
+
+{# 어느 화면에서든 숫자를 눌러 그 자산을 하나씩 볼 수 있게 한다. #}
+{% include "partials/asset_browser.html" %}
 {% endblock %}
 
 {% block scripts %}
 {# 원본과 같은 순서로 포함해 함수 정의 순서를 유지한다 #}
 {% include "partials/js/dashboard.html" %}
+{% include "partials/js/asset_browser.html" %}
 {% include "partials/js/checks.html" %}
 {% include "partials/js/monthly_check.html" %}
 {% include "partials/js/report.html" %}

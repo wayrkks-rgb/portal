@@ -109,7 +109,35 @@ def test_with_stored_events_it_reads_them_instead(seeded, monkeypatch):
         result = DailyComparisonService(config, repo).latest("ITSM")
 
     assert result["events_from"] == "STORED"
-    assert calls == [], f"저장된 이벤트가 있는데 스냅샷을 {len(calls)}번 읽었다"
+    # 저장된 이벤트를 쓰므로 재비교는 하지 않는다. 다만 자산코드만으로는 어느
+    # 서버인지 알 수 없어, 호스트명·IP·업무명을 붙이려고 스냅샷을 읽는다.
+    # 읽는 횟수는 **이벤트 수와 무관하게** 짝(현재·이전) 수를 넘지 않아야 한다.
+    # 예전에 여기서 이벤트마다 읽어 21초가 걸린 적이 있다.
+    assert len(set(calls)) <= 2, f"스냅샷을 {len(set(calls))}종류나 읽었다"
+    assert len(calls) <= 2, f"같은 스냅샷을 {len(calls)}번 읽었다(캐시가 동작하지 않음)"
+
+
+def test_identity_lookup_does_not_grow_with_the_number_of_events(seeded, monkeypatch):
+    """이름을 붙이는 비용이 이벤트 수를 따라 늘면 안 된다.
+
+    예전에 ``cache.setdefault(sid, load(sid))`` 로 적었다가, 기본값이 먼저
+    계산되는 바람에 캐시가 아무 일도 못 하고 이벤트마다 스냅샷을 읽은 적이 있다.
+    """
+    config, manager, snapshots = seeded
+    with manager.connect() as conn:
+        DiffService(config, AssetRepository(conn)).compare_itsm(snapshots[1])
+        conn.commit()
+    with manager.connect() as conn:
+        repo = AssetRepository(conn)
+        calls = count_snapshot_reads(repo, monkeypatch)
+        result = DailyComparisonService(config, repo).latest("ITSM")
+
+    assert len(result["events"]) >= CHANGED, "이벤트가 있어야 비교가 된다"
+    assert len(calls) <= 2, (
+        f"이벤트 {len(result['events'])}건에 스냅샷을 {len(calls)}번 읽었다"
+    )
+    # 붙인 값이 실제로 들어 있어야 의미가 있다.
+    assert any(event.get("hostname") for event in result["events"])
 
 
 def test_both_paths_give_the_same_answer(seeded):

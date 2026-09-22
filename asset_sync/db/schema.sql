@@ -411,3 +411,23 @@ CREATE TABLE IF NOT EXISTS vcenter_display_name (
     UNIQUE(scope, vcenter_id, object_key)
 );
 CREATE INDEX IF NOT EXISTS idx_vcenter_display_scope ON vcenter_display_name(scope, vcenter_id);
+
+-- 실제 자산 카운트에서 뺄(또는 자동으로 빠진 것을 다시 넣을) 대상.
+-- ITSM 과 vCenter 가 주는 것을 전부 세면 실물 서버가 아닌 것까지 들어간다.
+-- 어느 화면이든 같은 수가 나와야 하므로 판단은 여기 한 곳에만 둔다.
+--   source: ITSM | RVTOOLS
+--   mode  : EXCLUDE(자산에서 뺀다) | INCLUDE(자동으로 빠진 것을 다시 넣는다)
+CREATE TABLE IF NOT EXISTS asset_exclusion (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    asset_key TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'EXCLUDE',
+    reason TEXT,
+    hostname TEXT,
+    primary_ip TEXT,
+    service_name TEXT,
+    updated_by TEXT,
+    updated_at TEXT NOT NULL,
+    UNIQUE(source, asset_key)
+);
+CREATE INDEX IF NOT EXISTS idx_asset_exclusion_source ON asset_exclusion(source, mode);

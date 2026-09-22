@@ -52,6 +52,15 @@
         <div class="stat-card clickable-stat" onclick="downloadAutoReport('eosl')"><div class="stat-value" style="font-size:22px">EOSL 현황</div><div class="stat-label">종료·올해 종료·예정·미정·확인필요</div></div>
         <div class="stat-card clickable-stat" onclick="openResourceUsage()"><div class="stat-value" style="font-size:22px">통합서버 자원현황</div><div class="stat-label">07시 자동수집 · 통합기/VM 실제 할당량과 Max/Avg</div></div>
       </div>
+      <div class="alert alert-info mt-4" style="margin-bottom:0">
+        보고서는 화면과 <strong>같은 대상</strong>을 뽑습니다. 자산에서 제외한 것은 들어가지 않습니다.
+        원본 전체가 필요하면 아래를 켜고 받으세요 -- 파일 이름과 첫 시트에 전체 기준이라고 표시됩니다.
+        <div class="flex gap-2 items-center mt-4">
+          <label><input type="checkbox" id="auto-report-include-all"> 제외한 자산까지 전부 넣기(원본 추출)</label>
+          <button class="btn btn-secondary btn-sm"
+                  onclick="openAssetBrowser({state:'excluded'},'자산에서 제외한 대상')">제외 목록 보기</button>
+        </div>
+      </div>
       <div id="auto-report-result" class="mt-4"></div>
     </div>
 

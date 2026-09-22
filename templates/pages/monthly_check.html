@@ -74,12 +74,24 @@
 
       <div class="card">
         <div class="flex justify-between items-center mb-4">
-          <div class="card-title" style="margin-bottom:0"><span class="icon">🚫</span> 서버 현황 제외 목록</div>
-          <div class="text-xs text-muted" id="monthly-excluded-reason"></div>
+          <div class="card-title" style="margin-bottom:0"><span class="icon">🚫</span> 자산에서 제외한 대상</div>
+          <div class="flex gap-2">
+            <button class="btn btn-secondary btn-sm"
+                    onclick="openAssetBrowser({state:'excluded'},'자산에서 제외한 대상')">제외 목록 관리</button>
+            <button class="btn btn-secondary btn-sm"
+                    onclick="openAssetBrowser({},'ITSM 전체 자산')">전체 자산 보기</button>
+          </div>
         </div>
+        <div id="monthly-excluded-summary" class="text-sm mb-4"></div>
+        <div class="text-xs text-muted mb-4" id="monthly-excluded-reason"></div>
         <div class="table-wrap" style="max-height:320px;overflow:auto">
-          <table><thead><tr><th>자산번호</th><th>호스트명</th><th>IP</th><th>업무명</th><th>위치</th></tr></thead>
+          <table><thead><tr><th>자산번호</th><th>업무명</th><th>호스트명</th><th>IP</th>
+            <th>위치</th><th>제외 사유</th><th>판단에 쓴 값</th></tr></thead>
           <tbody id="monthly-excluded-body"></tbody></table>
+        </div>
+        <div class="alert alert-info" style="margin-top:12px;margin-bottom:0">
+          <strong>제외 목록 관리</strong>에서 검색해 골라 자산에 다시 포함하거나 뺄 수 있습니다.
+          여기서 정한 것은 <strong>통합 대시보드 · 일간 · 주간 · 월간 점검 · 보고서에 모두 같이</strong> 적용됩니다.
         </div>
       </div>
     </div>
@@ -91,6 +103,7 @@
           <div class="text-xs text-muted" id="monthly-eosl-basis"></div>
         </div>
         <div class="table-wrap"><table id="monthly-eosl"></table></div>
+        <div id="monthly-eosl-diagnosis" style="margin-top:12px"></div>
         <div class="alert alert-info" style="margin-top:12px;margin-bottom:0">
           대상은 서버 현황과 같습니다. <strong>서버</strong> 행은 물리서버, <strong>OS</strong> 행은 전체서버이며
           각 행의 합계가 서버 현황의 소계와 일치합니다. 연도만 보고, 9999 는 계획 없음으로 셉니다.

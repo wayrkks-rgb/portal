@@ -42,7 +42,7 @@ function renderAssetStatus(data){
   document.getElementById('dash-category-legend').innerHTML=`<div class="legend-row"><span>🟠 물리</span><strong>${dashboardNumber(physical)}</strong></div><div class="legend-row"><span>⚪ 논리</span><strong>${dashboardNumber(logical)}</strong></div><div class="legend-row"><span>IDC / DR</span><strong>${dashboardNumber(location.IDC)} / ${dashboardNumber(location.DR)}</strong></div>`;
   renderCountingBasis(data.counting_basis||null);
   const rows=data.os||[], max=Math.max(...rows.map(r=>Number(r.count||0)),1);
-  document.getElementById('dash-os-bars').innerHTML=rows.length?rows.slice(0,12).map(r=>`<div class="bar-row"><span title="${syncEscape(r.name)}">${syncEscape(r.name)}</span><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2,Number(r.count||0)/max*100)}%"></div></div><strong>${dashboardNumber(r.count)}</strong></div>`).join(''):'<div class="text-muted">정상 ITSM 스냅샷이 없습니다.</div>';
+  document.getElementById('dash-os-bars').innerHTML=rows.length?rows.slice(0,12).map(r=>`<div class="bar-row" style="cursor:pointer" onclick="openAssetBrowser({q:'${String(r.name).replace(/'/g,"\\'")}',state:'included'},'OS ${syncEscape(r.name)}')"><span title="${syncEscape(r.name)}">${syncEscape(r.name)}</span><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2,Number(r.count||0)/max*100)}%"></div></div><strong>${dashboardNumber(r.count)}</strong></div>`).join(''):'<div class="text-muted">정상 ITSM 스냅샷이 없습니다.</div>';
 }
 // 대수가 ITSM 총 건수와 다를 때, 무엇을 세고 무엇을 뺐는지 보여준다.
 // 기준이 안 보이면 어느 쪽이 틀렸는지 따질 수가 없다.
@@ -50,12 +50,18 @@ function renderCountingBasis(basis){
   const el=document.getElementById('dash-counting-basis');
   if(!el)return;
   if(!basis){el.innerHTML='';return;}
-  const excluded=Object.entries(basis.excluded||{});
-  const included=Object.entries(basis.included||{}).map(([k,v])=>`${syncEscape(k)} ${dashboardNumber(v)}`).join(' + ');
+  const reasons=Object.entries(basis.by_reason||{})
+    .map(([,item])=>`${syncEscape(item.label)} ${dashboardNumber(item.count)}`).join(' · ');
+  const criteria=basis.criteria||{};
   el.innerHTML=`<div class="text-xs text-muted">`
-    +`ITSM 스냅샷 ${dashboardNumber(basis.snapshot_total)}건 중 <strong>${included||'0'}</strong> 을(를) 셌습니다.`
-    +(excluded.length?` 제외: ${excluded.map(([k,v])=>`${syncEscape(k)} ${dashboardNumber(v)}`).join(', ')}`:'')
-    +`<br>물리/논리는 ${syncEscape(basis.category_codes['물리'])} / ${syncEscape(basis.category_codes['논리'])} 코드로 나눕니다.`
+    +`ITSM 스냅샷 ${dashboardNumber(basis.snapshot_total)}건 중 `
+    +`<a href="javascript:void(0)" onclick="openAssetBrowser({state:'included'},'실제 자산')">`
+    +`<strong>${dashboardNumber(basis.selected)}건</strong></a> 을 자산으로 셌습니다.`
+    +(basis.excluded?` 제외 <a href="javascript:void(0)" onclick="openAssetBrowser({state:'excluded'},'자산에서 제외한 대상')">`
+      +`${dashboardNumber(basis.excluded)}건</a>${reasons?` (${reasons})`:''}`:'')
+    +`<br>같은 기준을 일간·주간·월간 점검과 보고서가 함께 씁니다.`
+    +` 위치는 ${syncEscape(criteria.location_field||'CM_PLACE')} 에 `
+    +`${syncEscape((criteria.dr_keywords||[]).join('/'))} 가 들어 있으면 DR 로 봅니다.`
     +`</div>`;
 }
 function renderITSMChanges(data){
@@ -187,12 +193,15 @@ function initAutoReportDates(){
 async function downloadAutoReport(type){
   const start=document.getElementById('auto-report-start')?.value||'',end=document.getElementById('auto-report-end')?.value||'';
   const result=document.getElementById('auto-report-result');result.innerHTML='<div class="alert alert-info"><span class="loading"></span> 보고서 생성 중...</div>';
-  const response=await fetch(`/api/asset-sync/reports/${type}?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);
+  // 평소에는 화면과 같은 대상만. 원본 전체가 필요할 때만 켠다.
+  const all=document.getElementById('auto-report-include-all')?.checked?'&include_all=1':'';
+  const response=await fetch(`/api/asset-sync/reports/${type}?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}${all}`);
   if(!response.ok){const data=await response.json().catch(()=>({}));result.innerHTML=`<div class="alert alert-error">❌ ${syncEscape(data.error||`HTTP ${response.status}`)}</div>`;return;}
   const blob=await response.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');
   const disposition=response.headers.get('Content-Disposition')||'',match=disposition.match(/filename="?([^";]+)"?/i);
   a.href=url;a.download=match?decodeURIComponent(match[1]):`${type}.xlsx`;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
-  result.innerHTML='<div class="alert alert-success">✅ 자동 보고서를 생성했습니다.</div>';
+  result.innerHTML=`<div class="alert alert-success">✅ 자동 보고서를 생성했습니다.`
+    +`${all?' <strong>(제외 자산 포함 · 원본 전체)</strong>':' (화면과 같은 자산 기준)'}</div>`;
 }
 
 </script>

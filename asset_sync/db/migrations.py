@@ -166,10 +166,60 @@ def _add_vcenter_display_name(conn: Any) -> bool:
     return True
 
 
+def _add_asset_exclusion(conn: Any) -> bool:
+    """실제 자산에서 뺄 대상을 담을 표.
+
+    ITSM·vCenter 가 주는 것을 전부 세면 실물 서버가 아닌 것까지 들어간다. 어느
+    화면이든 같은 수가 나와야 하므로 판단을 여기 한 곳에 모은다.
+    """
+    if table_exists(conn, "asset_exclusion"):
+        return False
+    if _engine(conn) == "mysql":
+        apply_step(conn, """
+            CREATE TABLE asset_exclusion (
+                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                source VARCHAR(16) NOT NULL,
+                asset_key VARCHAR(255) NOT NULL,
+                mode VARCHAR(16) NOT NULL DEFAULT 'EXCLUDE',
+                reason VARCHAR(500),
+                hostname VARCHAR(255),
+                primary_ip VARCHAR(64),
+                service_name VARCHAR(255),
+                updated_by VARCHAR(128),
+                updated_at VARCHAR(32) NOT NULL,
+                UNIQUE KEY uq_asset_exclusion (source, asset_key),
+                KEY idx_asset_exclusion_source (source, mode)
+            ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """)
+    else:
+        apply_step(conn, """
+            CREATE TABLE asset_exclusion (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL,
+                asset_key TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'EXCLUDE',
+                reason TEXT,
+                hostname TEXT,
+                primary_ip TEXT,
+                service_name TEXT,
+                updated_by TEXT,
+                updated_at TEXT NOT NULL,
+                UNIQUE(source, asset_key)
+            )
+        """)
+        apply_step(
+            conn,
+            "CREATE INDEX IF NOT EXISTS idx_asset_exclusion_source"
+            " ON asset_exclusion(source, mode)",
+        )
+    return True
+
+
 #: 통합 웹(포털)이 소유하는 마이그레이션. 이름 앞에 ``core/`` 가 붙는다.
 CORE_MIGRATIONS: list[Migration] = [
     ("audit_module_id", "audit_log.module_id 추가", _add_audit_module_id),
     ("vcenter_display_name", "통합기·ESXi·데이터스토어 업무명 표 추가", _add_vcenter_display_name),
+    ("asset_exclusion", "실제 자산에서 뺄 대상 표 추가", _add_asset_exclusion),
 ]
 
 

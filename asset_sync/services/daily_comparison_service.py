@@ -5,7 +5,8 @@ from typing import Any
 
 from ..config import AppConfig
 from ..repositories import AssetRepository
-from .change_presenter import present
+from .asset_scope import AssetScope
+from .change_presenter import attach_identity, present
 from .diff_service import DiffService
 
 
@@ -16,9 +17,17 @@ class DailyComparisonService:
     fallback so initial validation can still be performed before the first overnight run.
     """
 
-    def __init__(self, config: AppConfig, repository: AssetRepository) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        repository: AssetRepository,
+        scope: AssetScope | None = None,
+    ) -> None:
         self.config = config
         self.repo = repository
+        # 자산 대수와 같은 기준을 쓴다. 대시보드에서 뺀 자산이 일간 점검 변경
+        # 내역에는 남아 있으면 두 화면이 서로 다른 말을 하게 된다.
+        self.scope = scope or AssetScope.load(config, repository)
 
     def latest(self, source: str, limit: int = 2000) -> dict[str, Any]:
         source = source.upper()
@@ -55,6 +64,9 @@ class DailyComparisonService:
         raw_events, source_of_events = self._events_for(
             source, int(current["id"]), int(previous["id"]), limit
         )
+        # 자산코드만 있으면 어느 서버인지 알 수 없다. 호스트명·IP·업무명을 붙이고,
+        # 자산에서 뺀 대상의 변경은 여기서도 뺀다.
+        raw_events = attach_identity(raw_events, self.repo, scope=self.scope)
         events: list[dict[str, Any]] = []
         type_counts: Counter[str] = Counter()
         categories: dict[str, set[str]] = {

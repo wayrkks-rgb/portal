@@ -1,26 +1,34 @@
 from __future__ import annotations
 
 import json
-import re
 from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from ..normalization.code_maps import ASSET_STATUS, ENVIRONMENT, SERVER_CATEGORY
 from ..repositories import AssetRepository
+from .asset_scope import (
+    ACTIVE_STATUS as SCOPE_ACTIVE_STATUS,
+    location as scope_location,
+    LOGICAL_CATEGORY,
+    NO_PLAN_YEAR,
+    PHYSICAL_CATEGORY,
+    AssetScope,
+)
 from .exception_service import ReconciliationExceptionService
 
-
-ACTIVE_STATUS = {"CMSTA010", "CMSTA050"}
-LOGICAL_CATEGORY = "CMSVRCATCD020"
-PHYSICAL_CATEGORY = "CMSVRCATCD010"
+#: 예전 이름. 실제 판단은 AssetScope 가 한다.
+ACTIVE_STATUS = set(SCOPE_ACTIVE_STATUS)
 
 
 class IntegratedDashboardService:
     """Read-only dashboard projection built from persisted automatic collection results."""
 
-    def __init__(self, repository: AssetRepository) -> None:
+    def __init__(self, repository: AssetRepository, scope: AssetScope | None = None) -> None:
         self.repo = repository
+        # 무엇을 자산으로 셀지는 화면마다 정하지 않는다. asset_scope 가 정한 것을
+        # 월간 점검·보고서와 똑같이 쓴다. 안 주면 자동 규칙만으로 판단한다.
+        self.scope = scope or AssetScope.load(None, repository)
 
     def summary(self, start: str | None = None, end: str | None = None, detail_limit: int = 500) -> dict[str, Any]:
         start_day, end_day = self._period(start, end)
@@ -58,32 +66,40 @@ class IntegratedDashboardService:
         return result
 
     def _current_assets(self, snapshot_id: int) -> list[dict[str, Any]]:
-        # 집계는 정규화된 컬럼만 쓴다. 원본까지 풀 이유가 없다.
-        records = self.repo.load_itsm_records(snapshot_id, with_raw=False).values()
-        return [record for record in records if record.get("status_code") in ACTIVE_STATUS]
+        """실제 자산으로 셀 것만. 월간 점검·보고서와 같은 기준을 쓴다.
+
+        원본(raw)까지 읽는다. 설치 위치와 EOSL 은 원본 컬럼에만 있어서, 원본
+        없이 판정하면 모든 자산이 같은 값으로 떨어진다 -- 실제로 그랬다.
+        """
+        records = self.repo.load_itsm_records(snapshot_id).values()
+        included, _ = self.scope.split_itsm(records)
+        return included
 
     def _counting_basis(self, snapshot_id: int) -> dict[str, Any]:
         """대수가 무엇을 세고 무엇을 뺐는지 밝힌다.
 
         ITSM 총 건수와 화면의 대수가 다를 때, 기준이 안 보이면 어느 쪽이 틀렸는지
-        따질 수가 없다. 집계에서 빠진 상태코드를 건수까지 같이 돌려준다.
+        따질 수가 없다. 사유별 건수를 같이 돌려준다.
         """
-        records = self.repo.load_itsm_records(snapshot_id, with_raw=False).values()
+        records = list(self.repo.load_itsm_records(snapshot_id).values())
+        basis = self.scope.summary(records)
+        # 상태코드별 내역도 함께. 어느 상태가 몇 건 빠졌는지 바로 보여야 한다.
         included: Counter[str] = Counter()
         excluded: Counter[str] = Counter()
         for record in records:
             code = str(record.get("status_code") or "")
-            target = included if code in ACTIVE_STATUS else excluded
-            target[f"{ASSET_STATUS.get(code, '알 수 없음')}({code or '없음'})"] += 1
-        return {
-            "snapshot_total": len(records),
+            label = f"{ASSET_STATUS.get(code, '알 수 없음')}({code or '없음'})"
+            (included if code in ACTIVE_STATUS else excluded)[label] += 1
+        basis.update({
             "counted_status_codes": sorted(ACTIVE_STATUS),
             "included": dict(included),
-            "excluded": dict(excluded),
+            "excluded_status": dict(excluded),
             "category_codes": {"물리": PHYSICAL_CATEGORY, "논리": LOGICAL_CATEGORY},
-        }
+        })
+        return basis
 
     def _asset_status(self, assets: list[dict[str, Any]]) -> dict[str, Any]:
+        """대시보드 상단 집계. assets 는 이미 asset_scope 가 편 결과다."""
         status = Counter()
         category = Counter()
         location = Counter()
@@ -93,14 +109,14 @@ class IntegratedDashboardService:
         current_year = date.today().year
         for item in assets:
             status[ASSET_STATUS.get(str(item.get("status_code")), str(item.get("status_code") or "미정"))] += 1
-            category[SERVER_CATEGORY.get(str(item.get("server_category_code")), str(item.get("server_category_code") or "미정"))] += 1
-            location[self._location(item)] += 1
+            category["물리" if item.get("physical") else "논리"] += 1
+            location[item.get("location") or "IDC"] += 1
             os_count[str(item.get("os_family") or "미정")] += 1
-            year = self._eos_year(item.get("eos_value"))
-            if year == "미정":
-                eos_count["미정"] += 1
-            elif year == "확인필요":
+            year = item.get("eosl_year")
+            if year is None:
                 eos_count["확인필요"] += 1
+            elif int(year) >= NO_PLAN_YEAR:
+                eos_count["미정"] += 1
             else:
                 eos_year[str(year)] += 1
                 if int(year) < current_year:
@@ -367,7 +383,7 @@ class IntegratedDashboardService:
             "primary_ip": asset.get("primary_ip"),
             "status": ASSET_STATUS.get(str(asset.get("status_code")), str(asset.get("status_code") or "미정")),
             "server_type": SERVER_CATEGORY.get(str(asset.get("server_category_code")), str(asset.get("server_category_code") or "미정")),
-            "location": self._location(asset),
+            "location": scope_location(asset.get("raw") or {}, self.scope.criteria),
             "os": asset.get("os_family"),
             "os_version": asset.get("os_version"),
             "cpu_cores": asset.get("cpu_cores"),
@@ -426,27 +442,6 @@ class IntegratedDashboardService:
         if "STATUS" in event_type or event_type in {"RV_POWER_ON", "RV_POWER_OFF", "ITSM_ASSET_REACTIVATED"}:
             return "상태변경"
         return "변경"
-
-    @staticmethod
-    def _location(item: dict[str, Any]) -> str:
-        raw = item.get("raw", {}) or {}
-        dr_yn = str(raw.get("CM_DR_YN") or "").strip().upper()
-        environment = str(item.get("environment_code") or raw.get("CM_OWN_CAT_CD") or "").strip().upper()
-        place = str(raw.get("CM_PLACE") or "").strip().upper()
-        if dr_yn in {"Y", "YES", "1"} or environment == "CMOWNCATCD0040" or "DR" in place:
-            return "DR"
-        return "IDC"
-
-    @staticmethod
-    def _eos_year(value: Any) -> int | str:
-        text = str(value or "").strip()
-        if not text:
-            return "확인필요"
-        match = re.search(r"(\d{4})", text)
-        if not match:
-            return "확인필요"
-        year = int(match.group(1))
-        return "미정" if year == 9999 else year
 
     @staticmethod
     def _sorted_counts(counter: Counter[str], numeric: bool = False) -> list[dict[str, Any]]:

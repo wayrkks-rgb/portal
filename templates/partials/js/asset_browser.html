@@ -1,0 +1,175 @@
+{# 자산 목록 창 스크립트 #}
+<script>
+// 어느 화면에서 열었는지와 무엇으로 걸렀는지. 검색어만 바꿔 다시 부를 때 쓴다.
+let assetBrowserFilter = {};
+let assetBrowserRows = [];
+let assetBrowserSelected = new Set();
+let assetBrowserTimer = null;
+const ASSET_BROWSER_ADMIN = {{ 'true' if user.role == 'admin' else 'false' }};
+
+function openAssetBrowser(filter, title) {
+  assetBrowserFilter = Object.assign({}, filter || {});
+  assetBrowserSelected = new Set();
+  document.getElementById('asset-browser-title').textContent = title || '자산 목록';
+  document.getElementById('asset-browser-search').value = assetBrowserFilter.q || '';
+  document.getElementById('asset-browser-state').value = assetBrowserFilter.state || '';
+  document.getElementById('asset-browser-kind').value = assetBrowserFilter.kind || '';
+  document.getElementById('asset-browser').classList.add('show');
+  loadAssetBrowser();
+}
+
+function closeAssetBrowser() {
+  document.getElementById('asset-browser').classList.remove('show');
+}
+
+// 글자를 칠 때마다 서버를 부르면 느리다. 잠깐 멈췄을 때 한 번만 부른다.
+function debounceAssetBrowser() {
+  clearTimeout(assetBrowserTimer);
+  assetBrowserTimer = setTimeout(loadAssetBrowser, 250);
+}
+
+async function loadAssetBrowser() {
+  const body = document.getElementById('asset-browser-body');
+  if (!body) return;
+  const query = new URLSearchParams();
+  Object.entries(assetBrowserFilter).forEach(([key, value]) => {
+    if (value && key !== 'q' && key !== 'state' && key !== 'kind') query.set(key, value);
+  });
+  const term = document.getElementById('asset-browser-search').value.trim();
+  const state = document.getElementById('asset-browser-state').value;
+  const kind = document.getElementById('asset-browser-kind').value;
+  if (term) query.set('q', term);
+  if (state) query.set('state', state);
+  if (kind) query.set('kind', kind);
+  query.set('limit', '5000');
+
+  body.innerHTML = '<tr><td colspan="11" style="text-align:center"><span class="loading"></span> 불러오는 중…</td></tr>';
+  let data;
+  try {
+    data = await apiFetch('/api/asset-sync/assets?' + query);
+  } catch (error) {
+    document.getElementById('asset-browser-alert').innerHTML =
+      `<div class="alert alert-error">❌ ${syncEscape(error.message)}</div>`;
+    body.innerHTML = '';
+    return;
+  }
+  document.getElementById('asset-browser-alert').innerHTML = '';
+  if (data.status === 'NO_SNAPSHOT') {
+    body.innerHTML = `<tr><td colspan="11" style="text-align:center" class="text-muted">${syncEscape(data.message)}</td></tr>`;
+    return;
+  }
+  assetBrowserRows = data.items || [];
+  renderAssetBrowser(data);
+}
+
+function assetEosl(row) {
+  if (row.eosl_value == null || row.eosl_value === '') return '<span class="text-muted">없음</span>';
+  const year = row.eosl_year;
+  const field = row.eosl_field ? `<div class="text-xs text-muted mono">${syncEscape(row.eosl_field)}</div>` : '';
+  return `${syncEscape(row.eosl_value)}${year ? '' : ' <span class="text-error text-xs">(연도 못 읽음)</span>'}${field}`;
+}
+
+function assetState(row) {
+  if (!row.exclude_reason) {
+    return row.manual
+      ? '<span class="badge badge-blue">자산(수동 포함)</span>'
+      : '<span class="badge badge-green">자산</span>';
+  }
+  const label = row.exclude_label || row.exclude_reason;
+  const note = row.manual_note ? `<div class="text-xs text-muted">${syncEscape(row.manual_note)}</div>` : '';
+  // 왜 빠졌는지는 판단에 쓴 값까지 보여야 따질 수 있다.
+  const fields = Object.entries(row.exclude_fields || {})
+    .map(([name, value]) => `${syncEscape(name)}=${value == null || value === '' ? '(빔)' : syncEscape(value)}`)
+    .join(' · ');
+  return `<span class="badge badge-red">제외</span>`
+    + `<div class="text-xs text-muted">${syncEscape(label)}</div>${note}`
+    + (row.exclude_reason === 'EMPTY' && fields ? `<div class="text-xs text-muted mono">${fields}</div>` : '');
+}
+
+function renderAssetBrowser(data) {
+  const body = document.getElementById('asset-browser-body');
+  const rows = assetBrowserRows;
+  const checkbox = row => ASSET_BROWSER_ADMIN
+    ? `<td><input type="checkbox" class="asset-row-check" value="${syncEscape(row.asset_key)}"
+         ${assetBrowserSelected.has(row.asset_key) ? 'checked' : ''} onchange="toggleAssetRow(this)"></td>` : '';
+
+  body.innerHTML = rows.length ? rows.map(row => `<tr>
+    ${checkbox(row)}
+    <td class="mono">${syncEscape(row.cm_id || '-')}</td>
+    <td>${syncEscape(row.service_name || '-')}</td>
+    <td>${syncEscape(row.hostname || '-')}</td>
+    <td class="mono">${syncEscape(row.primary_ip || '-')}</td>
+    <td>${syncEscape(row.location || '-')}<div class="text-xs text-muted">${syncEscape(row.place || '')}</div></td>
+    <td>${row.physical ? '물리' : '논리'}</td>
+    <td>${syncEscape(row.os_family || '-')}<div class="text-xs text-muted">${syncEscape(row.os_group || '')}</div></td>
+    <td>${syncEscape(row.os_version || '-')}</td>
+    <td>${assetEosl(row)}</td>
+    <td>${assetState(row)}</td></tr>`).join('')
+    : '<tr><td colspan="11" style="text-align:center" class="text-muted">조건에 맞는 자산이 없습니다.</td></tr>';
+
+  const counted = rows.filter(r => !r.exclude_reason).length;
+  document.getElementById('asset-browser-count').textContent =
+    `${Number(data.total || 0).toLocaleString()}건` + (data.truncated ? ' (5,000건까지 표시)' : '')
+    + ` · 자산 ${counted.toLocaleString()} / 제외 ${(rows.length - counted).toLocaleString()}`;
+  document.getElementById('asset-browser-basis').textContent =
+    `${data.as_of || '-'} 스냅샷 · ITSM 전체 ${Number(data.snapshot_total || 0).toLocaleString()}건 기준`;
+  updateAssetSelection();
+}
+
+function toggleAssetRow(input) {
+  if (input.checked) assetBrowserSelected.add(input.value);
+  else assetBrowserSelected.delete(input.value);
+  updateAssetSelection();
+}
+
+function toggleAllAssetRows(checked) {
+  document.querySelectorAll('.asset-row-check').forEach(input => {
+    input.checked = checked;
+    if (checked) assetBrowserSelected.add(input.value);
+    else assetBrowserSelected.delete(input.value);
+  });
+  updateAssetSelection();
+}
+
+function updateAssetSelection() {
+  const holder = document.getElementById('asset-browser-selected');
+  if (holder) holder.textContent = `선택 ${assetBrowserSelected.size.toLocaleString()}건`;
+}
+
+async function applyAssetScope(mode) {
+  if (!assetBrowserSelected.size) {
+    document.getElementById('asset-browser-alert').innerHTML =
+      '<div class="alert alert-warning">⚠️ 대상을 먼저 선택하세요.</div>';
+    return;
+  }
+  const chosen = assetBrowserRows.filter(row => assetBrowserSelected.has(row.asset_key));
+  const response = await fetch('/api/asset-sync/admin/asset-exclusions', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      source: 'ITSM',
+      mode,
+      reason: document.getElementById('asset-browser-reason').value.trim(),
+      items: chosen.map(row => ({
+        asset_key: row.asset_key, hostname: row.hostname,
+        primary_ip: row.primary_ip, service_name: row.service_name,
+      })),
+    }),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || !result.success) {
+    document.getElementById('asset-browser-alert').innerHTML =
+      `<div class="alert alert-error">❌ ${syncEscape(result.error || 'HTTP ' + response.status)}</div>`;
+    return;
+  }
+  const label = mode === 'EXCLUDE' ? '자산에서 제외' : mode === 'INCLUDE' ? '자산에 포함' : '자동 판정으로 되돌림';
+  document.getElementById('asset-browser-alert').innerHTML =
+    `<div class="alert alert-success">✅ ${result.changed}건을 ${label}했습니다. 모든 화면에 함께 적용됩니다.</div>`;
+  assetBrowserSelected = new Set();
+  document.getElementById('asset-browser-all').checked = false;
+  await loadAssetBrowser();
+  // 대수가 바뀌었으므로 열려 있는 화면도 다시 센다.
+  if (typeof loadDashboard === 'function' && document.getElementById('page-dashboard')?.classList.contains('active')) loadDashboard();
+  if (typeof loadMonthlyCheck === 'function' && document.getElementById('page-monthly_check')?.classList.contains('active')) loadMonthlyCheck();
+  if (typeof loadDailyCheck === 'function' && document.getElementById('page-daily_check')?.classList.contains('active')) loadDailyCheck();
+}
+</script>
