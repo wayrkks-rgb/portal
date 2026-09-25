@@ -66,6 +66,11 @@ data/archive/vcenter/YYYYMMDD/       날짜별 vCenter XLSX
 상세 절차는 `BEGINNER_RUN_AND_VALIDATION_GUIDE.md`와 `CONNECTION_SETUP_GUIDE.md`를 참고한다.
 여러 WAS를 붙여 운영하려면 `MULTI_WAS_MYSQL_GUIDE.md`를 함께 본다.
 
+## 사내 GitLab
+
+이 저장소는 GitHub 에 둔다. 사내 GitLab(`hli-syscheck-service`)에서 새로 시작하는
+작업의 절차는 `GITLAB_SETUP_GUIDE.md` 를 본다.
+
 ## 대메뉴 연동 (타 팀 담당자)
 
 | 문서 | 용도 |

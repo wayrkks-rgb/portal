@@ -75,6 +75,9 @@ git push -u origin feature/<내모듈>
 
 push 하면 CI 가 자동으로 같은 점검을 돌린다. 통과하면 PR 을 올린다.
 
+> 사내 GitLab 저장소에서 작업한다면 순서는 똑같고 PR 자리에 MR 을 올린다.
+> 절차는 [GITLAB_SETUP_GUIDE.md](GITLAB_SETUP_GUIDE.md) 를 본다.
+
 > `git status` 에 **`M`(수정)이 찍힌 공용 파일이 있으면 멈추고 확인한다.**
 > 정상적인 모듈 추가는 전부 `??`(새 파일)이어야 한다.
 
