@@ -81,6 +81,12 @@ def seed(manager, rows: list[dict]) -> int:
 
 # ── 위치 판정 ────────────────────────────────────────────────────────────
 @pytest.mark.parametrize("place,expected", [
+    # ITSM 이 코드로 주는 경우. 코드는 글자로 찾을 수 없다 -- "CMPLACE020" 안에는
+    # "DR" 도 "IDC" 도 없다. 코드표를 먼저 맞추지 않으면 전부 IDC 로 떨어진다.
+    ("CMPLACE010", "IDC"),
+    ("CMPLACE020", "DR"),
+    ("cmplace020", "DR"),        # 대소문자
+    (" CMPLACE020 ", "DR"),      # 앞뒤 공백
     ("63DR", "DR"),              # 앞에 층수가 붙어도 DR 이다
     ("DR센터", "DR"),
     ("IDC-DR-2F", "DR"),         # 둘 다 들어 있으면 DR
@@ -90,9 +96,21 @@ def seed(manager, rows: list[dict]) -> int:
     ("", "IDC"),                 # 값이 없으면 기본값
     ("3층 서버실", "IDC"),        # 어느 조각도 없으면 기본값
 ])
-def test_location_matches_by_fragment_not_by_equality(place, expected):
-    """값이 "63DR" 처럼 앞뒤에 무엇이 붙어 온다. 같은지가 아니라 들어 있는지 본다."""
+def test_location_reads_both_codes_and_free_text(place, expected):
+    """CM_PLACE 는 코드로도 오고 글로도 온다. 둘 다 가려야 한다."""
     assert location({"CM_PLACE": place}, CRITERIA) == expected
+
+
+def test_the_place_code_table_can_be_overridden(tmp_path):
+    """ITSM 마다 코드가 다를 수 있다. 설정으로 바꿀 수 있어야 한다."""
+    config = AppConfig(
+        root_dir=tmp_path, sqlite_path=Path("data/x.db"),
+        server_status={"place_codes": {"LOC001": "IDC", "LOC002": "DR"}},
+    )
+    criteria = criteria_from(config)
+    assert location({"CM_PLACE": "LOC002"}, criteria) == "DR"
+    # 기본 코드도 그대로 남는다.
+    assert location({"CM_PLACE": "CMPLACE020"}, criteria) == "DR"
 
 
 # ── EOSL 연도 ────────────────────────────────────────────────────────────

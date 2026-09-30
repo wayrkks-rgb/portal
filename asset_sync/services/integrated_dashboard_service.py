@@ -46,6 +46,8 @@ class IntegratedDashboardService:
             "as_of": latest_itsm["collected_at"] if latest_itsm else None,
             "period": {"start": start_day.isoformat(), "end": end_day.isoformat()},
             "automation": self._automation(batch),
+            # 배치가 돌았는지와, 화면이 실제로 최신 값을 읽고 있는지는 다른 이야기다.
+            "freshness": self._freshness(),
             "asset_status": itsm_status,
             "itsm_changes": period_changes,
             "vcenter_changes": vcenter_changes,
@@ -474,4 +476,36 @@ class IntegratedDashboardService:
         result = dict(batch)
         result["errors"] = json.loads(result.pop("error_json") or "{}")
         result["metadata"] = json.loads(result.pop("metadata_json") or "{}")
+        return result
+
+    def _freshness(self) -> dict[str, Any]:
+        """화면이 지금 읽고 있는 스냅샷이 언제 것인가.
+
+        배치가 SUCCESS 인데도 화면 값이 그대로면, 대개 배치가 만든 스냅샷과
+        화면이 읽는 최신 스냅샷이 다르다. 그 둘을 나란히 보여 준다.
+        """
+        today = date.today()
+        result: dict[str, Any] = {}
+        for source, label in (("ITSM", "itsm"), ("RVTOOLS", "vcenter")):
+            row = self.repo.latest_snapshot(source)
+            if not row:
+                result[label] = {"status": "NO_SNAPSHOT"}
+                continue
+            # 드라이버가 Row 를 돌려준다. Row 에는 .get 이 없으므로 dict 로 바꾼다.
+            snapshot = dict(row)
+            snapshot_date = str(snapshot.get("snapshot_date") or "")[:10]
+            try:
+                age = (today - date.fromisoformat(snapshot_date)).days
+            except ValueError:
+                age = None
+            result[label] = {
+                "status": "OK",
+                "snapshot_id": snapshot.get("id"),
+                "snapshot_date": snapshot_date,
+                "collected_at": snapshot.get("collected_at"),
+                "record_count": int(snapshot.get("record_count") or 0),
+                "age_days": age,
+                # 이틀 넘게 그대로면 배치가 돌지 않았다고 본다. 매일 도는 배치다.
+                "stale": age is not None and age >= 2,
+            }
         return result

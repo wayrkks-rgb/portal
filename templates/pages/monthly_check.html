@@ -8,6 +8,7 @@
     <div class="flex gap-2 items-center">
       <input class="form-input" type="month" id="monthly-month" style="width:150px" onchange="loadMonthlyCheck()">
       <button class="btn btn-secondary btn-sm" onclick="loadMonthlyCheck()">새로고침</button>
+      <button class="btn btn-primary btn-sm" onclick="exportMonthly('all')">전체 Excel</button>
     </div>
   </div>
   <div class="content">
@@ -57,18 +58,25 @@
       <div class="card">
         <div class="flex justify-between items-center mb-4">
           <div class="card-title" style="margin-bottom:0"><span class="icon">🗄️</span> 서버현황 (전체 서버)</div>
+          <button class="btn btn-secondary btn-sm" onclick="exportMonthly('server_all')">Excel</button>
           <div class="text-xs text-muted" id="monthly-server-basis"></div>
         </div>
         <div class="table-wrap"><table id="monthly-server-all"></table></div>
       </div>
 
       <div class="card">
-        <div class="card-title"><span class="icon">📋</span> 자산 현황 변동 내역</div>
+        <div class="flex justify-between items-center mb-4">
+          <div class="card-title" style="margin-bottom:0"><span class="icon">📋</span> 자산 현황 변동 내역</div>
+          <button class="btn btn-secondary btn-sm" onclick="exportMonthly('movements')">Excel</button>
+        </div>
         <div id="monthly-movements"></div>
       </div>
 
       <div class="card">
-        <div class="card-title"><span class="icon">🔧</span> 서버현황 (물리서버)</div>
+        <div class="flex justify-between items-center mb-4">
+          <div class="card-title" style="margin-bottom:0"><span class="icon">🔧</span> 서버현황 (물리서버)</div>
+          <button class="btn btn-secondary btn-sm" onclick="exportMonthly('server_physical')">Excel</button>
+        </div>
         <div class="table-wrap"><table id="monthly-server-physical"></table></div>
       </div>
 
@@ -80,6 +88,8 @@
                     onclick="openAssetBrowser({state:'excluded'},'자산에서 제외한 대상')">제외 목록 관리</button>
             <button class="btn btn-secondary btn-sm"
                     onclick="openAssetBrowser({},'ITSM 전체 자산')">전체 자산 보기</button>
+            <button class="btn btn-secondary btn-sm" onclick="exportMonthly('excluded')">제외 Excel</button>
+            <button class="btn btn-secondary btn-sm" onclick="exportMonthly('assets')">자산목록 Excel</button>
           </div>
         </div>
         <div id="monthly-excluded-summary" class="text-sm mb-4"></div>
@@ -100,7 +110,10 @@
       <div class="card">
         <div class="flex justify-between items-center mb-4">
           <div class="card-title" style="margin-bottom:0"><span class="icon">📅</span> EOSL 현황</div>
-          <div class="text-xs text-muted" id="monthly-eosl-basis"></div>
+          <div class="flex gap-2 items-center">
+            <div class="text-xs text-muted" id="monthly-eosl-basis"></div>
+            <button class="btn btn-secondary btn-sm" onclick="exportMonthly('eosl')">Excel</button>
+          </div>
         </div>
         <div class="table-wrap"><table id="monthly-eosl"></table></div>
         <div id="monthly-eosl-diagnosis" style="margin-top:12px"></div>

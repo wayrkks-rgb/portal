@@ -156,6 +156,40 @@ function renderEoslDiagnosis(diagnosis, criteria) {
   holder.innerHTML = verdict + `<div class="text-xs text-muted">EOSL 값 출처${lines}</div>`;
 }
 
+// 화면에 보이는 장표를 그대로 엑셀로 받는다. 집계는 서버가 화면에 쓴 것과 같은
+// 계산을 쓰므로 화면과 파일의 숫자가 다를 수 없다.
+async function exportMonthly(section) {
+  const alertEl = document.getElementById('monthly-alert');
+  const month = document.getElementById('monthly-month').value;
+  const query = new URLSearchParams({section});
+  if (month) query.set('month', month);
+  alertEl.innerHTML = '<div class="alert alert-info"><span class="loading"></span> Excel 생성 중...</div>';
+  let response;
+  try {
+    response = await fetch('/api/asset-sync/server-status/export?' + query);
+  } catch (error) {
+    alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(error.message)}</div>`;
+    return;
+  }
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(data.error || 'HTTP ' + response.status)}</div>`;
+    return;
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const match = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+  link.href = url;
+  link.download = match ? decodeURIComponent(match[1]) : `월간점검_${section}.xlsx`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  alertEl.innerHTML = '<div class="alert alert-success">✅ Excel 을 내려받았습니다.</div>';
+}
+
 function monthRange(month) {
   const now = new Date();
   const [year, index] = month

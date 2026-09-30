@@ -8,6 +8,7 @@ from .diff_service import DiffService
 from .export_service import ExportService
 from .exception_service import ReconciliationExceptionService
 from .integrated_dashboard_service import IntegratedDashboardService
+from .monthly_export_service import MONTHLY_SECTIONS, MonthlyCheckExportService
 from .resource_usage_service import VMResourceUsageExportService
 from .period_service import PeriodService
 from .override_service import OverrideService
@@ -22,5 +23,5 @@ __all__ = [
     "AutomatedReportService", "CollectionService", "DashboardService", "DiffService", "ExportService", "PeriodService", "OverrideService",
     "DataQualityService", "ReconciliationService", "SnapshotService", "ChangeSyncService", "DailyComparisonService",
     "IntegratedDashboardService", "ReconciliationExceptionService", "VMResourceUsageExportService",
-    "ServerStatusService",
+    "ServerStatusService", "MonthlyCheckExportService", "MONTHLY_SECTIONS",
 ]

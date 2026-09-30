@@ -17,6 +17,7 @@ from ..repositories import AssetRepository
 from ..services import (
     AutomatedReportService, ChangeSyncService, DailyComparisonService, DashboardService, ExportService,
     IntegratedDashboardService, PeriodService, ReconciliationExceptionService,
+    MONTHLY_SECTIONS, MonthlyCheckExportService,
     ReconciliationService, ServerStatusService, VMResourceUsageExportService, present_all,
 )
 from ..services.asset_scope import AssetScope
@@ -118,6 +119,32 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
     def monthly_check_page() -> Any:
         return render_template("main.html", user=session["user"], page="monthly_check")
 
+    def _monthly_status(conn: Any, base_day: date) -> tuple[dict[str, Any] | None, Any]:
+        """월간 점검 결과 한 벌. 화면과 엑셀이 **같은 계산**을 쓰도록 여기서만 만든다.
+
+        따로 계산하면 화면과 파일의 숫자가 달라질 수 있고, 그러면 어느 쪽을
+        믿어야 하는지 알 수 없다.
+        """
+        repo = AssetRepository(conn)
+        current = repo.snapshot_on_or_before("ITSM", base_day.isoformat())
+        if not current:
+            return None, None
+        # 전월 말일 기준. 그 날짜까지의 마지막 스냅샷이 전월 값이 된다.
+        previous_day = base_day.replace(day=1) - timedelta(days=1)
+        previous = repo.snapshot_on_or_before("ITSM", previous_day.isoformat())
+        service = ServerStatusService(cfg, repo, include_all=_include_all())
+        result = service.status(int(current["id"]), int(previous["id"]) if previous else None)
+        result["eosl"] = service.eosl(int(current["id"]))
+        if previous:
+            result["movements"] = service.movements(int(current["id"]), int(previous["id"]))
+        result.update({
+            "status": "SUCCESS",
+            "as_of": current["snapshot_date"],
+            "previous_as_of": previous["snapshot_date"] if previous else None,
+            "period": {"base_day": base_day.isoformat()},
+        })
+        return result, service
+
     @bp.route("/api/asset-sync/server-status")
     @login_required
     def server_status() -> Any:
@@ -127,28 +154,50 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         with manager.connect() as conn:
-            repo = AssetRepository(conn)
-            current = repo.snapshot_on_or_before("ITSM", base_day.isoformat())
-            if not current:
-                return jsonify({
-                    "status": "NO_SNAPSHOT", "as_of": None,
-                    "message": "해당 기간까지의 ITSM 스냅샷이 없습니다. 수집을 먼저 실행하세요.",
-                })
-            # 전월 말일 기준. 그 날짜까지의 마지막 스냅샷이 전월 값이 된다.
-            previous_day = base_day.replace(day=1) - timedelta(days=1)
-            previous = repo.snapshot_on_or_before("ITSM", previous_day.isoformat())
-            service = ServerStatusService(cfg, repo, include_all=_include_all())
-            result = service.status(int(current["id"]), int(previous["id"]) if previous else None)
-            result["eosl"] = service.eosl(int(current["id"]))
-            if previous:
-                result["movements"] = service.movements(int(current["id"]), int(previous["id"]))
-        result.update({
-            "status": "SUCCESS",
-            "as_of": current["snapshot_date"],
-            "previous_as_of": previous["snapshot_date"] if previous else None,
-            "period": {"base_day": base_day.isoformat()},
-        })
+            result, _ = _monthly_status(conn, base_day)
+        if result is None:
+            return jsonify({
+                "status": "NO_SNAPSHOT", "as_of": None,
+                "message": "해당 기간까지의 ITSM 스냅샷이 없습니다. 수집을 먼저 실행하세요.",
+            })
         return jsonify(result)
+
+    @bp.route("/api/asset-sync/server-status/export")
+    @login_required
+    def server_status_export() -> Any:
+        """월간 점검 장표를 엑셀로. 항목별로 따로 받을 수 있다.
+
+        월간 보고에 붙일 때 필요한 장표만 뽑는 일이 많다. 전부 한 파일로 주면
+        쓰는 사람이 시트를 지워야 한다.
+        """
+        try:
+            base_day = _month_end(request.args.get("month"))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        section = str(request.args.get("section") or "all").strip().lower()
+        with manager.connect() as conn:
+            result, service = _monthly_status(conn, base_day)
+            if result is None:
+                return jsonify({"error": "해당 기간까지의 ITSM 스냅샷이 없습니다."}), 400
+            # 자산 목록 시트는 한 건씩 펼친 값이 필요하다. 다른 항목만 받을 때는
+            # 읽지 않는다 -- 전체 목록을 매번 펼칠 이유가 없다.
+            records: list[dict[str, Any]] = []
+            if section in ("all", "assets"):
+                snapshot = AssetRepository(conn).snapshot_on_or_before("ITSM", base_day.isoformat())
+                records = service.records(int(snapshot["id"]))
+            try:
+                path = MonthlyCheckExportService(result, records).save(
+                    cfg.resolve("data/export/monthly_check"), section, base_day
+                )
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+        return send_file(path, as_attachment=True, download_name=path.name)
+
+    @bp.route("/api/asset-sync/server-status/sections")
+    @login_required
+    def server_status_sections() -> Any:
+        """엑셀로 받을 수 있는 항목 목록. 화면이 버튼을 이 값으로 만든다."""
+        return jsonify({"sections": [{"id": key, "name": name} for key, name in MONTHLY_SECTIONS.items()]})
 
     @bp.route("/api/asset-sync/assets")
     @login_required

@@ -17,18 +17,34 @@ async function loadDashboard() {
     const data=await response.json();
     if(!response.ok||data.error)throw new Error(data.error||`HTTP ${response.status}`);
     alertEl.innerHTML='';
-    renderAutomation(data.automation||{});
+    renderAutomation(data.automation||{}, data.freshness||{});
     renderAssetStatus(data.asset_status||{});
     renderITSMChanges(data.itsm_changes||{});
     renderVCenterChanges(data.vcenter_changes||{});
     renderComparison(data.comparison||{});
   }catch(error){alertEl.innerHTML=`<div class="alert alert-error">❌ ${syncEscape(error.message)}</div>`;}
 }
-function renderAutomation(item){
+function renderAutomation(item, freshness){
   const el=document.getElementById('dash-automation'), status=String(item.status||'NO_RUN').toLowerCase();
   el.className=`auto-status ${status}`;
   const resource=item.resource_usage_status||'PENDING_SCRIPT';
-  el.innerHTML=`<span class="auto-status-dot"></span><div><strong>${syncEscape(item.status||'자동실행 이력 없음')}</strong><div class="text-xs text-muted">마지막 실행 ${dashboardDateText(item.started_at)} · 종료 ${dashboardDateText(item.ended_at)} · VM_ResourceUsageExport ${syncEscape(resource)}</div></div>`;
+  // 배치가 돌았는지와, 화면이 최신 값을 읽고 있는지는 다른 이야기다. 둘 다 적는다.
+  const parts=[];
+  [['itsm','ITSM'],['vcenter','vCenter']].forEach(([key,label])=>{
+    const info=freshness[key]||{};
+    if(info.status!=='OK'){parts.push(`${label} 스냅샷 없음`);return;}
+    const age=info.age_days==null?'':(info.age_days===0?'오늘':`${info.age_days}일 전`);
+    const mark=info.stale?'⚠️ ':'';
+    parts.push(`${mark}${label} ${syncEscape(info.snapshot_date)}${age?` (${age})`:''} · ${dashboardNumber(info.record_count)}건`);
+  });
+  const errors=Object.entries(item.errors||{});
+  el.innerHTML=`<span class="auto-status-dot"></span><div>`
+    +`<strong>${syncEscape(item.status||'자동실행 이력 없음')}</strong>`
+    +`<div class="text-xs text-muted">마지막 실행 ${dashboardDateText(item.started_at)} · 종료 ${dashboardDateText(item.ended_at)} · 자원사용률 ${syncEscape(resource)}</div>`
+    +`<div class="text-xs">화면이 읽는 값: ${parts.join(' / ')||'-'}</div>`
+    +(errors.length?`<div class="text-xs text-error">오류: ${errors.map(([k,v])=>`${syncEscape(k)} - ${syncEscape(String(v).slice(0,120))}`).join(' · ')}</div>`:'')
+    +(parts.some(p=>p.startsWith('⚠️'))?`<div class="text-xs text-warning">이틀 넘게 같은 스냅샷입니다. 배치가 돌지 않았거나 수집이 실패했습니다. 서버에서 <span class="mono">scripts\\check_daily_batch.py</span> 로 확인하세요.</div>`:'')
+    +`</div>`;
 }
 function renderAssetStatus(data){
   const category=data.category||{}, location=data.location||{};
@@ -60,8 +76,9 @@ function renderCountingBasis(basis){
     +(basis.excluded?` 제외 <a href="javascript:void(0)" onclick="openAssetBrowser({state:'excluded'},'자산에서 제외한 대상')">`
       +`${dashboardNumber(basis.excluded)}건</a>${reasons?` (${reasons})`:''}`:'')
     +`<br>같은 기준을 일간·주간·월간 점검과 보고서가 함께 씁니다.`
-    +` 위치는 ${syncEscape(criteria.location_field||'CM_PLACE')} 에 `
-    +`${syncEscape((criteria.dr_keywords||[]).join('/'))} 가 들어 있으면 DR 로 봅니다.`
+    +` 위치는 ${syncEscape(criteria.location_field||'CM_PLACE')} 로 가릅니다`
+    +`(${Object.entries(criteria.place_codes||{}).map(([k,v])=>`${syncEscape(k)}=${syncEscape(v)}`).join(', ')}`
+    +`${(criteria.dr_keywords||[]).length?` · 글로 적혀 있으면 ${syncEscape((criteria.dr_keywords||[]).join('/'))} 포함 시 DR`:''}).`
     +`</div>`;
 }
 function renderITSMChanges(data){

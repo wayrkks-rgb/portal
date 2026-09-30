@@ -24,6 +24,8 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+
+from ..normalization.code_maps import PLACE
 from datetime import datetime
 from typing import Any, Iterable, Mapping
 
@@ -34,9 +36,10 @@ ACTIVE_STATUS = ("CMSTA010", "CMSTA050")
 PHYSICAL_CATEGORY = "CMSVRCATCD010"
 LOGICAL_CATEGORY = "CMSVRCATCD020"
 
-#: 설치 위치 컬럼과, 그 안에서 찾을 조각. "63DR" 처럼 앞뒤에 무엇이 붙어 있어도
-#: 조각이 들어 있으면 그것으로 본다. DR 을 먼저 본다 -- "IDC-DR" 은 DR 이다.
+#: 설치 위치 컬럼. 코드(CMPLACE010/020)로 오거나 글("63DR")로 온다.
+#: 코드는 글자로 찾을 수 없으므로 코드표를 먼저 맞춰 본다.
 DEFAULT_LOCATION_FIELD = "CM_PLACE"
+DEFAULT_PLACE_CODES = dict(PLACE)
 DEFAULT_DR_KEYWORDS = ("DR", "재해", "재해복구")
 DEFAULT_IDC_KEYWORDS = ("IDC", "본사", "주센터")
 DEFAULT_LOCATION = "IDC"
@@ -82,6 +85,8 @@ class Criteria:
     """집계 기준. 설정에서 만들고, 화면에 그대로 보여준다."""
 
     location_field: str = DEFAULT_LOCATION_FIELD
+    #: 코드 -> IDC/DR. dict 는 얼릴 수 없으므로 튜플 짝으로 둔다.
+    place_code_items: tuple[tuple[str, str], ...] = tuple(sorted(DEFAULT_PLACE_CODES.items()))
     dr_keywords: tuple[str, ...] = DEFAULT_DR_KEYWORDS
     idc_keywords: tuple[str, ...] = DEFAULT_IDC_KEYWORDS
     default_location: str = DEFAULT_LOCATION
@@ -90,9 +95,14 @@ class Criteria:
     active_status: tuple[str, ...] = ACTIVE_STATUS
     os_groups: tuple[tuple[str, tuple[str, ...]], ...] = DEFAULT_OS_GROUPS
 
+    @property
+    def place_codes(self) -> dict[str, str]:
+        return {str(code).upper(): value for code, value in self.place_code_items}
+
     def public(self) -> dict[str, Any]:
         return {
             "location_field": self.location_field,
+            "place_codes": self.place_codes,
             "dr_keywords": list(self.dr_keywords),
             "idc_keywords": list(self.idc_keywords),
             "default_location": self.default_location,
@@ -129,8 +139,15 @@ def criteria_from(config: Any) -> Criteria:
         if upper and upper not in ordered:
             ordered.append(upper)
 
+    # 코드표는 설정으로 덮어쓸 수 있다. ITSM 마다 코드가 다를 수 있다.
+    codes = dict(DEFAULT_PLACE_CODES)
+    configured = section.get("place_codes")
+    if isinstance(configured, Mapping):
+        codes.update({str(k).upper(): str(v).upper() for k, v in configured.items()})
+
     return Criteria(
         location_field=str(section.get("location_field") or DEFAULT_LOCATION_FIELD).upper(),
+        place_code_items=tuple(sorted(codes.items())),
         dr_keywords=tuple(str(t) for t in (section.get("dr_keywords") or DEFAULT_DR_KEYWORDS)),
         idc_keywords=tuple(str(t) for t in (section.get("idc_keywords") or DEFAULT_IDC_KEYWORDS)),
         default_location=str(section.get("default_location") or DEFAULT_LOCATION).upper(),
@@ -150,18 +167,30 @@ def criteria_from(config: Any) -> Criteria:
 def location(raw: Mapping[str, Any], criteria: Criteria) -> str:
     """설치 위치를 IDC/DR 로 가른다.
 
-    값이 "63DR", "IDC-2F", "DR센터" 처럼 앞뒤에 무엇이 붙어 온다. 그래서 값이
-    같은지 보지 않고 **조각이 들어 있는지** 본다. DR 을 먼저 본다 -- 두 조각이
-    함께 있으면 DR 쪽이 맞다.
+    CM_PLACE 는 두 가지 모양으로 온다.
+
+    * **코드** -- ``CMPLACE010`` = IDC, ``CMPLACE020`` = DR. 코드는 글자로
+      찾을 수 없다(``CMPLACE020`` 안에는 "DR" 도 "IDC" 도 없다). 그래서 코드를
+      **먼저** 정확히 맞춰 본다. 이걸 안 하면 전부 기본값인 IDC 로 떨어진다.
+    * **글로 적힌 위치** -- "63DR", "IDC-2F", "DR센터". 앞뒤에 무엇이 붙어 오므로
+      값이 같은지가 아니라 **조각이 들어 있는지** 본다. DR 을 먼저 본다 --
+      두 조각이 함께 있으면("IDC-DR-2F") DR 쪽이 맞다.
     """
-    text = str(raw.get(criteria.location_field) or "").upper()
+    text = str(raw.get(criteria.location_field) or "").strip()
     if not text:
         return criteria.default_location
+
+    # 1) 코드로 온 경우. 공백·대소문자만 맞춰 정확히 비교한다.
+    coded = criteria.place_codes.get(text.upper().replace(" ", ""))
+    if coded:
+        return coded
+
+    upper = text.upper()
     for token in criteria.dr_keywords:
-        if str(token).upper() in text:
+        if str(token).upper() in upper:
             return "DR"
     for token in criteria.idc_keywords:
-        if str(token).upper() in text:
+        if str(token).upper() in upper:
             return "IDC"
     return criteria.default_location
 
