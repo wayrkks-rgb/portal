@@ -253,3 +253,59 @@ def test_the_eosl_table_counts_the_same_assets_as_the_server_table(portal):
         eosl = service.eosl(snapshot_id)
     assert eosl["all"]["total"] == status["all"]["table"]["rows"]["계"]["소계"]
     assert eosl["physical"]["total"] == status["physical"]["table"]["rows"]["계"]["소계"]
+
+
+def test_an_exclusion_applies_to_the_physical_table_too(portal):
+    """서버현황(전체)에서 뺀 것은 서버현황(물리서버)에서도 빠져야 한다.
+
+    두 표는 한 번 고른 대상을 나눠 쓴다. 물리 표가 따로 고르면 두 표의 합이
+    맞지 않고, EOSL 표의 '서버' 행 합계도 어긋난다.
+    """
+    config, manager = portal
+    snapshot_id = seed(manager, [
+        asset("CM0001", physical=True), asset("CM0002", physical=True),
+        asset("CM0003", physical=True), asset("CM0004"), asset("CM0005"),
+    ])
+    from asset_sync.services.asset_scope import save_rules
+
+    def counts():
+        with manager.connect() as conn:
+            result = ServerStatusService(config, AssetRepository(conn)).status(snapshot_id)
+        return (result["all"]["table"]["rows"]["계"]["소계"],
+                result["physical"]["table"]["rows"]["계"]["소계"])
+
+    assert counts() == (5, 3)
+
+    # 물리서버를 빼면 두 표에서 함께 빠진다.
+    with manager.connect() as conn:
+        save_rules(AssetRepository(conn), "ITSM", [{"asset_key": "CM0001"}], mode="EXCLUDE")
+    assert counts() == (4, 2)
+
+    # 논리서버를 빼면 전체에서만 빠진다. 물리 표에는 애초에 없었다.
+    with manager.connect() as conn:
+        save_rules(AssetRepository(conn), "ITSM", [{"asset_key": "CM0004"}], mode="EXCLUDE")
+    assert counts() == (3, 2)
+
+    # 되돌리면 두 표에 함께 돌아온다.
+    with manager.connect() as conn:
+        save_rules(AssetRepository(conn), "ITSM", [{"asset_key": "CM0001"}], mode="INCLUDE")
+    assert counts() == (4, 3)
+
+
+def test_the_eosl_rows_follow_the_exclusion_as_well(portal):
+    """EOSL 의 '서버'(물리) 행과 'OS'(전체) 행도 같은 대상을 써야 한다."""
+    config, manager = portal
+    snapshot_id = seed(manager, [
+        asset("CM0001", physical=True), asset("CM0002", physical=True), asset("CM0003"),
+    ])
+    from asset_sync.services.asset_scope import save_rules
+
+    with manager.connect() as conn:
+        save_rules(AssetRepository(conn), "ITSM", [{"asset_key": "CM0001"}], mode="EXCLUDE")
+    with manager.connect() as conn:
+        service = ServerStatusService(config, AssetRepository(conn))
+        status = service.status(snapshot_id)
+        eosl = service.eosl(snapshot_id)
+
+    assert eosl["all"]["total"] == status["all"]["table"]["rows"]["계"]["소계"] == 2
+    assert eosl["physical"]["total"] == status["physical"]["table"]["rows"]["계"]["소계"] == 1
