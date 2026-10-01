@@ -476,6 +476,11 @@ class IntegratedDashboardService:
         result = dict(batch)
         result["errors"] = json.loads(result.pop("error_json") or "{}")
         result["metadata"] = json.loads(result.pop("metadata_json") or "{}")
+        # 왜 SUCCESS 가 아닌지. 상태만 보여 주면 무엇이 모자란지 알 수 없다.
+        result["status_reasons"] = [
+            item for item in (result["metadata"].get("status_reasons") or [])
+            if isinstance(item, dict)
+        ]
         return result
 
     def _freshness(self) -> dict[str, Any]:

@@ -38,10 +38,13 @@ function renderAutomation(item, freshness){
     parts.push(`${mark}${label} ${syncEscape(info.snapshot_date)}${age?` (${age})`:''} · ${dashboardNumber(info.record_count)}건`);
   });
   const errors=Object.entries(item.errors||{});
+  // PARTIAL_SUCCESS 는 "아무것도 안 됐다" 가 아니라 "한 군데가 모자라다" 는 뜻이다.
+  const reasons=item.status_reasons||[];
   el.innerHTML=`<span class="auto-status-dot"></span><div>`
     +`<strong>${syncEscape(item.status||'자동실행 이력 없음')}</strong>`
     +`<div class="text-xs text-muted">마지막 실행 ${dashboardDateText(item.started_at)} · 종료 ${dashboardDateText(item.ended_at)} · 자원사용률 ${syncEscape(resource)}</div>`
     +`<div class="text-xs">화면이 읽는 값: ${parts.join(' / ')||'-'}</div>`
+    +(reasons.length?`<div class="text-xs text-warning">${reasons.map(r=>`[${syncEscape(r.area)}] ${syncEscape(r.message)}`).join('<br>')}</div>`:'')
     +(errors.length?`<div class="text-xs text-error">오류: ${errors.map(([k,v])=>`${syncEscape(k)} - ${syncEscape(String(v).slice(0,120))}`).join(' · ')}</div>`:'')
     +(parts.some(p=>p.startsWith('⚠️'))?`<div class="text-xs text-warning">이틀 넘게 같은 스냅샷입니다. 배치가 돌지 않았거나 수집이 실패했습니다. 서버에서 <span class="mono">scripts\\check_daily_batch.py</span> 로 확인하세요.</div>`:'')
     +`</div>`;

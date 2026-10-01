@@ -73,7 +73,8 @@ class CollectionService:
                 else:
                     diff = DiffService(self.config, repo).compare_itsm(snapshot_id)
                 quality = DataQualityService(self.config, repo).run(snapshot_id)
-                status = "PARTIAL_SUCCESS" if baseline.get("warning") else "SUCCESS"
+                # critical 은 warning 보다 나쁘다. 둘 다 SUCCESS 가 아니어야 한다.
+                status = "PARTIAL_SUCCESS" if baseline.get("warning") or baseline.get("critical") else "SUCCESS"
                 repo.finish_collection_run(
                     run_id,
                     status,
@@ -139,7 +140,11 @@ class CollectionService:
                 records, validation = snapshot_service.normalize_rvtools(raw)
                 baseline = self._check_baseline(repo, "RVTOOLS", len(records))
                 failed_scopes = list((collector_metadata or {}).get("failed_scopes", {}).keys())
-                status = "PARTIAL_SUCCESS" if failed_scopes or baseline.get("warning") else "SUCCESS"
+                status = (
+                    "PARTIAL_SUCCESS"
+                    if failed_scopes or baseline.get("warning") or baseline.get("critical")
+                    else "SUCCESS"
+                )
                 snapshot_id = snapshot_service.save_rv_snapshot(run_id, records, datetime.now(), status)
                 if baseline.get("critical"):
                     diff = {
@@ -172,6 +177,8 @@ class CollectionService:
                     "diff": diff,
                     "collector_metadata": collector_metadata,
                     "baseline": baseline,
+                    # 어느 통합기가 실패했는지. 상태가 PARTIAL_SUCCESS 인 이유다.
+                    "failed_scopes": (collector_metadata or {}).get("failed_scopes", {}),
                 }
             except Exception as exc:
                 repo.finish_collection_run(
@@ -261,6 +268,10 @@ class CollectionService:
         if results["status"] == "SUCCESS" and resource_usage.get("status") in {"FAILED", "PARTIAL_SUCCESS"}:
             results["status"] = "PARTIAL_SUCCESS"
 
+        # 왜 SUCCESS 가 아닌지 남긴다. 상태만 남기면 "PARTIAL_SUCCESS 가 떴는데
+        # 무엇이 모자란 건지" 를 알 수 없고, 사람이 여기저기 뒤져야 한다.
+        results["status_reasons"] = self._status_reasons(results, resource_usage)
+
         reconciliation_created_at = None
         if results["reconciliation"].get("results"):
             reconciliation_created_at = results["reconciliation"]["results"][0].get("created_at")
@@ -279,6 +290,7 @@ class CollectionService:
                 metadata={
                     "itsm_mode": itsm_mode,
                     "vcenter_mode": rv_mode,
+                    "status_reasons": results["status_reasons"],
                     "reconciliation_counts": results["reconciliation"].get("counts", {}),
                     "resource_usage_run_id": resource_usage.get("run_id"),
                     "resource_usage_period": {
@@ -329,6 +341,66 @@ class CollectionService:
         if not target.exists():
             return target
         return target.with_name(f"{target.stem}_{datetime.now().strftime('%H%M%S_%f')}{target.suffix}")
+
+    @staticmethod
+    def _status_reasons(results: dict[str, Any], resource_usage: dict[str, Any]) -> list[dict[str, Any]]:
+        """배치 상태가 SUCCESS 가 아닌 이유를 하나씩 적는다.
+
+        PARTIAL_SUCCESS 는 '아무것도 안 됐다' 가 아니라 '한 군데가 모자라다' 는
+        뜻이다. 어디가 모자란지 적어 두지 않으면 사람이 로그를 뒤져야 한다.
+        """
+        reasons: list[dict[str, Any]] = []
+
+        for key, label in (("itsm", "ITSM"), ("vcenter", "vCenter")):
+            block = results.get(key) or {}
+            status = str(block.get("status") or "")
+            if status == "FAILED":
+                reasons.append({
+                    "area": label, "code": "COLLECTION_FAILED",
+                    "message": f"{label} 수집이 실패했습니다: {block.get('error') or '사유 미기록'}",
+                })
+                continue
+            baseline = block.get("baseline") or {}
+            if baseline.get("critical") or baseline.get("warning"):
+                previous = baseline.get("previous_count")
+                current = baseline.get("current_count")
+                ratio = baseline.get("ratio")
+                reasons.append({
+                    "area": label,
+                    "code": "COUNT_DROP_CRITICAL" if baseline.get("critical") else "COUNT_DROP_WARNING",
+                    "message": (
+                        f"{label} 수집 건수가 전일보다 크게 줄었습니다"
+                        f"({previous:,}건 → {current:,}건"
+                        f"{f', {ratio * 100:.0f}%' if isinstance(ratio, (int, float)) else ''})."
+                        " 원본이 실제로 줄었는지 확인하세요."
+                    ),
+                })
+            failed = (block.get("failed_scopes") or {})
+            if failed:
+                reasons.append({
+                    "area": label, "code": "SCOPE_FAILED",
+                    "message": (
+                        f"{label} 일부만 수집됐습니다. 실패: "
+                        + ", ".join(f"{name}({str(error)[:80]})" for name, error in failed.items())
+                    ),
+                })
+
+        usage_status = str(resource_usage.get("status") or "")
+        if usage_status in {"FAILED", "PARTIAL_SUCCESS"}:
+            reasons.append({
+                "area": "자원사용률", "code": f"RESOURCE_{usage_status}",
+                "message": (
+                    "통합기 자원사용률 수집이 "
+                    + ("실패했습니다" if usage_status == "FAILED" else "일부만 됐습니다")
+                    + f": {resource_usage.get('error') or resource_usage.get('failed_scopes') or '사유 미기록'}"
+                ),
+            })
+        elif usage_status == "SKIPPED":
+            reasons.append({
+                "area": "자원사용률", "code": "RESOURCE_SKIPPED",
+                "message": str(resource_usage.get("reason") or "자원사용률 수집을 건너뛰었습니다."),
+            })
+        return reasons
 
     def _check_baseline(self, repo: AssetRepository, source: str, current_count: int) -> dict[str, Any]:
         previous = repo.latest_snapshot(source)

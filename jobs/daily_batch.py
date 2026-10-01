@@ -68,8 +68,13 @@ def main() -> None:
             "counts": result["reconciliation"].get("counts", {}),
         },
         "resource_usage": result.get("resource_usage", {}),
+        # SUCCESS 가 아닐 때 왜 그런지. 콘솔 로그만 보고도 알 수 있어야 한다.
+        "status_reasons": result.get("status_reasons", []),
     }
     print(json.dumps(summary, ensure_ascii=False))
+    # 사람이 로그를 열었을 때 한 줄로 읽히게 한 번 더 적는다.
+    for reason in result.get("status_reasons") or []:
+        print(f"[{result.get('status')}] {reason.get('area')}: {reason.get('message')}")
     if result.get("status") == "FAILED":
         raise SystemExit(2)
 

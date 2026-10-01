@@ -95,6 +95,16 @@ def check_switch(config) -> None:
     print()
 
 
+def _reasons(batch: dict) -> list[dict]:
+    """배치 기록에 적힌 '왜 SUCCESS 가 아닌지'."""
+    try:
+        meta = json.loads(batch.get("metadata_json") or "{}")
+    except (TypeError, ValueError):
+        return []
+    found = meta.get("status_reasons") or []
+    return [item for item in found if isinstance(item, dict)]
+
+
 def check_batches(conn, days: int) -> list[dict]:
     print(f"3) DB 에 남은 배치 기록 (최근 {days}일)")
     since = (date.today() - timedelta(days=days)).isoformat()
@@ -115,6 +125,10 @@ def check_batches(conn, days: int) -> list[dict]:
         print(f"  {_text(item['batch_date']):<12}{_when(item['started_at']):<20}"
               f"{_text(item['status']):<10}{_elapsed(item['started_at'], item['ended_at']):<8}"
               f"{_text(item.get('resource_usage_status'))}")
+        # SUCCESS 가 아닌 이유. PARTIAL_SUCCESS 는 "아무것도 안 됐다" 가 아니라
+        # "한 군데가 모자라다" 는 뜻이므로 어디가 모자란지 적어 준다.
+        for reason in _reasons(item):
+            print(f"      · [{reason.get('area')}] {reason.get('message')}")
         errors = item.get("error_json") or "{}"
         if errors not in ("{}", "", None):
             try:
@@ -122,7 +136,7 @@ def check_batches(conn, days: int) -> list[dict]:
             except (TypeError, ValueError):
                 parsed = {"raw": errors}
             for key, value in (parsed or {}).items():
-                print(f"      ! {key}: {str(value)[:160]}")
+                print(f"      ! {key}: {str(value)[:200]}")
         if not item.get("ended_at"):
             print("      ! 끝나지 않은 상태로 남아 있습니다(중간에 프로세스가 죽었을 수 있음).")
     print()
@@ -254,7 +268,21 @@ def main() -> int:
         print("가장 최근 배치는 SUCCESS 입니다. 화면에 안 보이면 위 4) 의 '화면이 읽는")
         print("최신 스냅샷' 날짜를 확인하세요. 그 날짜가 곧 화면에 보이는 값입니다.")
     elif batches:
-        print(f"가장 최근 배치 상태가 {batches[0].get('status')} 입니다. 위 3) 의 오류 줄을 보세요.")
+        status = batches[0].get("status")
+        reasons = _reasons(batches[0])
+        if status == "PARTIAL_SUCCESS" and reasons:
+            print("가장 최근 배치는 PARTIAL_SUCCESS 입니다. 수집은 됐고, 아래가 모자랍니다.")
+            for reason in reasons:
+                print(f"  · [{reason.get('area')}] {reason.get('message')}")
+            print()
+            print("※ AIX(HMC) 는 아직 일일 배치에 들어 있지 않습니다. PARTIAL_SUCCESS 의")
+            print("   원인이 될 수 없습니다.")
+        elif status == "PARTIAL_SUCCESS":
+            print("가장 최근 배치는 PARTIAL_SUCCESS 인데 사유가 기록돼 있지 않습니다")
+            print("(사유 기록 전 버전에서 돈 배치입니다). 다음 배치부터 사유가 남습니다.")
+            print("지금 바로 보려면: scripts\\run_daily_batch.bat 을 한 번 실행하세요.")
+        else:
+            print(f"가장 최근 배치 상태가 {status} 입니다. 위 3) 의 오류 줄을 보세요.")
     else:
         print("배치 기록이 없습니다. 2) 의 켜짐 여부와 1) 의 등록 여부를 먼저 확인하세요.")
     print(LINE)
