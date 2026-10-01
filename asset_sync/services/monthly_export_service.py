@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -17,6 +18,8 @@ from typing import Any, Iterable
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+
+from .change_presenter import FIELD_LABELS
 
 #: 뽑을 수 있는 항목. 키가 곧 요청값이다.
 SECTIONS: dict[str, str] = {
@@ -186,37 +189,117 @@ class MonthlyCheckExportService:
                     sheet.cell(row=line, column=3, value="예: " + ", ".join(str(s) for s in samples))
         _fit(sheet)
 
-    _ASSET_COLUMNS: tuple[tuple[str, str], ...] = (
+    #: 해석해서 만든 값. 원본 컬럼 앞에 둔다. 코드가 아니라 사람이 읽는 값이다.
+    _DERIVED_COLUMNS: tuple[tuple[str, str], ...] = (
         ("자산번호", "cm_id"), ("업무명", "service_name"), ("호스트명", "hostname"),
-        ("IP", "primary_ip"), ("위치", "location"), ("위치 원본값", "place"),
-        ("물리/논리", "_kind"), ("OS", "os_family"), ("OS 묶음", "os_group"),
-        ("OS버전", "os_version"), ("CPU Core", "cpu_cores"), ("Memory MB", "memory_mb"),
-        ("EOSL 값", "eosl_value"), ("EOSL 연도", "eosl_year"), ("EOSL 컬럼", "eosl_field"),
-        ("상태코드", "status_code"), ("자산 여부", "_included"),
-        ("제외 사유", "exclude_label"), ("수동 지정", "_manual"), ("수동 사유", "manual_note"),
+        ("IP", "primary_ip"), ("위치", "location"), ("물리/논리", "_kind"),
+        ("OS", "os_family"), ("OS 묶음", "os_group"), ("OS버전", "os_version"),
+        ("CPU Core", "cpu_cores"), ("Memory MB", "memory_mb"),
+        ("EOSL 연도", "eosl_year"), ("EOSL 컬럼", "eosl_field"),
+        ("자산 여부", "_included"), ("제외 사유", "exclude_label"),
+        ("수동 지정", "_manual"), ("수동 사유", "manual_note"),
     )
 
-    def _write_assets(self, sheet: Any, title: str, items: Iterable[dict[str, Any]]) -> None:
+    #: 원본 컬럼 중 앞에 놓을 것. 나머지는 이 뒤에 사전순으로 붙는다.
+    _RAW_ORDER: tuple[str, ...] = (
+        "CM_ID", "CM_NAME", "CM_HOSTNAME", "CM_IP", "CM_SUB_IP",
+        "CM_STA_CD", "CM_SVR_CAT_CD", "CM_CAT_CD", "CM_OWN_CAT_CD", "CM_NET_CD",
+        "CM_OS", "CM_OS_VERSION", "CM_CPU_CNT", "CM_CPU_CORE_CNT", "CM_MEMORY",
+        "CM_EOL_DT", "OS_EOS_DATE", "CM_PLACE", "CM_RACK_LOC",
+        "CM_MAKE_NAME", "CM_MODEL_NAME", "CM_SERIAL_NO",
+        "CM_OWN_EMP_ID", "CM_OWN_DPT_ID", "CM_USER_EMP_ID", "CM_USER_DPT_ID",
+        "CM_WOR_MNG_EMP_ID", "CM_TAKIN_DTTM", "CM_DESCR", "CM_DESCR2",
+    )
+
+    @classmethod
+    def raw_columns(cls, items: list[dict[str, Any]]) -> list[str]:
+        """원본에 실제로 들어 있는 컬럼 목록.
+
+        ITSM 조회 SQL 에 따라 컬럼이 달라지므로 코드에 못 박지 않는다. 자료에서
+        모으고, 자주 보는 것을 앞에 둔 뒤 나머지는 사전순으로 붙인다.
+        """
+        found: set[str] = set()
+        for item in items:
+            found.update(str(key) for key in (item.get("raw") or {}))
+        ordered = [name for name in cls._RAW_ORDER if name in found]
+        return ordered + sorted(found - set(ordered))
+
+    def _write_assets(
+        self,
+        sheet: Any,
+        title: str,
+        items: Iterable[dict[str, Any]],
+        *,
+        note: str = "",
+    ) -> None:
+        """자산 목록. 해석한 값 + **ITSM 원본 전 컬럼**.
+
+        화면(팝업)은 업무명·호스트명·IP 처럼 꼭 필요한 것만 보여 준다. 화면에서
+        스무 컬럼을 늘어놓으면 읽을 수 없기 때문이다. 하지만 엑셀로 받을 때는
+        전 컬럼이 필요하다 -- 받아서 다시 거르고 피벗하기 때문이다.
+
+        머리글은 두 줄이다. 윗줄이 한글 이름, 아랫줄이 원래 컬럼명이다. 필터는
+        아랫줄(원래 컬럼명)에 걸린다 -- ITSM 에서 찾을 때 쓰는 이름이 그쪽이다.
+        """
+        rows = list(items)
         sheet["A1"] = title
         sheet["A1"].font = Font(bold=True, size=13)
-        head = 3
-        for index, (label, _) in enumerate(self._ASSET_COLUMNS, start=1):
-            sheet.cell(row=head, column=index, value=label)
-        _style_header(sheet, head)
+        basis = [f"기준일 {self.status.get('as_of') or '-'}", f"{len(rows):,}건"]
+        if note:
+            basis.append(note)
+        sheet["A2"] = " · ".join(basis)
+        sheet["A2"].font = Font(size=10, color="666666")
 
-        line = head
-        for item in items:
+        raw_columns = self.raw_columns(rows)
+        label_row, name_row = 4, 5
+
+        for index, (label, _) in enumerate(self._DERIVED_COLUMNS, start=1):
+            cell = sheet.cell(row=label_row, column=index, value=label)
+            cell.fill = _HEAD_FILL
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.alignment = Alignment(horizontal="center")
+            cell.border = _BORDER
+            lower = sheet.cell(row=name_row, column=index, value="(집계값)")
+            lower.fill = _SUB_FILL
+            lower.font = Font(size=9, color="333333")
+            lower.alignment = Alignment(horizontal="center")
+            lower.border = _BORDER
+
+        offset = len(self._DERIVED_COLUMNS)
+        for index, name in enumerate(raw_columns, start=offset + 1):
+            cell = sheet.cell(row=label_row, column=index, value=FIELD_LABELS.get(name, name))
+            cell.fill = PatternFill("solid", fgColor="2E6B3E")
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.alignment = Alignment(horizontal="center")
+            cell.border = _BORDER
+            lower = sheet.cell(row=name_row, column=index, value=name)
+            lower.fill = _SUB_FILL
+            lower.font = Font(size=9, color="333333")
+            lower.alignment = Alignment(horizontal="center")
+            lower.border = _BORDER
+
+        line = name_row
+        for item in rows:
             line += 1
             filled = dict(item)
             filled["_kind"] = "물리" if item.get("physical") else "논리"
             filled["_included"] = "제외" if item.get("exclude_reason") else "자산"
             filled["_manual"] = "예" if item.get("manual") else ""
-            for index, (_, key) in enumerate(self._ASSET_COLUMNS, start=1):
+            for index, (_, key) in enumerate(self._DERIVED_COLUMNS, start=1):
                 value = filled.get(key)
                 sheet.cell(row=line, column=index, value="" if value is None else value)
-        sheet.freeze_panes = f"A{head + 1}"
-        if line > head:
-            sheet.auto_filter.ref = f"A{head}:{get_column_letter(len(self._ASSET_COLUMNS))}{line}"
+            raw = item.get("raw") or {}
+            for index, name in enumerate(raw_columns, start=offset + 1):
+                value = raw.get(name)
+                # dict·list 가 들어오면 엑셀이 받지 못한다. 글로 바꾼다.
+                if isinstance(value, (dict, list)):
+                    value = json.dumps(value, ensure_ascii=False)
+                sheet.cell(row=line, column=index, value="" if value is None else value)
+
+        sheet.freeze_panes = f"A{name_row + 1}"
+        last = get_column_letter(offset + len(raw_columns)) if raw_columns else get_column_letter(offset)
+        if line > name_row:
+            sheet.auto_filter.ref = f"A{name_row}:{last}{line}"
         _fit(sheet)
 
     # ── 파일 만들기 ─────────────────────────────────────────────────────
@@ -242,14 +325,28 @@ class MonthlyCheckExportService:
                 self._write_eosl(sheet)
             elif name == "excluded":
                 excluded = (self.status.get("excluded") or {}).get("items") or []
-                self._write_assets(sheet, "자산에서 제외한 대상", excluded)
-                sheet["A2"] = f"제외 기준: {(self.status.get('excluded') or {}).get('reason') or '-'}"
-                sheet["A2"].font = Font(size=10, color="666666")
+                self._write_assets(
+                    sheet, "자산에서 제외한 대상", excluded,
+                    note=f"제외 기준: {(self.status.get('excluded') or {}).get('reason') or '-'}",
+                )
             elif name == "assets":
                 self._write_assets(sheet, "자산 목록(제외 대상 포함)", self.records)
 
         if not workbook.sheetnames:            # 방어. wanted 가 빌 일은 없다.
             workbook.create_sheet("빈 결과")
+        return workbook
+
+    def build_asset_list(
+        self,
+        title: str,
+        items: list[dict[str, Any]],
+        note: str = "",
+    ) -> Workbook:
+        """자산 목록 한 장만. 화면에서 숫자를 눌러 나온 그 목록을 받을 때 쓴다."""
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "자산 목록"
+        self._write_assets(sheet, title, items, note=note)
         return workbook
 
     def file_name(self, section: str = ALL, base_day: date | None = None) -> str:

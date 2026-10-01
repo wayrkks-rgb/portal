@@ -122,17 +122,27 @@ def test_the_file_says_the_same_numbers_as_the_screen(monthly):
     assert sheet.cell(row=rows["계"], column=total_column).value == 3
 
 
+#: 자산 시트의 머리글 두 줄과 자료 시작 줄.
+LABEL_ROW, NAME_ROW, FIRST_DATA_ROW = 4, 5, 6
+
+
+def _columns(sheet) -> tuple[list, list]:
+    """(한글 이름 줄, 원래 컬럼명 줄)"""
+    return ([cell.value for cell in sheet[LABEL_ROW]],
+            [cell.value for cell in sheet[NAME_ROW]])
+
+
 def test_the_place_code_becomes_idc_or_dr_in_the_file(monthly):
-    """CMPLACE020 은 DR 이다. 코드가 그대로 적히면 안 된다."""
+    """CMPLACE020 은 DR 이다. 해석한 값과 원본이 모두 있어야 한다."""
     status, records, tmp_path = monthly
     path = MonthlyCheckExportService(status, records).save(tmp_path / "export", "assets")
     sheet = load_workbook(path)["자산 목록"]
-    header = [cell.value for cell in sheet[3]]
-    location = header.index("위치") + 1
-    raw_place = header.index("위치 원본값") + 1
+    labels, names = _columns(sheet)
+    location = labels.index("위치") + 1
+    raw_place = names.index("CM_PLACE") + 1
 
     seen = {}
-    for line in range(4, sheet.max_row + 1):
+    for line in range(FIRST_DATA_ROW, sheet.max_row + 1):
         seen[sheet.cell(row=line, column=raw_place).value] = sheet.cell(row=line, column=location).value
     assert seen["CMPLACE010"] == "IDC"
     assert seen["CMPLACE020"] == "DR"
@@ -142,9 +152,64 @@ def test_the_excluded_sheet_shows_why_each_one_was_dropped(monthly):
     status, records, tmp_path = monthly
     path = MonthlyCheckExportService(status, records).save(tmp_path / "export", "excluded")
     sheet = load_workbook(path)["제외한 대상"]
-    header = [cell.value for cell in sheet[3]]
-    reason = header.index("제외 사유") + 1
-    assert sheet.cell(row=4, column=reason).value == "상태가 운영·대기가 아님"
+    labels, _ = _columns(sheet)
+    reason = labels.index("제외 사유") + 1
+    assert sheet.cell(row=FIRST_DATA_ROW, column=reason).value == "상태가 운영·대기가 아님"
+    # 제외 기준도 파일에 적혀 있어야 한다.
+    assert "제외 기준" in str(sheet["A2"].value)
+
+
+def test_the_asset_sheet_carries_every_itsm_column(monthly):
+    """화면은 꼭 필요한 것만 보여 주지만 파일에는 원본 전 컬럼이 들어가야 한다.
+
+    받아서 다시 거르고 피벗하려면 전 컬럼이 필요하다.
+    """
+    status, records, tmp_path = monthly
+    path = MonthlyCheckExportService(status, records).save(tmp_path / "export", "assets")
+    sheet = load_workbook(path)["자산 목록"]
+    labels, names = _columns(sheet)
+
+    # 원본에 있던 컬럼이 하나도 빠지지 않는다.
+    expected = set()
+    for record in records:
+        expected.update(record.get("raw") or {})
+    assert expected <= set(names), f"빠진 컬럼: {expected - set(names)}"
+
+    # 아는 컬럼은 한글 이름이 붙는다. 모르는 컬럼은 원래 이름을 그대로 쓴다.
+    assert labels[names.index("CM_HOSTNAME")] == "호스트명"
+    assert labels[names.index("CM_EOL_DT")] == "OS 지원종료일" or "CM_EOL_DT" in names
+
+    # 값이 해석되지 않은 원본 그대로여야 한다. 코드로 걸러 쓸 수 있어야 한다.
+    status_column = names.index("CM_STA_CD") + 1 if "CM_STA_CD" in names else None
+    if status_column:
+        values = {sheet.cell(row=line, column=status_column).value
+                  for line in range(FIRST_DATA_ROW, sheet.max_row + 1)}
+        assert values & {"CMSTA010", "CMSTA060"}
+
+
+def test_a_column_only_some_records_have_is_still_included(monthly):
+    """ITSM 조회 SQL 에 따라 컬럼이 달라진다. 자료에서 모아야 한다."""
+    status, records, tmp_path = monthly
+    records = [dict(item) for item in records]
+    records[0]["raw"] = dict(records[0]["raw"], CM_EXTRA_NOTE="증설 예정")
+    path = MonthlyCheckExportService(status, records).save(tmp_path / "export", "assets")
+    sheet = load_workbook(path)["자산 목록"]
+    _, names = _columns(sheet)
+    assert "CM_EXTRA_NOTE" in names
+
+
+def test_one_sheet_can_be_built_for_the_popup(monthly):
+    """화면에서 숫자를 눌러 나온 목록만 따로 받는 길."""
+    status, records, tmp_path = monthly
+    workbook = MonthlyCheckExportService(status, records).build_asset_list(
+        "DR · AIX 1대", records[:1], "조건: 위치=DR · OS=IBM"
+    )
+    assert workbook.sheetnames == ["자산 목록"]
+    sheet = workbook["자산 목록"]
+    assert sheet["A1"].value == "DR · AIX 1대"
+    assert "조건: 위치=DR" in str(sheet["A2"].value)
+    _, names = _columns(sheet)
+    assert "CM_ID" in names
 
 
 def test_the_eosl_sheet_carries_the_diagnosis(monthly):
@@ -157,3 +222,31 @@ def test_the_eosl_sheet_carries_the_diagnosis(monthly):
     )
     assert "EOSL 값 출처" in text
     assert "CM_EOL_DT" in text
+
+
+def test_the_eosl_bucket_is_decided_in_one_place():
+    """표를 만들 때와 숫자를 눌러 고를 때가 같은 함수를 써야 한다.
+
+    두 군데에 따로 적으면 표의 숫자와 목록의 줄 수가 어긋난다.
+    """
+    bucket = ServerStatusService.eosl_bucket
+    assert bucket(None, 2026) == "미사용"
+    assert bucket(9999, 2026) == "계획 없음"
+    assert bucket(2020, 2026) == "2026년 이전"
+    assert bucket(2026, 2026) == "2026년"
+    assert bucket(2027, 2026) == "2027년"
+    assert bucket(2031, 2026) == "2028년 이상"
+
+
+def test_the_eosl_table_and_the_bucket_agree(monthly):
+    """표의 각 칸 숫자가 그 칸으로 묶이는 자산 수와 같아야 한다."""
+    status, records, _ = monthly
+    year = status["eosl"]["criteria"]["base_year"]
+    counted = status["eosl"]["all"]["counts"]
+    included = [item for item in records if not item.get("exclude_reason")]
+    for column, number in counted.items():
+        picked = [
+            item for item in included
+            if ServerStatusService.eosl_bucket(item.get("eosl_year"), year) == column
+        ]
+        assert len(picked) == number, f"{column}: 표 {number} vs 목록 {len(picked)}"

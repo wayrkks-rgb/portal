@@ -334,6 +334,9 @@ class AssetScope:
             name: raw.get(name) for name in self.criteria.exclude_when_all_empty
         }
         item["place"] = raw.get(self.criteria.location_field)
+        # ITSM 원본 전체. 엑셀로 뽑을 때 전 컬럼이 필요하다. 화면에 내려보낼 때는
+        # 응답이 커지므로 떼어낸다(라우트에서 pop).
+        item["raw"] = dict(raw)
         return item
 
     def split_itsm(self, records: Iterable[Mapping[str, Any]]) -> tuple[list[dict], list[dict]]:

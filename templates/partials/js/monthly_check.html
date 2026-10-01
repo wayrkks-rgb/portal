@@ -107,12 +107,22 @@ function renderEosl(eosl) {
   const head = `<thead><tr><th rowspan="2">구분</th><th rowspan="2">전체 수량</th>
     <th colspan="${columns.length - 1}">EOSL 일자</th><th rowspan="2">비고</th></tr>
     <tr>${columns.slice(0, -1).map(c => `<th>${syncEscape(c)}</th>`).join('')}</tr></thead>`;
+  // 숫자를 누르면 그 연도에 걸린 자산이 하나씩 보인다. "2028년 이상 15대" 만
+  // 보고는 어느 장비인지 알 수 없다.
   const rows = ['physical','all'].map(key => {
     const row = eosl[key];
-    const cells = columns.slice(0, -1).map(c => `<td>${Number(row.counts[c] || 0).toLocaleString()}</td>`).join('');
+    const kind = key === 'physical' ? 'physical' : '';
+    const cells = columns.slice(0, -1).map(c => {
+      const count = Number(row.counts[c] || 0);
+      const text = count.toLocaleString();
+      if (!count) return `<td>${text}</td>`;
+      const filter = JSON.stringify({eosl: c, kind, state: 'included'}).replace(/"/g, '&quot;');
+      return `<td><a href="javascript:void(0)" onclick="openAssetBrowser(${filter},'EOSL ${syncEscape(c)} · ${syncEscape(row.label)} ${text}대')">${text}</a></td>`;
+    }).join('');
     const unused = Number(row.counts['미사용'] || 0);
+    const totalFilter = JSON.stringify({kind, state: 'included'}).replace(/"/g, '&quot;');
     return `<tr><td><strong>${syncEscape(row.label)}</strong></td>
-      <td><strong>${Number(row.total).toLocaleString()}</strong></td>${cells}
+      <td><strong><a href="javascript:void(0)" onclick="openAssetBrowser(${totalFilter},'${syncEscape(row.label)} 전체')">${Number(row.total).toLocaleString()}</a></strong></td>${cells}
       <td>${unused ? `미사용 ${unused}대` : ''}</td></tr>`;
   }).join('');
   element.innerHTML = head + `<tbody>${rows}</tbody>`;
@@ -379,6 +389,30 @@ function renderMonthlyIntegratedMoves(current) {
       <td class="text-xs">${syncEscape(names.slice(0, 20).join(', '))}${names.length > 20 ? ` 외 ${names.length - 20}건` : ''}</td>
     </tr>`;
   }).join('') : '<tr><td colspan="5" style="text-align:center" class="text-muted">이 달에 생성·삭제된 VM 이 없습니다.</td></tr>';
+}
+
+// 통합서버 자원사용현황은 vCenter 자료다. ITSM 자산 목록과 출처가 달라
+// 보고서 쪽 추출(통합기·VM·변경이력)을 그 달 범위로 부른다.
+async function exportMonthlyIntegrated() {
+  const alertEl = document.getElementById('monthly-integrated-alert');
+  const range = monthRange(document.getElementById('monthly-month').value);
+  alertEl.innerHTML = '<div class="alert alert-info"><span class="loading"></span> Excel 생성 중...</div>';
+  const response = await fetch(`/api/asset-sync/resource-usage/export?start=${range.start}&end=${range.end}`);
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(data.error || 'HTTP ' + response.status)}</div>`;
+    return;
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `통합서버_자원사용현황_${range.start}_${range.end}.xlsx`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  alertEl.innerHTML = '<div class="alert alert-success">✅ Excel 을 내려받았습니다.</div>';
 }
 
 async function loadMonthlyIntegrated(month) {

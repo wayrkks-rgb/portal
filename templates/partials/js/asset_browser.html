@@ -31,16 +31,7 @@ function debounceAssetBrowser() {
 async function loadAssetBrowser() {
   const body = document.getElementById('asset-browser-body');
   if (!body) return;
-  const query = new URLSearchParams();
-  Object.entries(assetBrowserFilter).forEach(([key, value]) => {
-    if (value && key !== 'q' && key !== 'state' && key !== 'kind') query.set(key, value);
-  });
-  const term = document.getElementById('asset-browser-search').value.trim();
-  const state = document.getElementById('asset-browser-state').value;
-  const kind = document.getElementById('asset-browser-kind').value;
-  if (term) query.set('q', term);
-  if (state) query.set('state', state);
-  if (kind) query.set('kind', kind);
+  const query = assetBrowserQuery();
   query.set('limit', '5000');
 
   body.innerHTML = '<tr><td colspan="11" style="text-align:center"><span class="loading"></span> 불러오는 중…</td></tr>';
@@ -134,6 +125,53 @@ function toggleAllAssetRows(checked) {
 function updateAssetSelection() {
   const holder = document.getElementById('asset-browser-selected');
   if (holder) holder.textContent = `선택 ${assetBrowserSelected.size.toLocaleString()}건`;
+}
+
+// 지금 화면에 걸러져 있는 조건을 그대로 서버에 넘긴다. 화면과 파일의 대상이
+// 달라지면 안 되므로 조건을 다시 만들지 않고 같은 함수로 만든다.
+function assetBrowserQuery() {
+  const query = new URLSearchParams();
+  Object.entries(assetBrowserFilter).forEach(([key, value]) => {
+    if (value && key !== 'q' && key !== 'state' && key !== 'kind') query.set(key, value);
+  });
+  const term = document.getElementById('asset-browser-search').value.trim();
+  const state = document.getElementById('asset-browser-state').value;
+  const kind = document.getElementById('asset-browser-kind').value;
+  if (term) query.set('q', term);
+  if (state) query.set('state', state);
+  if (kind) query.set('kind', kind);
+  return query;
+}
+
+async function exportAssetBrowser() {
+  const alertEl = document.getElementById('asset-browser-alert');
+  const query = assetBrowserQuery();
+  query.set('title', document.getElementById('asset-browser-title').textContent.trim());
+  alertEl.innerHTML = '<div class="alert alert-info"><span class="loading"></span> Excel 생성 중...</div>';
+  let response;
+  try {
+    response = await fetch('/api/asset-sync/assets/export?' + query);
+  } catch (error) {
+    alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(error.message)}</div>`;
+    return;
+  }
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(data.error || 'HTTP ' + response.status)}</div>`;
+    return;
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const match = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+  link.href = url;
+  link.download = match ? decodeURIComponent(match[1]) : '자산목록.xlsx';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  alertEl.innerHTML = '<div class="alert alert-success">✅ Excel 을 내려받았습니다. ITSM 원본 전 컬럼이 들어 있습니다.</div>';
 }
 
 async function applyAssetScope(mode) {

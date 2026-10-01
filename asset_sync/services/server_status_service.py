@@ -216,22 +216,30 @@ class ServerStatusService:
     def eosl_columns(year: int) -> list[str]:
         return [f"{year}년 이전", f"{year}년", f"{year + 1}년", f"{year + 2}년 이상", "계획 없음", "미사용"]
 
+    @staticmethod
+    def eosl_bucket(eosl_year_value: Any, year: int) -> str:
+        """EOSL 연도를 장표의 열 하나로 묶는다.
+
+        표의 숫자를 눌러 그 자산을 볼 때도 같은 함수를 써야 한다. 두 군데에
+        따로 적으면 표의 숫자와 목록의 줄 수가 어긋난다.
+        """
+        if eosl_year_value is None:
+            return "미사용"
+        value = int(eosl_year_value)
+        if value >= NO_PLAN_YEAR:
+            return "계획 없음"
+        if value < year:
+            return f"{year}년 이전"
+        if value == year:
+            return f"{year}년"
+        if value == year + 1:
+            return f"{year + 1}년"
+        return f"{year + 2}년 이상"
+
     def _eosl_row(self, items: list[dict[str, Any]], year: int) -> dict[str, Any]:
         buckets: Counter[str] = Counter()
         columns = self.eosl_columns(year)
         for item in items:
-            value = item["eosl_year"]
-            if value is None:
-                buckets["미사용"] += 1
-            elif value >= NO_PLAN_YEAR:
-                buckets["계획 없음"] += 1
-            elif value < year:
-                buckets[f"{year}년 이전"] += 1
-            elif value == year:
-                buckets[f"{year}년"] += 1
-            elif value == year + 1:
-                buckets[f"{year + 1}년"] += 1
-            else:
-                buckets[f"{year + 2}년 이상"] += 1
+            buckets[self.eosl_bucket(item["eosl_year"], year)] += 1
         counts = {column: int(buckets[column]) for column in columns}
         return {"total": len(items), "counts": counts}

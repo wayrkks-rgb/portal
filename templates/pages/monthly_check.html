@@ -35,7 +35,10 @@
       <div class="card">
         <div class="flex justify-between items-center mb-4">
           <div class="card-title" style="margin-bottom:0"><span class="icon">🖥️</span> 통합서버 자원사용현황</div>
-          <div class="text-xs text-muted" id="monthly-integrated-basis"></div>
+          <div class="flex gap-2 items-center">
+            <div class="text-xs text-muted" id="monthly-integrated-basis"></div>
+            <button class="btn btn-secondary btn-sm" onclick="exportMonthlyIntegrated()">Excel</button>
+          </div>
         </div>
         <div class="text-xs text-muted mb-4">
           실제 자원은 통합기가 가진 용량, 할당은 그 위 VM 에게 나눠준 양입니다.
@@ -115,6 +118,7 @@
             <button class="btn btn-secondary btn-sm" onclick="exportMonthly('eosl')">Excel</button>
           </div>
         </div>
+        <div class="text-xs text-muted mb-4">숫자를 누르면 그 연도에 걸린 자산 목록이 열립니다. 그 창에서 ITSM 전 컬럼 Excel 로 받을 수 있습니다.</div>
         <div class="table-wrap"><table id="monthly-eosl"></table></div>
         <div id="monthly-eosl-diagnosis" style="margin-top:12px"></div>
         <div class="alert alert-info" style="margin-top:12px;margin-bottom:0">

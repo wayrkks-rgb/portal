@@ -10,7 +10,10 @@
   <div class="modal" style="max-width:1200px;width:96%">
     <div class="flex justify-between items-center mb-4">
       <div class="modal-title" style="margin-bottom:0" id="asset-browser-title">자산 목록</div>
-      <button class="btn btn-secondary btn-sm" onclick="closeAssetBrowser()">닫기</button>
+      <div class="flex gap-2">
+        <button class="btn btn-primary btn-sm" onclick="exportAssetBrowser()">Excel 추출 (ITSM 전 컬럼)</button>
+        <button class="btn btn-secondary btn-sm" onclick="closeAssetBrowser()">닫기</button>
+      </div>
     </div>
 
     <div class="flex gap-2 items-center mb-4" style="flex-wrap:wrap">
@@ -50,5 +53,9 @@
       </tr></thead><tbody id="asset-browser-body"></tbody></table>
     </div>
     <div class="text-xs text-muted" style="margin-top:10px" id="asset-browser-basis"></div>
+    <div class="text-xs text-muted" style="margin-top:4px">
+      화면에는 꼭 필요한 항목만 보여 줍니다. <strong>Excel 추출</strong>을 누르면 지금 걸러진
+      이 목록 그대로 <strong>ITSM 원본 전 컬럼</strong>이 들어간 파일을 받습니다.
+    </div>
   </div>
 </div>

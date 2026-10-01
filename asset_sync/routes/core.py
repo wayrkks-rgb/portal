@@ -3,7 +3,8 @@ from __future__ import annotations
 import csv
 import io
 import json
-from datetime import date, timedelta
+import re
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -199,36 +200,24 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         """엑셀로 받을 수 있는 항목 목록. 화면이 버튼을 이 값으로 만든다."""
         return jsonify({"sections": [{"id": key, "name": name} for key, name in MONTHLY_SECTIONS.items()]})
 
-    @bp.route("/api/asset-sync/assets")
-    @login_required
-    def asset_list() -> Any:
-        """자산 한 건씩의 목록.
-
-        화면에서 OS·위치의 대수를 눌렀을 때 그 숫자가 실제로 무엇인지 보여준다.
-        같은 목록을 자산 제외 관리에서도 쓴다 -- 제외할 대상을 고르려면 먼저
-        찾아야 하고, 찾는 기준은 호스트명·IP·업무명 무엇이든 될 수 있다.
-        """
-        try:
-            base_day = _month_end(request.args.get("month"))
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+    def _asset_rows(conn: Any) -> tuple[Any, list[dict[str, Any]], dict[str, Any]] | tuple[None, None, None]:
+        """조건에 맞는 자산 목록. 화면과 엑셀이 같은 결과를 쓰도록 한 곳에서 고른다."""
+        base_day = _month_end(request.args.get("month"))
         term = str(request.args.get("q") or "").strip().lower()
         wanted_os = str(request.args.get("os_group") or "").strip()
         wanted_location = str(request.args.get("location") or "").strip().upper()
         kind = str(request.args.get("kind") or "").strip().lower()      # physical | logical
         state = str(request.args.get("state") or "").strip().lower()    # included | excluded
-        limit = min(int(request.args.get("limit", 500)), 20000)
+        # EOSL 표의 열 이름("2028년 이상", "계획 없음"). 표의 숫자를 눌렀을 때 쓴다.
+        eosl_bucket = str(request.args.get("eosl") or "").strip()
 
-        with manager.connect() as conn:
-            repo = AssetRepository(conn)
-            snapshot = repo.snapshot_on_or_before("ITSM", base_day.isoformat())
-            if not snapshot:
-                return jsonify({"status": "NO_SNAPSHOT", "items": [], "total": 0,
-                                "message": "해당 기간까지의 ITSM 스냅샷이 없습니다."})
-            # 목록은 제외된 것도 함께 보여야 한다. 제외 사유를 달고 나온다.
-            service = ServerStatusService(cfg, repo, include_all=True)
-            rows = service.records(int(snapshot["id"]))
-            criteria = service.describe_criteria()
+        repo = AssetRepository(conn)
+        snapshot = repo.snapshot_on_or_before("ITSM", base_day.isoformat())
+        if not snapshot:
+            return None, None, None
+        # 목록은 제외된 것도 함께 보여야 한다. 제외 사유를 달고 나온다.
+        service = ServerStatusService(cfg, repo, include_all=True)
+        rows = service.records(int(snapshot["id"]))
 
         def keep(item: dict[str, Any]) -> bool:
             if wanted_os and item.get("os_group") != wanted_os:
@@ -243,24 +232,99 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
                 return False
             if state == "excluded" and not item.get("exclude_reason"):
                 return False
+            if eosl_bucket:
+                # 표를 만든 것과 같은 함수로 묶는다. 따로 적으면 표의 숫자와
+                # 목록의 줄 수가 어긋난다.
+                if ServerStatusService.eosl_bucket(item.get("eosl_year"), base_day.year) != eosl_bucket:
+                    return False
             if not term:
                 return True
-            # 호스트명·IP·업무명뿐 아니라 담긴 값 전부에서 찾는다. 운영자가 무엇으로
-            # 기억하고 있을지 모르기 때문이다.
+            # 집계값과 ITSM 원본 **값**에서 찾는다. 컬럼 이름은 보지 않는다 --
+            # 'OS' 로 찾으면 CM_OS 라는 이름 때문에 전부 걸리기 때문이다.
+            haystack = [v for k, v in item.items() if k != "raw"]
+            haystack.extend((item.get("raw") or {}).values())
             return term in " ".join(
-                str(value).lower() for value in item.values() if value not in (None, "")
+                str(value).lower() for value in haystack if value not in (None, "")
             )
 
         matched = [item for item in rows if keep(item)]
+        return snapshot, matched, {
+            "base_day": base_day,
+            "snapshot_total": len(rows),
+            "criteria": service.describe_criteria(),
+        }
+
+    @bp.route("/api/asset-sync/assets")
+    @login_required
+    def asset_list() -> Any:
+        """자산 한 건씩의 목록.
+
+        화면에서 OS·위치의 대수를 눌렀을 때 그 숫자가 실제로 무엇인지 보여준다.
+        같은 목록을 자산 제외 관리에서도 쓴다 -- 제외할 대상을 고르려면 먼저
+        찾아야 하고, 찾는 기준은 호스트명·IP·업무명 무엇이든 될 수 있다.
+        """
+        limit = min(int(request.args.get("limit", 500)), 20000)
+        try:
+            with manager.connect() as conn:
+                snapshot, matched, meta = _asset_rows(conn)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        if snapshot is None:
+            return jsonify({"status": "NO_SNAPSHOT", "items": [], "total": 0,
+                            "message": "해당 기간까지의 ITSM 스냅샷이 없습니다."})
+        # 원본 전 컬럼은 화면에 쓰지 않는다. 응답만 커진다. 엑셀에서만 쓴다.
+        items = [{k: v for k, v in item.items() if k != "raw"} for item in matched[:limit]]
         return jsonify({
             "status": "SUCCESS",
             "as_of": snapshot["snapshot_date"],
             "total": len(matched),
-            "snapshot_total": len(rows),
+            "snapshot_total": meta["snapshot_total"],
             "truncated": len(matched) > limit,
-            "items": matched[:limit],
-            "criteria": criteria,
+            "items": items,
+            "criteria": meta["criteria"],
         })
+
+    @bp.route("/api/asset-sync/assets/export")
+    @login_required
+    def asset_list_export() -> Any:
+        """화면(팝업)에 보이는 그 목록을 엑셀로. **ITSM 원본 전 컬럼**이 들어간다.
+
+        화면은 꼭 필요한 것만 보여 준다 -- 스무 컬럼을 늘어놓으면 읽을 수 없다.
+        받아서 다시 거르고 피벗하려면 전 컬럼이 필요하므로 파일에는 전부 담는다.
+        """
+        try:
+            with manager.connect() as conn:
+                snapshot, matched, meta = _asset_rows(conn)
+                if snapshot is None:
+                    return jsonify({"error": "해당 기간까지의 ITSM 스냅샷이 없습니다."}), 400
+                title = str(request.args.get("title") or "").strip() or "자산 목록"
+                status = {
+                    "as_of": snapshot["snapshot_date"],
+                    "excluded": {"items": [], "reason": ""},
+                }
+                service = MonthlyCheckExportService(status, matched)
+                workbook = service.build_asset_list(title, matched, _asset_filter_note())
+                target = cfg.resolve("data/export/monthly_check")
+                target.mkdir(parents=True, exist_ok=True)
+                safe = re.sub(r"[\\/:*?\"<>|]", "_", title)[:40]
+                path = target / f"자산목록_{safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                workbook.save(path)
+                workbook.close()
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return send_file(path, as_attachment=True, download_name=path.name)
+
+    def _asset_filter_note() -> str:
+        """어떤 조건으로 고른 목록인지. 파일만 보고도 알 수 있어야 한다."""
+        labels = {
+            "q": "검색", "os_group": "OS", "location": "위치",
+            "kind": "구분", "state": "상태", "month": "기준월", "eosl": "EOSL",
+        }
+        parts = [
+            f"{label}={request.args.get(key)}"
+            for key, label in labels.items() if request.args.get(key)
+        ]
+        return "조건: " + (" · ".join(parts) if parts else "전체")
 
     @bp.route("/api/collection-runs")
     @bp.route("/api/asset-sync/collection-runs")
