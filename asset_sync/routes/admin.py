@@ -4,6 +4,7 @@ import copy
 import json
 import logging
 import socket
+from pathlib import Path
 from datetime import datetime
 from typing import Any
 
@@ -140,6 +141,82 @@ def create_admin_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprin
             )
             conn.commit()
             return jsonify({"success": True, "changed": changed})
+
+    @bp.route("/api/asset-sync/admin/asset-exclusions/upload", methods=["POST"])
+    @admin_required
+    def upload_asset_exclusions() -> Any:
+        """엑셀로 한꺼번에 제외하거나 되돌린다.
+
+        200~300 건을 화면에서 하나씩 체크하는 것은 현실적이지 않다. 목록을
+        엑셀로 받아 [처리] 칸에 적고 그대로 다시 올리면 한 번에 적용한다.
+
+        ``apply`` 가 거짓이면 읽어만 보고 결과를 돌려준다. 300 건을 바로 반영한
+        뒤에 "어? 몇 건이 왜 빠졌지" 를 묻게 되면 되돌리기가 번거롭다.
+        """
+        upload = request.files.get("file")
+        if not upload or not upload.filename:
+            return jsonify({"success": False, "error": "엑셀 또는 CSV 파일을 선택하세요."}), 400
+        source = str(request.form.get("source") or "ITSM").upper()
+        default_mode = str(request.form.get("mode") or "").upper()
+        reason = str(request.form.get("reason") or "").strip()
+        apply_now = str(request.form.get("apply") or "").lower() in {"1", "true", "yes", "on"}
+
+        target = cfg.resolve("data/temp/asset_exclusion_upload") / Path(upload.filename).name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        upload.save(target)
+        try:
+            parsed = asset_scope.read_bulk_sheet(target, default_mode)
+        except asset_scope.AssetScopeError as exc:
+            return jsonify({"success": False, "error": str(exc)}), 400
+        except Exception as exc:
+            LOGGER.exception("자산 제외 파일을 읽지 못했습니다")
+            return jsonify({"success": False, "error": f"파일을 읽지 못했습니다: {exc}"}), 400
+        finally:
+            target.unlink(missing_ok=True)
+
+        if not parsed["items"] and not parsed["counts"]["unknown"]:
+            return jsonify({
+                "success": False,
+                "error": (
+                    "적용할 줄이 없습니다. [처리] 칸에 제외/포함/자동 을 적거나,"
+                    " 화면에서 처리 방법을 고른 뒤 다시 올리세요."
+                ),
+                "parsed": parsed,
+            }), 400
+
+        with manager.connect() as conn:
+            repo = AssetRepository(conn)
+            # 파일에 적힌 자산번호가 실제로 있는지 본다. 없으면 오타이거나 이미
+            # 지워진 자산이다. 조용히 넘기면 몇 건이 왜 안 됐는지 알 수 없다.
+            known = {
+                str(row["cm_id"]) for row in conn.execute(
+                    "SELECT DISTINCT cm_id FROM itsm_asset_snapshot WHERE snapshot_id="
+                    "(SELECT id FROM snapshot WHERE source='ITSM'"
+                    " ORDER BY snapshot_date DESC, id DESC LIMIT 1)"
+                ).fetchall()
+            } if source == "ITSM" else set()
+            missing = [
+                item["asset_key"] for item in parsed["items"]
+                if known and item["asset_key"] not in known
+            ]
+            parsed["counts"]["not_found"] = len(missing)
+            parsed["not_found"] = missing[:50]
+
+            if not apply_now:
+                return jsonify({"success": True, "applied": False, "parsed": parsed})
+
+            user = str(session["user"].get("username") or session["user"].get("id") or "")
+            result = asset_scope.apply_bulk(
+                repo, source, parsed["items"], reason=reason, updated_by=user
+            )
+            repo.audit(
+                user, "ASSET_EXCLUSION_BULK", "asset_exclusion", source, reason,
+                None, {"file": upload.filename, "counts": parsed["counts"],
+                       "applied": result["applied"]},
+                module_id=MODULE_ID,
+            )
+            conn.commit()
+        return jsonify({"success": True, "applied": True, "parsed": parsed, "result": result})
 
     # ── AIX HMC ────────────────────────────────────────────────────────
     # vCenter 는 PowerCLI 라는 별도 프로그램을 거치지만 HMC 는 HTTPS 하나로 끝난다.

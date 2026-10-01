@@ -153,7 +153,8 @@ def test_the_excluded_sheet_shows_why_each_one_was_dropped(monthly):
     path = MonthlyCheckExportService(status, records).save(tmp_path / "export", "excluded")
     sheet = load_workbook(path)["제외한 대상"]
     labels, _ = _columns(sheet)
-    reason = labels.index("제외 사유") + 1
+    # 사람이 채우는 칸(제외 사유)과 지금 상태(제외 사유(현재))는 다른 열이다.
+    reason = labels.index("제외 사유(현재)") + 1
     assert sheet.cell(row=FIRST_DATA_ROW, column=reason).value == "상태가 운영·대기가 아님"
     # 제외 기준도 파일에 적혀 있어야 한다.
     assert "제외 기준" in str(sheet["A2"].value)

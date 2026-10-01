@@ -174,6 +174,106 @@ async function exportAssetBrowser() {
   alertEl.innerHTML = '<div class="alert alert-success">✅ Excel 을 내려받았습니다. ITSM 원본 전 컬럼이 들어 있습니다.</div>';
 }
 
+// ── 엑셀로 한꺼번에 ──────────────────────────────────────────────────
+// 300 건을 바로 반영한 뒤 "어? 몇 건이 왜 빠졌지" 를 묻게 되면 되돌리기가
+// 번거롭다. 먼저 읽어만 보고 결과를 보여 준 다음 적용한다.
+let assetBulkReady = false;
+
+function assetBulkForm(apply) {
+  const input = document.getElementById('asset-bulk-file');
+  if (!input.files || !input.files.length) return null;
+  const form = new FormData();
+  form.append('file', input.files[0]);
+  form.append('source', 'ITSM');
+  form.append('mode', document.getElementById('asset-bulk-mode').value);
+  form.append('reason', document.getElementById('asset-browser-reason').value.trim());
+  if (apply) form.append('apply', '1');
+  return form;
+}
+
+function renderAssetBulk(data, applied) {
+  const holder = document.getElementById('asset-bulk-result');
+  const parsed = data.parsed || {};
+  const counts = parsed.counts || {};
+  const label = {EXCLUDE: '제외', INCLUDE: '포함', AUTO: '자동 판정'};
+  const lines = [];
+
+  Object.entries(label).forEach(([mode, name]) => {
+    if (counts[mode]) lines.push(`${name} <strong>${Number(counts[mode]).toLocaleString()}건</strong>`);
+  });
+  let html = `<div class="alert ${applied ? 'alert-success' : 'alert-info'}" style="margin-bottom:6px">`
+    + (applied ? '✅ 적용했습니다. ' : '읽었습니다(아직 적용 전). ')
+    + (lines.join(' · ') || '적용할 줄이 없습니다.')
+    + ` <span class="text-muted">머리글 ${parsed.header_row || '?'}행 기준</span></div>`;
+
+  // 넘어간 줄은 반드시 알려 준다. 몇 건이 왜 빠졌는지 모르면 더 나쁘다.
+  if (counts.blank) {
+    html += `<div class="text-muted">· [처리] 칸이 빈 줄 ${Number(counts.blank).toLocaleString()}건은 그대로 두었습니다.`
+      + ` 전체에 같은 처리를 하려면 위 선택을 바꾸세요.</div>`;
+  }
+  if (counts.unknown) {
+    html += `<div class="text-error">· 알 수 없는 값 ${counts.unknown}건 (제외/포함/자동 중에서 적어야 합니다): `
+      + (parsed.unknown || []).map(u => `${u.row}행 "${syncEscape(u.value)}"`).join(', ') + '</div>';
+  }
+  if (counts.duplicated) {
+    html += `<div class="text-warning">· 같은 자산번호가 두 번 나온 줄 ${counts.duplicated}건은 첫 줄만 썼습니다.</div>`;
+  }
+  if (counts.not_found) {
+    html += `<div class="text-warning">· 지금 ITSM 에 없는 자산번호 ${counts.not_found}건: `
+      + (parsed.not_found || []).slice(0, 10).map(k => syncEscape(k)).join(', ')
+      + (counts.not_found > 10 ? ' 외' : '')
+      + ' (오타이거나 이미 삭제된 자산입니다. 규칙은 저장되지만 집계에는 영향이 없습니다.)</div>';
+  }
+  holder.innerHTML = html;
+}
+
+async function previewAssetBulk() {
+  const holder = document.getElementById('asset-bulk-result');
+  const button = document.getElementById('asset-bulk-apply');
+  assetBulkReady = false;
+  button.disabled = true;
+  const form = assetBulkForm(false);
+  if (!form) { holder.innerHTML = ''; return; }
+  holder.innerHTML = '<span class="loading"></span> 파일을 읽는 중...';
+  const response = await fetch('/api/asset-sync/admin/asset-exclusions/upload', {method: 'POST', body: form});
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.success) {
+    holder.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(data.error || 'HTTP ' + response.status)}</div>`;
+    return;
+  }
+  renderAssetBulk(data, false);
+  assetBulkReady = Number((data.parsed || {}).items ? data.parsed.items.length : 0) > 0
+    || Number((data.parsed.counts || {}).total || 0) > 0;
+  button.disabled = !assetBulkReady;
+}
+
+async function applyAssetBulk() {
+  const holder = document.getElementById('asset-bulk-result');
+  const form = assetBulkForm(true);
+  if (!form) return;
+  if (!assetBulkReady) { await previewAssetBulk(); return; }
+  holder.innerHTML = '<span class="loading"></span> 적용 중...';
+  const response = await fetch('/api/asset-sync/admin/asset-exclusions/upload', {method: 'POST', body: form});
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.success) {
+    holder.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(data.error || 'HTTP ' + response.status)}</div>`;
+    return;
+  }
+  renderAssetBulk(data, true);
+  document.getElementById('asset-bulk-apply').disabled = true;
+  assetBulkReady = false;
+  await loadAssetBrowser();
+  refreshCountsAfterScopeChange();
+}
+
+// 대수가 바뀌었으므로 열려 있는 화면도 다시 센다.
+function refreshCountsAfterScopeChange() {
+  const active = id => document.getElementById(id)?.classList.contains('active');
+  if (typeof loadDashboard === 'function' && active('page-dashboard')) loadDashboard();
+  if (typeof loadMonthlyCheck === 'function' && active('page-monthly_check')) loadMonthlyCheck();
+  if (typeof loadDailyCheck === 'function' && active('page-daily_check')) loadDailyCheck();
+}
+
 async function applyAssetScope(mode) {
   if (!assetBrowserSelected.size) {
     document.getElementById('asset-browser-alert').innerHTML =
@@ -205,9 +305,6 @@ async function applyAssetScope(mode) {
   assetBrowserSelected = new Set();
   document.getElementById('asset-browser-all').checked = false;
   await loadAssetBrowser();
-  // 대수가 바뀌었으므로 열려 있는 화면도 다시 센다.
-  if (typeof loadDashboard === 'function' && document.getElementById('page-dashboard')?.classList.contains('active')) loadDashboard();
-  if (typeof loadMonthlyCheck === 'function' && document.getElementById('page-monthly_check')?.classList.contains('active')) loadMonthlyCheck();
-  if (typeof loadDailyCheck === 'function' && document.getElementById('page-daily_check')?.classList.contains('active')) loadDailyCheck();
+  refreshCountsAfterScopeChange();
 }
 </script>

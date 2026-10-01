@@ -17,8 +17,10 @@ from typing import Any, Iterable
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
 
+from .asset_scope import ACTION_CHOICES
 from .change_presenter import FIELD_LABELS
 
 #: 뽑을 수 있는 항목. 키가 곧 요청값이다.
@@ -189,6 +191,11 @@ class MonthlyCheckExportService:
                     sheet.cell(row=line, column=3, value="예: " + ", ".join(str(s) for s in samples))
         _fit(sheet)
 
+    #: 사람이 채워 넣는 열. 받아서 표시하고 다시 올리는 길이다. 맨 앞에 둔다.
+    _EDIT_COLUMNS: tuple[tuple[str, str], ...] = (
+        ("처리", "_action"), ("제외 사유", "_reason"),
+    )
+
     #: 해석해서 만든 값. 원본 컬럼 앞에 둔다. 코드가 아니라 사람이 읽는 값이다.
     _DERIVED_COLUMNS: tuple[tuple[str, str], ...] = (
         ("자산번호", "cm_id"), ("업무명", "service_name"), ("호스트명", "hostname"),
@@ -196,8 +203,8 @@ class MonthlyCheckExportService:
         ("OS", "os_family"), ("OS 묶음", "os_group"), ("OS버전", "os_version"),
         ("CPU Core", "cpu_cores"), ("Memory MB", "memory_mb"),
         ("EOSL 연도", "eosl_year"), ("EOSL 컬럼", "eosl_field"),
-        ("자산 여부", "_included"), ("제외 사유", "exclude_label"),
-        ("수동 지정", "_manual"), ("수동 사유", "manual_note"),
+        ("자산 여부", "_included"), ("제외 사유(현재)", "exclude_label"),
+        ("수동 지정", "_manual"), ("수동 사유(현재)", "manual_note"),
     )
 
     #: 원본 컬럼 중 앞에 놓을 것. 나머지는 이 뒤에 사전순으로 붙는다.
@@ -253,7 +260,22 @@ class MonthlyCheckExportService:
         raw_columns = self.raw_columns(rows)
         label_row, name_row = 4, 5
 
-        for index, (label, _) in enumerate(self._DERIVED_COLUMNS, start=1):
+        # 사람이 채우는 열. 200~300 건을 화면에서 하나씩 체크할 수 없으므로,
+        # 여기에 제외/포함을 적어 그대로 다시 올리면 한 번에 적용된다.
+        for index, (label, _) in enumerate(self._EDIT_COLUMNS, start=1):
+            cell = sheet.cell(row=label_row, column=index, value=label)
+            cell.fill = PatternFill("solid", fgColor="C55A11")
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.alignment = Alignment(horizontal="center")
+            cell.border = _BORDER
+            lower = sheet.cell(row=name_row, column=index, value=label)
+            lower.fill = PatternFill("solid", fgColor="FBE5D6")
+            lower.font = Font(size=9, bold=True, color="833C0C")
+            lower.alignment = Alignment(horizontal="center")
+            lower.border = _BORDER
+
+        edits = len(self._EDIT_COLUMNS)
+        for index, (label, _) in enumerate(self._DERIVED_COLUMNS, start=edits + 1):
             cell = sheet.cell(row=label_row, column=index, value=label)
             cell.fill = _HEAD_FILL
             cell.font = Font(bold=True, color="FFFFFF")
@@ -265,7 +287,7 @@ class MonthlyCheckExportService:
             lower.alignment = Alignment(horizontal="center")
             lower.border = _BORDER
 
-        offset = len(self._DERIVED_COLUMNS)
+        offset = edits + len(self._DERIVED_COLUMNS)
         for index, name in enumerate(raw_columns, start=offset + 1):
             cell = sheet.cell(row=label_row, column=index, value=FIELD_LABELS.get(name, name))
             cell.fill = PatternFill("solid", fgColor="2E6B3E")
@@ -285,7 +307,13 @@ class MonthlyCheckExportService:
             filled["_kind"] = "물리" if item.get("physical") else "논리"
             filled["_included"] = "제외" if item.get("exclude_reason") else "자산"
             filled["_manual"] = "예" if item.get("manual") else ""
-            for index, (_, key) in enumerate(self._DERIVED_COLUMNS, start=1):
+            # 처리·사유 칸은 비워 둔다. 사람이 채우는 자리다. 이미 수동으로
+            # 제외해 둔 것은 그 사실을 적어 둬야 두 번 적지 않는다.
+            if item.get("manual"):
+                sheet.cell(row=line, column=1,
+                           value="제외" if item.get("exclude_reason") else "포함")
+                sheet.cell(row=line, column=2, value=item.get("manual_note") or "")
+            for index, (_, key) in enumerate(self._DERIVED_COLUMNS, start=edits + 1):
                 value = filled.get(key)
                 sheet.cell(row=line, column=index, value="" if value is None else value)
             raw = item.get("raw") or {}
@@ -296,10 +324,26 @@ class MonthlyCheckExportService:
                     value = json.dumps(value, ensure_ascii=False)
                 sheet.cell(row=line, column=index, value="" if value is None else value)
 
-        sheet.freeze_panes = f"A{name_row + 1}"
+        sheet.freeze_panes = f"C{name_row + 1}"
         last = get_column_letter(offset + len(raw_columns)) if raw_columns else get_column_letter(offset)
         if line > name_row:
             sheet.auto_filter.ref = f"A{name_row}:{last}{line}"
+            # 300 줄을 손으로 쓰면 오타가 난다. 고르게 한다.
+            choices = DataValidation(
+                type="list", allow_blank=True,
+                formula1='"' + ",".join(ACTION_CHOICES) + '"',
+                showDropDown=False,
+            )
+            choices.error = "제외 · 포함 · 자동 중에서 고르세요."
+            choices.errorTitle = "처리"
+            sheet.add_data_validation(choices)
+            choices.add(f"A{name_row + 1}:A{line}")
+        # 쓰는 법을 파일 안에 적어 둔다. 설명을 따로 찾지 않아도 되게.
+        sheet["A3"] = (
+            "▶ [처리] 칸에 제외 / 포함 / 자동 을 적고(또는 골라) 이 파일을 그대로 다시 올리면"
+            " 한 번에 적용됩니다. 비워 두면 그대로 둡니다. [제외 사유] 는 선택입니다."
+        )
+        sheet["A3"].font = Font(size=10, bold=True, color="C55A11")
         _fit(sheet)
 
     # ── 파일 만들기 ─────────────────────────────────────────────────────

@@ -34,13 +34,38 @@
     </div>
 
     {% if user.role == 'admin' %}
-    <div class="flex gap-2 items-center mb-4" style="flex-wrap:wrap;padding:10px;background:var(--surface2);border-radius:8px">
-      <label class="text-xs"><input type="checkbox" id="asset-browser-all" onchange="toggleAllAssetRows(this.checked)"> 보이는 것 전체 선택</label>
-      <span class="text-xs text-muted" id="asset-browser-selected">선택 0건</span>
-      <input class="form-input" id="asset-browser-reason" style="min-width:200px;flex:1" placeholder="사유 (예: 실물 없음 · 테스트 장비)">
-      <button class="btn btn-secondary btn-sm" onclick="applyAssetScope('EXCLUDE')">자산에서 제외</button>
-      <button class="btn btn-secondary btn-sm" onclick="applyAssetScope('INCLUDE')">자산에 포함</button>
-      <button class="btn btn-secondary btn-sm" onclick="applyAssetScope('AUTO')">자동 판정으로</button>
+    <div style="padding:10px;background:var(--surface2);border-radius:8px" class="mb-4">
+      <div class="flex gap-2 items-center" style="flex-wrap:wrap">
+        <label class="text-xs"><input type="checkbox" id="asset-browser-all" onchange="toggleAllAssetRows(this.checked)"> 보이는 것 전체 선택</label>
+        <span class="text-xs text-muted" id="asset-browser-selected">선택 0건</span>
+        <input class="form-input" id="asset-browser-reason" style="min-width:200px;flex:1" placeholder="사유 (예: 실물 없음 · 테스트 장비)">
+        <button class="btn btn-secondary btn-sm" onclick="applyAssetScope('EXCLUDE')">자산에서 제외</button>
+        <button class="btn btn-secondary btn-sm" onclick="applyAssetScope('INCLUDE')">자산에 포함</button>
+        <button class="btn btn-secondary btn-sm" onclick="applyAssetScope('AUTO')">자동 판정으로</button>
+      </div>
+
+      <div style="border-top:1px solid var(--border);margin-top:10px;padding-top:10px">
+        <div class="text-xs mb-4">
+          <strong>엑셀로 한꺼번에</strong> — 수백 건은 여기서 하세요.
+          위 <strong>[Excel 추출]</strong> 로 받아 맨 앞 <strong>[처리]</strong> 칸에
+          <span class="mono">제외 / 포함 / 자동</span> 을 적고(엑셀에서 고를 수 있습니다)
+          그대로 다시 올리면 한 번에 적용됩니다.
+          <span class="text-muted">[처리] 칸을 비워 두고 올리면 아래에서 고른 처리가 전체에 적용됩니다.</span>
+        </div>
+        <div class="flex gap-2 items-center" style="flex-wrap:wrap">
+          <input type="file" id="asset-bulk-file" accept=".xlsx,.xlsm,.csv,.tsv"
+                 class="form-input" style="min-width:240px;flex:1" onchange="previewAssetBulk()">
+          <select class="form-select" id="asset-bulk-mode" style="width:220px" onchange="previewAssetBulk()">
+            <option value="">[처리] 칸을 그대로 따름</option>
+            <option value="EXCLUDE">칸이 비면 전부 제외</option>
+            <option value="INCLUDE">칸이 비면 전부 포함</option>
+            <option value="AUTO">칸이 비면 전부 자동 판정</option>
+          </select>
+          <button class="btn btn-secondary btn-sm" onclick="previewAssetBulk()">먼저 확인</button>
+          <button class="btn btn-primary btn-sm" id="asset-bulk-apply" onclick="applyAssetBulk()" disabled>적용</button>
+        </div>
+        <div id="asset-bulk-result" class="text-xs" style="margin-top:8px"></div>
+      </div>
     </div>
     {% endif %}
 

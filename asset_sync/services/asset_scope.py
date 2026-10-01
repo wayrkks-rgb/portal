@@ -460,3 +460,180 @@ def list_rules(repository: Any, source: str | None = None) -> list[dict[str, Any
         return [dict(row) for row in repository.conn.execute(sql, params or None).fetchall()]
     except Exception:
         return []
+
+
+# ── 엑셀로 한꺼번에 제외하기 ─────────────────────────────────────────────
+# 200~300 건을 화면에서 하나씩 체크하는 것은 현실적이지 않다. 목록을 엑셀로
+# 받아 거기에 표시하고 다시 올리면 한 번에 적용한다.
+
+#: 자산을 알아보는 열. 이 중 하나가 있으면 그 열을 키로 쓴다.
+KEY_HEADERS = ("CM_ID", "자산번호", "자산ID", "ASSET_KEY", "자산키")
+
+#: 무엇을 할지 적는 열.
+ACTION_HEADERS = ("처리", "제외", "제외여부", "ACTION", "MODE")
+
+#: 사유를 적는 열.
+REASON_HEADERS = ("제외 사유", "사유", "비고", "REASON", "NOTE")
+
+#: 적어 넣을 수 있는 말. 사람이 빨리 쓰는 표기까지 받는다.
+ACTION_WORDS: dict[str, str] = {
+    "제외": "EXCLUDE", "EXCLUDE": "EXCLUDE", "Y": "EXCLUDE", "O": "EXCLUDE",
+    "1": "EXCLUDE", "TRUE": "EXCLUDE", "V": "EXCLUDE",
+    "포함": "INCLUDE", "재포함": "INCLUDE", "INCLUDE": "INCLUDE",
+    "자동": "AUTO", "AUTO": "AUTO", "해제": "AUTO", "취소": "AUTO",
+}
+
+#: 엑셀에서 고를 수 있게 넣어 주는 값. 300 줄을 손으로 쓰면 오타가 난다.
+ACTION_CHOICES = ("제외", "포함", "자동")
+
+
+def _cell_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
+def _find_header(rows: list[list[Any]]) -> tuple[int, dict[str, int]]:
+    """머리글 줄과 열 위치를 찾는다.
+
+    우리가 내보낸 파일은 머리글이 두 줄이고(한글 이름 / 원래 컬럼명) 넷째·다섯째
+    줄에 있다. 담당자가 직접 만든 파일은 첫 줄일 수도 있다. 그래서 줄 번호를
+    가정하지 않고 자산번호 열이 보이는 줄을 찾는다.
+    """
+    for index, row in enumerate(rows[:12]):
+        texts = [_cell_text(cell).upper() for cell in row]
+        if not any(text in {h.upper() for h in KEY_HEADERS} for text in texts):
+            continue
+        found: dict[str, int] = {}
+        for position, text in enumerate(texts):
+            if "key" not in found and text in {h.upper() for h in KEY_HEADERS}:
+                found["key"] = position
+            elif "action" not in found and text in {h.upper() for h in ACTION_HEADERS}:
+                found["action"] = position
+            elif "reason" not in found and text in {h.upper() for h in REASON_HEADERS}:
+                found["reason"] = position
+        if "key" in found:
+            return index, found
+    raise AssetScopeError(
+        "자산번호 열을 찾지 못했습니다. 머리글에 "
+        + " 또는 ".join(KEY_HEADERS[:2])
+        + " 가 있어야 합니다."
+    )
+
+
+def _sheet_rows(path: Any) -> list[list[Any]]:
+    from pathlib import Path
+
+    target = Path(path)
+    suffix = target.suffix.lower()
+    if suffix in {".xlsx", ".xlsm"}:
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(target, read_only=True, data_only=True)
+        try:
+            # 첫 시트를 본다. 우리가 내보낸 파일은 시트가 하나다.
+            sheet = workbook.worksheets[0]
+            return [list(row) for row in sheet.iter_rows(values_only=True)]
+        finally:
+            workbook.close()
+    if suffix in {".csv", ".txt", ".tsv"}:
+        import csv
+
+        delimiter = "\t" if suffix == ".tsv" else ","
+        with target.open("r", encoding="utf-8-sig", newline="") as stream:
+            return [list(row) for row in csv.reader(stream, delimiter=delimiter)]
+    raise AssetScopeError("지원 파일은 XLSX, CSV, TSV 입니다.")
+
+
+def read_bulk_sheet(path: Any, default_mode: str = "") -> dict[str, Any]:
+    """올린 파일을 읽어 (자산번호, 처리) 목록을 만든다.
+
+    ``처리`` 열이 비어 있으면 ``default_mode`` 를 쓴다. 엑셀에서 걸러 남긴
+    목록을 그대로 올리고 화면에서 "제외" 를 고르는 쪽이 빠른 경우가 많다.
+
+    알 수 없는 말이 적혀 있으면 조용히 넘기지 않고 돌려준다. 300 줄 중 몇 줄이
+    오타라서 빠졌다는 것을 모르면 더 나쁘다.
+    """
+    default_mode = str(default_mode or "").upper()
+    if default_mode and default_mode not in (*MODES, "AUTO"):
+        raise AssetScopeError(f"기본 처리는 EXCLUDE, INCLUDE, AUTO 중 하나여야 합니다: {default_mode}")
+
+    rows = _sheet_rows(path)
+    header_index, columns = _find_header(rows)
+    key_at = columns["key"]
+    action_at = columns.get("action")
+    reason_at = columns.get("reason")
+
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    unknown: list[dict[str, Any]] = []
+    blank = 0
+    duplicated: list[str] = []
+
+    for line, row in enumerate(rows[header_index + 1:], start=header_index + 2):
+        key = _cell_text(row[key_at] if key_at < len(row) else "")
+        # 머리글 두 줄짜리 파일의 둘째 줄("(집계값)" 등)은 자료가 아니다.
+        if not key or key.upper() in {h.upper() for h in KEY_HEADERS} or key.startswith("("):
+            continue
+        written = _cell_text(row[action_at]) if action_at is not None and action_at < len(row) else ""
+        mode = ACTION_WORDS.get(written.upper()) if written else default_mode
+        if written and mode is None:
+            unknown.append({"row": line, "asset_key": key, "value": written})
+            continue
+        if not mode:
+            blank += 1
+            continue
+        if key in seen:
+            duplicated.append(key)
+            continue
+        seen.add(key)
+        items.append({
+            "asset_key": key,
+            "mode": mode,
+            "reason": _cell_text(row[reason_at]) if reason_at is not None and reason_at < len(row) else "",
+        })
+
+    return {
+        "items": items,
+        "header_row": header_index + 1,
+        "has_action_column": action_at is not None,
+        "counts": {
+            "total": len(items),
+            **{mode: sum(1 for item in items if item["mode"] == mode) for mode in (*MODES, "AUTO")},
+            "blank": blank,
+            "unknown": len(unknown),
+            "duplicated": len(duplicated),
+        },
+        "unknown": unknown[:50],
+        "duplicated": duplicated[:50],
+        "action_choices": list(ACTION_CHOICES),
+    }
+
+
+def apply_bulk(
+    repository: Any,
+    source: str,
+    items: list[Mapping[str, Any]],
+    *,
+    reason: str = "",
+    updated_by: str = "",
+) -> dict[str, Any]:
+    """읽어 들인 목록을 처리별로 묶어 한 번에 적용한다."""
+    applied: dict[str, int] = {}
+    for mode in (*MODES, "AUTO"):
+        chosen = [item for item in items if str(item.get("mode")) == mode]
+        if not chosen:
+            continue
+        # 줄마다 사유가 다를 수 있다. 사유가 같은 것끼리 묶어 한 번에 넣는다.
+        by_reason: dict[str, list[Mapping[str, Any]]] = {}
+        for item in chosen:
+            by_reason.setdefault(str(item.get("reason") or reason), []).append(item)
+        count = 0
+        for text, group in by_reason.items():
+            count += save_rules(
+                repository, source, group, mode=mode, reason=text, updated_by=updated_by
+            )
+        applied[mode] = count
+    return {"applied": applied, "total": sum(applied.values())}
