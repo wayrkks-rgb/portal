@@ -11,7 +11,11 @@
     <div class="card" id="resource-usage-section">
       <div class="dashboard-section-head">
         <div><div class="card-title" style="margin-bottom:4px"><span class="icon">🖥️</span> 통합서버 자원사용현황</div><div class="text-xs text-muted">07시 자동수집 결과를 기간별로 집계합니다. VM 소속과 실제 할당 CPU/MEM은 같은 배치의 최신 vCenter 인벤토리를 사용합니다.</div></div>
-        <button class="btn btn-primary btn-sm" onclick="exportResourceUsage()">Excel Export</button>
+        <div class="flex gap-2">
+          <button class="btn btn-secondary btn-sm"
+                  onclick="openAssetBrowser({source:'RVTOOLS'},'VM 목록 (제외 관리)')">VM 제외 관리</button>
+          <button class="btn btn-primary btn-sm" onclick="exportResourceUsage()">Excel Export</button>
+        </div>
       </div>
       <div class="resource-filter-grid">
         <div class="form-group"><label class="form-label">시작일</label><input class="form-input" type="date" id="resource-start"></div>
@@ -28,7 +32,8 @@
         <div class="stat-card"><div class="stat-value" id="resource-vm-change-count">-</div><div class="stat-label">신규/삭제/이동</div></div>
       </div>
       <div class="resource-table-title">통합기(Cluster)별 자원사용현황</div>
-      <div class="text-xs text-muted mb-4">할당률 = VM 에게 나눠준 양 ÷ 통합기 실제 용량. 사용률(MAX/AVG)과 다릅니다. 증설 판단은 할당률로 합니다.</div>
+      <div class="text-xs text-muted mb-4">할당률 = VM 에게 나눠준 양 ÷ 통합기 실제 용량. 사용률(MAX/AVG)과 다릅니다. 증설 판단은 할당률로 합니다.
+        <span id="resource-scope-note"></span></div>
       <div class="resource-scroll"><table><thead><tr><th>서비스명</th><th>vCenter</th><th>통합기(Cluster)</th><th>ESXi 대수</th><th>VM 대수</th><th>실제 CPU Core</th><th>실제 MEM(GB)</th><th>VM 할당 CPU</th><th>VM 할당 MEM</th><th>CPU 할당률</th><th>MEM 할당률</th><th>CPU MAX</th><th>CPU AVG</th><th>MEM MAX</th><th>MEM AVG</th></tr></thead><tbody id="resource-cluster-body"><tr><td colspan="15" style="text-align:center">조회 조건을 선택하세요.</td></tr></tbody></table></div>
       <div class="resource-table-title">ESXi(통합기 구성 노드)별 자원사용현황</div>
       <div class="resource-scroll"><table><thead><tr><th>서비스명</th><th>vCenter</th><th>Cluster</th><th>ESXi</th><th>VM 대수</th><th>실제 CPU Core</th><th>실제 MEM(GB)</th><th>VM 할당 CPU</th><th>VM 할당 MEM</th><th>CPU 할당률</th><th>MEM 할당률</th><th>CPU MAX</th><th>CPU AVG</th><th>MEM MAX</th><th>MEM AVG</th></tr></thead><tbody id="resource-host-body"><tr><td colspan="15" style="text-align:center">조회 조건을 선택하세요.</td></tr></tbody></table></div>

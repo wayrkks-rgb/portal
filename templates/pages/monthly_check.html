@@ -37,6 +37,8 @@
           <div class="card-title" style="margin-bottom:0"><span class="icon">🖥️</span> 통합서버 자원사용현황</div>
           <div class="flex gap-2 items-center">
             <div class="text-xs text-muted" id="monthly-integrated-basis"></div>
+            <button class="btn btn-secondary btn-sm"
+                    onclick="openAssetBrowser({source:'RVTOOLS'},'VM 목록 (제외 관리)')">VM 제외 관리</button>
             <button class="btn btn-secondary btn-sm" onclick="exportMonthlyIntegrated()">Excel</button>
           </div>
         </div>
@@ -44,6 +46,11 @@
           실제 자원은 통합기가 가진 용량, 할당은 그 위 VM 에게 나눠준 양입니다.
           <strong>할당률</strong>은 할당 ÷ 실제이며, 더 만들 수 있는지는 사용률이 아니라 할당률로 봅니다.
           <strong>C</strong> 는 CPU Core, <strong>G</strong> 는 Memory GB 입니다.
+          <div style="margin-top:4px">
+            vCLS 처럼 vSphere 가 스스로 만드는 VM 은 세지 않습니다.
+            더 뺄 것이 있으면 <strong>[VM 제외 관리]</strong> 에서 고르거나 엑셀로 한꺼번에 처리하세요.
+            여기서 정한 것은 전월·당월 비교와 보고서에도 같이 적용됩니다.
+          </div>
         </div>
         <div class="table-wrap"><table id="monthly-integrated-table"></table></div>
       </div>

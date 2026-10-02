@@ -64,11 +64,18 @@ LOCATIONS = ("IDC", "DR")
 #: 계획 없음으로 볼 연도.
 NO_PLAN_YEAR = 9999
 
+#: vSphere 가 스스로 만들고 지우는 VM. 실제로 쓰는 서버가 아니므로 세지 않는다.
+#: vCLS 는 vCenter 가 클러스터마다 자동으로 만들고 수시로 다시 만든다. 그래서
+#: 세면 대수가 흔들리고, 변경 내역에도 매일 생성·삭제로 올라온다.
+DEFAULT_SYSTEM_VM_PATTERNS = ("vCLS", "NSX-Edge-", "vSphere-Cluster-Srvc", "stCtlVM")
+
 #: 제외 사유 코드. 화면 문구와 함께 쓴다.
 REASON_LABELS = {
     "STATUS": "상태가 운영·대기가 아님",
     "EMPTY": "OS·OS버전·EOSL 이 모두 비어 있음",
     "MANUAL": "수동 제외",
+    "SYSTEM_VM": "vSphere 가 스스로 만드는 VM",
+    "TEMPLATE": "템플릿 또는 SRM 자리표시자",
 }
 
 SOURCES = ("ITSM", "RVTOOLS")
@@ -94,6 +101,7 @@ class Criteria:
     exclude_when_all_empty: tuple[str, ...] = DEFAULT_EXCLUDE_WHEN_ALL_EMPTY
     active_status: tuple[str, ...] = ACTIVE_STATUS
     os_groups: tuple[tuple[str, tuple[str, ...]], ...] = DEFAULT_OS_GROUPS
+    system_vm_patterns: tuple[str, ...] = DEFAULT_SYSTEM_VM_PATTERNS
 
     @property
     def place_codes(self) -> dict[str, str]:
@@ -110,6 +118,7 @@ class Criteria:
             "exclude_when_all_empty": list(self.exclude_when_all_empty),
             "active_status": list(self.active_status),
             "os_groups": {name: list(tokens) for name, tokens in self.os_groups},
+            "system_vm_patterns": list(self.system_vm_patterns),
             "other_group": OTHER_GROUP,
             "physical_code": PHYSICAL_CATEGORY,
             "logical_code": LOGICAL_CATEGORY,
@@ -160,6 +169,10 @@ def criteria_from(config: Any) -> Criteria:
             str(c).upper() for c in (section.get("active_status") or ACTIVE_STATUS)
         ),
         os_groups=os_groups,
+        system_vm_patterns=tuple(
+            str(token) for token in
+            (section.get("system_vm_patterns") or DEFAULT_SYSTEM_VM_PATTERNS)
+        ),
     )
 
 
@@ -237,6 +250,18 @@ def os_group(os_family: Any, criteria: Criteria) -> str:
     return OTHER_GROUP
 
 
+def is_system_vm(vm_name: Any, criteria: Criteria) -> bool:
+    """vSphere 가 스스로 만드는 VM 인가. 이름 조각으로 가린다.
+
+    vCLS 는 ``vCLS-abc123`` 또는 ``vCLS (1)`` 처럼 뒤에 붙는 것이 매번 달라진다.
+    그래서 같은지 보지 않고 조각이 들어 있는지 본다.
+    """
+    text = str(vm_name or "").strip().lower()
+    if not text:
+        return False
+    return any(str(token).strip().lower() in text for token in criteria.system_vm_patterns)
+
+
 def is_physical(record: Mapping[str, Any]) -> bool:
     return str(record.get("server_category_code") or "") == PHYSICAL_CATEGORY
 
@@ -295,11 +320,87 @@ class AssetScope:
         return Decision(True)
 
     def decide_vcenter(self, record: Mapping[str, Any]) -> Decision:
-        """vCenter 쪽은 자동 규칙이 없다. 템플릿·SRM 은 수집 단계에서 이미 빠진다."""
+        """VM 하나를 셀지 판단한다.
+
+        vSphere 가 스스로 만드는 VM(vCLS 등)은 실제로 쓰는 서버가 아니다. 세면
+        대수가 흔들리고 변경 내역에도 매일 생성·삭제로 올라온다. 이름으로 가린다.
+        """
         rule = self.rule_for("RVTOOLS", vcenter_key(record))
+        if rule and str(rule.get("mode")) == "INCLUDE":
+            return Decision(True, manual=True, note=str(rule.get("reason") or ""))
         if rule and str(rule.get("mode")) == "EXCLUDE":
             return Decision(self.include_all, "MANUAL", manual=True, note=str(rule.get("reason") or ""))
+        if record.get("template_flag") or record.get("srm_placeholder"):
+            return Decision(self.include_all, "TEMPLATE")
+        if is_system_vm(record.get("vm_name"), self.criteria):
+            return Decision(self.include_all, "SYSTEM_VM")
         return Decision(True)
+
+    def describe_vcenter(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        """VM 한 건을 화면·엑셀에 쓸 모양으로 편다."""
+        decision = self.decide_vcenter(record)
+        return {
+            "asset_key": vcenter_key(record),
+            "cm_id": vcenter_key(record),
+            "vm_name": record.get("vm_name"),
+            "service_name": record.get("vm_name"),
+            "hostname": record.get("normalized_hostname") or record.get("dns_name"),
+            "primary_ip": record.get("primary_ip"),
+            "vcenter_id": record.get("vcenter"),
+            "cluster_name": record.get("cluster_name") or record.get("cluster"),
+            "esxi_host": record.get("esxi_host"),
+            "power_state": record.get("power_state"),
+            "os_family": record.get("os_family"),
+            "os_version": record.get("os_version"),
+            "cpus": record.get("cpus"),
+            "memory_mb": record.get("memory_mb"),
+            "vm_uuid": record.get("vm_uuid"),
+            "template_flag": bool(record.get("template_flag")),
+            "srm_placeholder": bool(record.get("srm_placeholder")),
+            "included": decision.included,
+            "exclude_reason": decision.reason,
+            "exclude_label": REASON_LABELS.get(decision.reason, ""),
+            "manual": decision.manual,
+            "manual_note": decision.note,
+            "raw": dict(record.get("raw") or {}),
+        }
+
+    def split_vcenter(self, records: Iterable[Mapping[str, Any]]) -> tuple[list[dict], list[dict]]:
+        included: list[dict[str, Any]] = []
+        excluded: list[dict[str, Any]] = []
+        for record in records:
+            item = self.describe_vcenter(record)
+            (included if item["included"] else excluded).append(item)
+        return included, excluded
+
+    def excluded_vcenter_keys(self, records: Iterable[Mapping[str, Any]]) -> set[str]:
+        """세지 않을 VM 의 키. 자원사용현황이 이 집합으로 걸러낸다."""
+        return {
+            vcenter_key(record) for record in records
+            if not self.decide_vcenter(record).included
+        }
+
+    def vcenter_summary(self, records: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+        reasons: Counter[str] = Counter()
+        total = selected = 0
+        for record in records:
+            total += 1
+            decision = self.decide_vcenter(record)
+            if decision.included and not (self.include_all and decision.reason):
+                selected += 1
+            if decision.reason:
+                reasons[decision.reason] += 1
+        return {
+            "snapshot_total": total,
+            "selected": selected,
+            "excluded": sum(reasons.values()),
+            "by_reason": {
+                code: {"label": REASON_LABELS.get(code, code), "count": count}
+                for code, count in reasons.items()
+            },
+            "include_all": self.include_all,
+            "system_vm_patterns": list(self.criteria.system_vm_patterns),
+        }
 
     def describe_itsm(self, record: Mapping[str, Any]) -> dict[str, Any]:
         """한 건을 화면에 쓸 모양으로 편다. 제외 판단 근거 값까지 담는다."""

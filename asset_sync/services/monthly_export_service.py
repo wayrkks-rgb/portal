@@ -231,6 +231,24 @@ class MonthlyCheckExportService:
         ordered = [name for name in cls._RAW_ORDER if name in found]
         return ordered + sorted(found - set(ordered))
 
+    #: vCenter VM 목록의 집계값. ITSM 자산과 열이 다르다.
+    _VM_COLUMNS: tuple[tuple[str, str], ...] = (
+        ("VM 이름", "vm_name"), ("호스트명", "hostname"), ("IP", "primary_ip"),
+        ("vCenter", "vcenter_id"), ("통합기(Cluster)", "cluster_name"), ("ESXi", "esxi_host"),
+        ("전원", "power_state"), ("OS", "os_family"), ("OS버전", "os_version"),
+        ("vCPU", "cpus"), ("Memory MB", "memory_mb"), ("VM UUID", "vm_uuid"),
+        ("자산키", "asset_key"),
+        ("자산 여부", "_included"), ("제외 사유(현재)", "exclude_label"),
+        ("수동 지정", "_manual"), ("수동 사유(현재)", "manual_note"),
+    )
+
+    @classmethod
+    def _columns_for(cls, items: list[dict[str, Any]]) -> tuple[tuple[str, str], ...]:
+        """ITSM 자산인지 vCenter VM 인지 보고 열을 고른다."""
+        if any("vm_name" in item for item in items):
+            return cls._VM_COLUMNS
+        return cls._DERIVED_COLUMNS
+
     def _write_assets(
         self,
         sheet: Any,
@@ -258,6 +276,7 @@ class MonthlyCheckExportService:
         sheet["A2"].font = Font(size=10, color="666666")
 
         raw_columns = self.raw_columns(rows)
+        derived = self._columns_for(rows)
         label_row, name_row = 4, 5
 
         # 사람이 채우는 열. 200~300 건을 화면에서 하나씩 체크할 수 없으므로,
@@ -275,7 +294,7 @@ class MonthlyCheckExportService:
             lower.border = _BORDER
 
         edits = len(self._EDIT_COLUMNS)
-        for index, (label, _) in enumerate(self._DERIVED_COLUMNS, start=edits + 1):
+        for index, (label, _) in enumerate(derived, start=edits + 1):
             cell = sheet.cell(row=label_row, column=index, value=label)
             cell.fill = _HEAD_FILL
             cell.font = Font(bold=True, color="FFFFFF")
@@ -287,7 +306,7 @@ class MonthlyCheckExportService:
             lower.alignment = Alignment(horizontal="center")
             lower.border = _BORDER
 
-        offset = edits + len(self._DERIVED_COLUMNS)
+        offset = edits + len(derived)
         for index, name in enumerate(raw_columns, start=offset + 1):
             cell = sheet.cell(row=label_row, column=index, value=FIELD_LABELS.get(name, name))
             cell.fill = PatternFill("solid", fgColor="2E6B3E")
@@ -313,7 +332,7 @@ class MonthlyCheckExportService:
                 sheet.cell(row=line, column=1,
                            value="제외" if item.get("exclude_reason") else "포함")
                 sheet.cell(row=line, column=2, value=item.get("manual_note") or "")
-            for index, (_, key) in enumerate(self._DERIVED_COLUMNS, start=edits + 1):
+            for index, (_, key) in enumerate(derived, start=edits + 1):
                 value = filled.get(key)
                 sheet.cell(row=line, column=index, value="" if value is None else value)
             raw = item.get("raw") or {}

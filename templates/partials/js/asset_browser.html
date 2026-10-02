@@ -5,10 +5,16 @@ let assetBrowserFilter = {};
 let assetBrowserRows = [];
 let assetBrowserSelected = new Set();
 let assetBrowserTimer = null;
+let assetBrowserSource = 'ITSM';
 const ASSET_BROWSER_ADMIN = {{ 'true' if user.role == 'admin' else 'false' }};
 
 function openAssetBrowser(filter, title) {
   assetBrowserFilter = Object.assign({}, filter || {});
+  assetBrowserSource = String(assetBrowserFilter.source || 'ITSM').toUpperCase();
+  // VM 목록에는 물리/논리 구분이 없다. ITSM 자산에만 쓰는 칸은 숨긴다.
+  document.querySelectorAll('.asset-browser-itsm-only').forEach(el => {
+    el.hidden = assetBrowserSource === 'RVTOOLS';
+  });
   assetBrowserSelected = new Set();
   document.getElementById('asset-browser-title').textContent = title || '자산 목록';
   document.getElementById('asset-browser-search').value = assetBrowserFilter.q || '';
@@ -77,16 +83,26 @@ function assetState(row) {
     + (row.exclude_reason === 'EMPTY' && fields ? `<div class="text-xs text-muted mono">${fields}</div>` : '');
 }
 
-function renderAssetBrowser(data) {
-  const body = document.getElementById('asset-browser-body');
-  const rows = assetBrowserRows;
-  const checkbox = row => ASSET_BROWSER_ADMIN
-    ? `<td><input type="checkbox" class="asset-row-check" value="${syncEscape(row.asset_key)}"
-         ${assetBrowserSelected.has(row.asset_key) ? 'checked' : ''} onchange="toggleAssetRow(this)"></td>` : '';
+// 출처마다 보여 줄 열이 다르다. VM 에는 위치·EOSL 이 없고 통합기·전원이 있다.
+const ASSET_BROWSER_HEADERS = {
+  ITSM: ['자산번호','업무명','호스트명','IP','위치','물리/논리','OS','OS버전','EOSL','상태'],
+  RVTOOLS: ['VM 이름','호스트명','IP','vCenter','통합기','ESXi','전원','OS','vCPU / MEM','상태'],
+};
 
-  body.innerHTML = rows.length ? rows.map(row => `<tr>
-    ${checkbox(row)}
-    <td class="mono">${syncEscape(row.cm_id || '-')}</td>
+function assetBrowserRow(row) {
+  if (assetBrowserSource === 'RVTOOLS') {
+    return `<td><strong>${syncEscape(row.vm_name || '-')}</strong></td>
+      <td>${syncEscape(row.hostname || '-')}</td>
+      <td class="mono">${syncEscape(row.primary_ip || '-')}</td>
+      <td>${syncEscape(row.vcenter_id || '-')}</td>
+      <td>${syncEscape(row.cluster_name || '-')}</td>
+      <td>${syncEscape(row.esxi_host || '-')}</td>
+      <td>${syncBadge(row.power_state || '-')}</td>
+      <td>${syncEscape(row.os_family || '-')}<div class="text-xs text-muted">${syncEscape(row.os_version || '')}</div></td>
+      <td>${row.cpus == null ? '-' : row.cpus} / ${row.memory_mb == null ? '-' : Math.round(Number(row.memory_mb) / 1024) + 'GB'}</td>
+      <td>${assetState(row)}</td>`;
+  }
+  return `<td class="mono">${syncEscape(row.cm_id || '-')}</td>
     <td>${syncEscape(row.service_name || '-')}</td>
     <td>${syncEscape(row.hostname || '-')}</td>
     <td class="mono">${syncEscape(row.primary_ip || '-')}</td>
@@ -95,15 +111,38 @@ function renderAssetBrowser(data) {
     <td>${syncEscape(row.os_family || '-')}<div class="text-xs text-muted">${syncEscape(row.os_group || '')}</div></td>
     <td>${syncEscape(row.os_version || '-')}</td>
     <td>${assetEosl(row)}</td>
-    <td>${assetState(row)}</td></tr>`).join('')
-    : '<tr><td colspan="11" style="text-align:center" class="text-muted">조건에 맞는 자산이 없습니다.</td></tr>';
+    <td>${assetState(row)}</td>`;
+}
+
+function renderAssetBrowser(data) {
+  const body = document.getElementById('asset-browser-body');
+  const head = document.getElementById('asset-browser-head');
+  const rows = assetBrowserRows;
+  const headers = ASSET_BROWSER_HEADERS[assetBrowserSource] || ASSET_BROWSER_HEADERS.ITSM;
+  const span = headers.length + (ASSET_BROWSER_ADMIN ? 1 : 0);
+  head.innerHTML = (ASSET_BROWSER_ADMIN ? '<th style="width:34px"></th>' : '')
+    + headers.map(name => `<th>${syncEscape(name)}</th>`).join('');
+
+  const checkbox = row => ASSET_BROWSER_ADMIN
+    ? `<td><input type="checkbox" class="asset-row-check" value="${syncEscape(row.asset_key)}"
+         ${assetBrowserSelected.has(row.asset_key) ? 'checked' : ''} onchange="toggleAssetRow(this)"></td>` : '';
+
+  body.innerHTML = rows.length
+    ? rows.map(row => `<tr>${checkbox(row)}${assetBrowserRow(row)}</tr>`).join('')
+    : `<tr><td colspan="${span}" style="text-align:center" class="text-muted">조건에 맞는 대상이 없습니다.</td></tr>`;
 
   const counted = rows.filter(r => !r.exclude_reason).length;
+  const unit = assetBrowserSource === 'RVTOOLS' ? 'VM' : '자산';
   document.getElementById('asset-browser-count').textContent =
     `${Number(data.total || 0).toLocaleString()}건` + (data.truncated ? ' (5,000건까지 표시)' : '')
-    + ` · 자산 ${counted.toLocaleString()} / 제외 ${(rows.length - counted).toLocaleString()}`;
+    + ` · ${unit} ${counted.toLocaleString()} / 제외 ${(rows.length - counted).toLocaleString()}`;
+  const scope = data.scope || {};
+  const reasons = Object.entries(scope.by_reason || {})
+    .map(([, item]) => `${item.label} ${Number(item.count).toLocaleString()}`).join(' · ');
   document.getElementById('asset-browser-basis').textContent =
-    `${data.as_of || '-'} 스냅샷 · ITSM 전체 ${Number(data.snapshot_total || 0).toLocaleString()}건 기준`;
+    `${data.as_of || '-'} 스냅샷 · ${assetBrowserSource === 'RVTOOLS' ? 'vCenter' : 'ITSM'} 전체 `
+    + `${Number(data.snapshot_total || 0).toLocaleString()}건 기준`
+    + (reasons ? ` · 제외 ${reasons}` : '');
   updateAssetSelection();
 }
 
@@ -131,6 +170,7 @@ function updateAssetSelection() {
 // 달라지면 안 되므로 조건을 다시 만들지 않고 같은 함수로 만든다.
 function assetBrowserQuery() {
   const query = new URLSearchParams();
+  query.set('source', assetBrowserSource);
   Object.entries(assetBrowserFilter).forEach(([key, value]) => {
     if (value && key !== 'q' && key !== 'state' && key !== 'kind') query.set(key, value);
   });
@@ -184,7 +224,7 @@ function assetBulkForm(apply) {
   if (!input.files || !input.files.length) return null;
   const form = new FormData();
   form.append('file', input.files[0]);
-  form.append('source', 'ITSM');
+  form.append('source', assetBrowserSource);
   form.append('mode', document.getElementById('asset-bulk-mode').value);
   form.append('reason', document.getElementById('asset-browser-reason').value.trim());
   if (apply) form.append('apply', '1');
@@ -272,6 +312,8 @@ function refreshCountsAfterScopeChange() {
   if (typeof loadDashboard === 'function' && active('page-dashboard')) loadDashboard();
   if (typeof loadMonthlyCheck === 'function' && active('page-monthly_check')) loadMonthlyCheck();
   if (typeof loadDailyCheck === 'function' && active('page-daily_check')) loadDailyCheck();
+  // VM 을 뺐으면 자원사용현황의 대수·할당률도 달라진다.
+  if (typeof loadResourceUsage === 'function' && active('page-report')) loadResourceUsage();
 }
 
 async function applyAssetScope(mode) {
@@ -284,12 +326,12 @@ async function applyAssetScope(mode) {
   const response = await fetch('/api/asset-sync/admin/asset-exclusions', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
-      source: 'ITSM',
+      source: assetBrowserSource,
       mode,
       reason: document.getElementById('asset-browser-reason').value.trim(),
       items: chosen.map(row => ({
         asset_key: row.asset_key, hostname: row.hostname,
-        primary_ip: row.primary_ip, service_name: row.service_name,
+        primary_ip: row.primary_ip, service_name: row.service_name || row.vm_name,
       })),
     }),
   });

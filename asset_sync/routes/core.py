@@ -200,6 +200,54 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         """엑셀로 받을 수 있는 항목 목록. 화면이 버튼을 이 값으로 만든다."""
         return jsonify({"sections": [{"id": key, "name": name} for key, name in MONTHLY_SECTIONS.items()]})
 
+    def _vcenter_rows(conn: Any) -> tuple[Any, list[dict[str, Any]], dict[str, Any]] | tuple[None, None, None]:
+        """조건에 맞는 VM 목록. 자원사용현황에서 쓸 VM 을 고르는 화면이 쓴다."""
+        term = str(request.args.get("q") or "").strip().lower()
+        state = str(request.args.get("state") or "").strip().lower()
+        wanted_vcenter = str(request.args.get("vcenter_id") or "").strip()
+        wanted_cluster = str(request.args.get("cluster_name") or "").strip()
+        wanted_host = str(request.args.get("esxi_host") or "").strip()
+
+        repo = AssetRepository(conn)
+        snapshot = repo.latest_snapshot("RVTOOLS")
+        if not snapshot:
+            return None, None, None
+        scope = AssetScope.load(cfg, repo, include_all=True)
+        records = list(repo.load_rv_records(int(snapshot["id"])).values())
+        rows = [scope.describe_vcenter(record) for record in records]
+
+        def keep(item: dict[str, Any]) -> bool:
+            if wanted_vcenter and str(item.get("vcenter_id") or "") != wanted_vcenter:
+                return False
+            if wanted_cluster and str(item.get("cluster_name") or "") != wanted_cluster:
+                return False
+            if wanted_host and str(item.get("esxi_host") or "") != wanted_host:
+                return False
+            if state == "included" and item.get("exclude_reason"):
+                return False
+            if state == "excluded" and not item.get("exclude_reason"):
+                return False
+            if not term:
+                return True
+            haystack = [v for k, v in item.items() if k != "raw"]
+            haystack.extend((item.get("raw") or {}).values())
+            return term in " ".join(
+                str(value).lower() for value in haystack if value not in (None, "")
+            )
+
+        matched = [item for item in rows if keep(item)]
+        return snapshot, matched, {
+            "snapshot_total": len(rows),
+            "criteria": {"system_vm_patterns": list(scope.criteria.system_vm_patterns)},
+            "scope": scope.vcenter_summary(records),
+        }
+
+    def _rows_for_source(conn: Any):
+        """출처에 따라 ITSM 자산이나 vCenter VM 목록을 돌려준다."""
+        if str(request.args.get("source") or "ITSM").upper() == "RVTOOLS":
+            return _vcenter_rows(conn)
+        return _asset_rows(conn)
+
     def _asset_rows(conn: Any) -> tuple[Any, list[dict[str, Any]], dict[str, Any]] | tuple[None, None, None]:
         """조건에 맞는 자산 목록. 화면과 엑셀이 같은 결과를 쓰도록 한 곳에서 고른다."""
         base_day = _month_end(request.args.get("month"))
@@ -264,24 +312,30 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         찾아야 하고, 찾는 기준은 호스트명·IP·업무명 무엇이든 될 수 있다.
         """
         limit = min(int(request.args.get("limit", 500)), 20000)
+        source = str(request.args.get("source") or "ITSM").upper()
         try:
             with manager.connect() as conn:
-                snapshot, matched, meta = _asset_rows(conn)
+                snapshot, matched, meta = _rows_for_source(conn)
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         if snapshot is None:
-            return jsonify({"status": "NO_SNAPSHOT", "items": [], "total": 0,
-                            "message": "해당 기간까지의 ITSM 스냅샷이 없습니다."})
+            return jsonify({
+                "status": "NO_SNAPSHOT", "items": [], "total": 0,
+                "message": ("vCenter 스냅샷이 없습니다." if source == "RVTOOLS"
+                            else "해당 기간까지의 ITSM 스냅샷이 없습니다."),
+            })
         # 원본 전 컬럼은 화면에 쓰지 않는다. 응답만 커진다. 엑셀에서만 쓴다.
         items = [{k: v for k, v in item.items() if k != "raw"} for item in matched[:limit]]
         return jsonify({
             "status": "SUCCESS",
+            "source": source,
             "as_of": snapshot["snapshot_date"],
             "total": len(matched),
             "snapshot_total": meta["snapshot_total"],
             "truncated": len(matched) > limit,
             "items": items,
             "criteria": meta["criteria"],
+            "scope": meta.get("scope"),
         })
 
     @bp.route("/api/asset-sync/assets/export")
@@ -292,12 +346,14 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         화면은 꼭 필요한 것만 보여 준다 -- 스무 컬럼을 늘어놓으면 읽을 수 없다.
         받아서 다시 거르고 피벗하려면 전 컬럼이 필요하므로 파일에는 전부 담는다.
         """
+        source = str(request.args.get("source") or "ITSM").upper()
         try:
             with manager.connect() as conn:
-                snapshot, matched, meta = _asset_rows(conn)
+                snapshot, matched, meta = _rows_for_source(conn)
                 if snapshot is None:
-                    return jsonify({"error": "해당 기간까지의 ITSM 스냅샷이 없습니다."}), 400
-                title = str(request.args.get("title") or "").strip() or "자산 목록"
+                    return jsonify({"error": "비교할 스냅샷이 없습니다."}), 400
+                default_title = "VM 목록" if source == "RVTOOLS" else "자산 목록"
+                title = str(request.args.get("title") or "").strip() or default_title
                 status = {
                     "as_of": snapshot["snapshot_date"],
                     "excluded": {"items": [], "reason": ""},
@@ -307,7 +363,8 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
                 target = cfg.resolve("data/export/monthly_check")
                 target.mkdir(parents=True, exist_ok=True)
                 safe = re.sub(r"[\\/:*?\"<>|]", "_", title)[:40]
-                path = target / f"자산목록_{safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                prefix = "VM목록" if source == "RVTOOLS" else "자산목록"
+                path = target / f"{prefix}_{safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
                 workbook.save(path)
                 workbook.close()
         except ValueError as exc:
@@ -319,6 +376,8 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         labels = {
             "q": "검색", "os_group": "OS", "location": "위치",
             "kind": "구분", "state": "상태", "month": "기준월", "eosl": "EOSL",
+            "source": "출처", "vcenter_id": "vCenter", "cluster_name": "통합기",
+            "esxi_host": "ESXi",
         }
         parts = [
             f"{label}={request.args.get(key)}"

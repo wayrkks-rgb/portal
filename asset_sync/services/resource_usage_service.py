@@ -13,6 +13,7 @@ from openpyxl.styles import Font, PatternFill
 from ..collectors.powercli_resource_collector import PowerCLIResourceUsageCollector
 from ..config import AppConfig
 from ..repositories import AssetRepository
+from .asset_scope import AssetScope, vcenter_key
 from .change_presenter import present
 from .display_name_service import DisplayNameService
 from ..utils.hashing import canonical_json
@@ -73,10 +74,18 @@ class VMResourceUsageExportService:
         "SAMPLE_COUNT": "sample_count",
     }
 
-    def __init__(self, config: AppConfig, repository: AssetRepository) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        repository: AssetRepository,
+        scope: AssetScope | None = None,
+    ) -> None:
         self.config = config
         self.repo = repository
         self.settings = config.rvtools.get("resource_usage", {}) or {}
+        # 실제로 쓰지 않는 VM(vCLS 등)은 세지 않는다. ITSM 자산과 같은 판단을
+        # 쓰므로 어느 화면이든 VM 대수가 같다.
+        self.scope = scope or AssetScope.load(config, repository)
 
     def daily_status(self) -> dict[str, Any]:
         script = self.config.resolve(
@@ -213,7 +222,11 @@ class VMResourceUsageExportService:
         usage_rows: list[dict[str, Any]],
         snapshot_id: int,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        inventory = [r for r in self.repo.load_rv_records(snapshot_id).values() if not r.get("template_flag") and not r.get("srm_placeholder")]
+        # 템플릿·SRM 자리표시자와 vSphere 가 스스로 만드는 VM 은 여기서 빠진다.
+        inventory = [
+            record for record in self.repo.load_rv_records(snapshot_id).values()
+            if self.scope.decide_vcenter(record).included
+        ]
         by_uuid = {(str(r.get("vcenter") or ""), str(r.get("vm_uuid") or "").lower()): r for r in inventory if r.get("vm_uuid")}
         by_name = {(str(r.get("vcenter") or ""), str(r.get("vm_name") or "").lower()): r for r in inventory if r.get("vm_name")}
         usage_map: dict[str, dict[str, Any]] = {}
@@ -371,11 +384,17 @@ class VMResourceUsageExportService:
         vm_rows = [dict(r) for r in self.repo.conn.execute(
             f"SELECT * FROM vm_resource_usage_daily WHERE {where} ORDER BY stat_date, service_name, esxi_host, vm_name", params
         ).fetchall()]
+        # 쌓여 있는 행도 지금 기준으로 다시 걸러야 한다. 이 변경 전에 수집한
+        # 행에는 vCLS 가 들어 있고, 나중에 수동으로 뺀 VM 도 반영되어야 한다.
+        vm_rows, dropped = self._apply_scope(vm_rows)
         hosts = self._aggregate(host_rows, ["vcenter_id", "service_name", "cluster_name", "esxi_host"], host=True)
         vms = self._aggregate(vm_rows, ["vcenter_id", "service_name", "vm_uuid", "vm_name"], host=False)
         changes = self._vm_configuration_changes(start_day, end_day, vcenter_id, esxi_host)
         # 사용률과 별개로 할당률을 붙인다. 증설 판단은 할당률로 한다.
         self._apply_allocation(hosts, vms)
+        # 통합기의 VM 대수도 걸러낸 목록에서 다시 센다. 저장된 수를 그대로 쓰면
+        # 표의 대수와 아래 VM 목록의 줄 수가 어긋난다.
+        self._recount_hosts(hosts, vms)
         clusters = self._roll_up_clusters(hosts)
         # vc_0001 · esxi-07 같은 이름으로는 보고서에서 무엇인지 알 수 없다. 업무명이
         # 붙어 있으면 그것을 같이 내려보낸다.
@@ -387,6 +406,8 @@ class VMResourceUsageExportService:
             "vms": vms,
             "changes": changes,
             "filters": self._available_filters(),
+            # 무엇을 왜 뺐는지. 대수가 vCenter 화면과 다를 때 따질 수 있어야 한다.
+            "scope": dropped,
             "summary": {
                 "host_count": len(hosts), "vm_count": len(vms), "cluster_count": len(clusters),
                 "cpu_changed": sum(1 for r in changes if r["event_type"] == "RV_CPU_CHANGED"),
@@ -395,6 +416,43 @@ class VMResourceUsageExportService:
                 "vm_removed": sum(1 for r in changes if r["event_type"] == "RV_REMOVED"),
             },
         }
+
+    def _apply_scope(self, rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """세지 않을 VM 을 걸러낸다. 무엇을 왜 뺐는지 함께 돌려준다."""
+        kept: list[dict[str, Any]] = []
+        reasons: dict[str, int] = {}
+        dropped_names: list[str] = []
+        for row in rows:
+            decision = self.scope.decide_vcenter(row)
+            if decision.included:
+                kept.append(row)
+                continue
+            reasons[decision.reason] = reasons.get(decision.reason, 0) + 1
+            name = str(row.get("vm_name") or "")
+            if name and name not in dropped_names and len(dropped_names) < 20:
+                dropped_names.append(name)
+        from .asset_scope import REASON_LABELS
+
+        return kept, {
+            "excluded_rows": sum(reasons.values()),
+            "by_reason": {
+                code: {"label": REASON_LABELS.get(code, code), "count": count}
+                for code, count in reasons.items()
+            },
+            "samples": dropped_names,
+        }
+
+    @staticmethod
+    def _recount_hosts(hosts: list[dict[str, Any]], vms: list[dict[str, Any]]) -> None:
+        counted: dict[tuple[str, str], int] = defaultdict(int)
+        for vm in vms:
+            if str(vm.get("inventory_status") or "CURRENT") != "CURRENT":
+                continue
+            counted[(str(vm.get("vcenter_id") or ""), str(vm.get("esxi_host") or ""))] += 1
+        for row in hosts:
+            key = (str(row.get("vcenter_id") or ""), str(row.get("esxi_host") or ""))
+            if key in counted:
+                row["vm_count"] = counted[key]
 
     def _apply_allocation(self, hosts: list[dict[str, Any]], vms: list[dict[str, Any]]) -> None:
         """통합기별 VM 할당량과 할당률을 붙인다.
@@ -609,6 +667,10 @@ class VMResourceUsageExportService:
                 if cache[sid].get(event["asset_key"]):
                     records.append(cache[sid][event["asset_key"]])
             vm = records[0] if records else {}
+            # 세지 않는 VM 의 생성·삭제는 내역에도 올리지 않는다. vCLS 는 매일
+            # 다시 만들어지므로 그냥 두면 진짜 변경이 묻힌다.
+            if vm and not self.scope.decide_vcenter(vm).included:
+                continue
             vc = str(vm.get("vcenter") or "")
             host = str(vm.get("esxi_host") or "")
             if vcenter_id and vc != vcenter_id:

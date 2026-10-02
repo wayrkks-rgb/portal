@@ -141,9 +141,29 @@ class DiffService:
     ) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         old_keys, new_keys = set(old), set(current)
-        for key in sorted(new_keys - old_keys):
+        added, removed = new_keys - old_keys, old_keys - new_keys
+
+        # 같은 VM 인데 키만 바뀐 것을 먼저 이어 붙인다.
+        #
+        # asset_key 는 vm_uuid → smbios_uuid → vCenter|MoRef → vCenter|이름 순으로
+        # 고른다. 그래서 어느 날 vCenter 가 Config 를 돌려주지 않으면(VM 이 잠깐
+        # 접근 불가 상태일 때 그렇다) uuid 가 비고 키가 MoRef 로 떨어진다. 다음
+        # 날 돌아오면 다시 uuid 가 된다. 그러면 삭제·생성이 한 쌍씩 생기는데
+        # 실제로는 아무 일도 없었다.
+        relinked = self._relink(old, current, added, removed)
+        for new_key, old_key in relinked.items():
+            added.discard(new_key)
+            removed.discard(old_key)
+            events.append(self._event(
+                "RVTOOLS", new_key, "RV_KEY_CHANGED", previous_snapshot_id, detected_at,
+                "asset_key", old_key, new_key,
+                metadata={"vm_name": current[new_key].get("vm_name"),
+                          "reason": "식별자가 바뀌어 같은 VM 으로 이어 붙였습니다."},
+            ))
+
+        for key in sorted(added):
             events.append(self._event("RVTOOLS", key, "RV_NEW", previous_snapshot_id, detected_at, new_value=canonical_json(self._rv_replay_record(current[key]))))
-        for key in sorted(old_keys - new_keys):
+        for key in sorted(removed):
             old_scope = str(old[key].get("vcenter") or "")
             if successful_scopes and old_scope not in successful_scopes:
                 events.append(self._event("RVTOOLS", key, "COLLECTION_GAP", previous_snapshot_id, detected_at, metadata={"vcenter": old_scope}))
@@ -156,8 +176,12 @@ class DiffService:
             "cpus": "RV_CPU_CHANGED", "memory_mb": "RV_MEMORY_CHANGED", "os_family": "RV_OS_CHANGED",
             "os_version": "RV_OS_CHANGED", "esxi_host": "RV_HOST_CHANGED", "vcenter": "RV_VCENTER_CHANGED",
         }
-        for key in sorted(old_keys & new_keys):
-            before, after = old[key], current[key]
+        # 키가 바뀐 짝도 항목별 변경을 봐야 한다. 그 사이에 CPU 가 늘었을 수 있다.
+        pairs = [(key, key) for key in sorted(old_keys & new_keys)]
+        pairs.extend(sorted(relinked.items(), key=lambda item: item[0]))
+        for new_key, old_key in pairs:
+            key = new_key
+            before, after = old[old_key], current[new_key]
             for field, event_type in fields.items():
                 old_value, new_value = before.get(field), after.get(field)
                 if old_value == new_value:
@@ -168,6 +192,53 @@ class DiffService:
                 events.append(self._event("RVTOOLS", key, str(resolved_type), previous_snapshot_id, detected_at, field, self._serialize(old_value), self._serialize(new_value)))
         return events
 
+
+    #: VM 을 알아보는 데 쓸 수 있는 값. 하나라도 같으면 같은 VM 으로 본다.
+    #: 이름은 혼자서는 쓰지 않는다 -- 지우고 같은 이름으로 다시 만드는 일이 있다.
+    _RV_IDENTITY_FIELDS = ("vm_uuid", "smbios_uuid", "vm_id")
+
+    @classmethod
+    def _relink(
+        cls,
+        old: dict[str, dict[str, Any]],
+        current: dict[str, dict[str, Any]],
+        added: set[str],
+        removed: set[str],
+    ) -> dict[str, str]:
+        """없어진 키와 새로 생긴 키가 같은 VM 인지 가린다.
+
+        {새 키: 옛 키}. 식별자(uuid·MoRef) 를 하나라도 같이 갖고 있고 **같은
+        vCenter** 에 있을 때만 이어 붙인다. 식별자가 전부 비어 있으면 이어 붙이지
+        않는다 -- 그때는 정말로 모르는 것이고, 모르는 것을 같다고 하면 실제 생성·
+        삭제를 놓친다.
+        """
+        if not added or not removed:
+            return {}
+
+        index: dict[tuple[str, str, str], str] = {}
+        for key in removed:
+            record = old[key]
+            scope = str(record.get("vcenter") or "")
+            for field in cls._RV_IDENTITY_FIELDS:
+                value = str(record.get(field) or "").strip().lower()
+                if value:
+                    index.setdefault((field, scope, value), key)
+
+        linked: dict[str, str] = {}
+        taken: set[str] = set()
+        for key in sorted(added):
+            record = current[key]
+            scope = str(record.get("vcenter") or "")
+            for field in cls._RV_IDENTITY_FIELDS:
+                value = str(record.get(field) or "").strip().lower()
+                if not value:
+                    continue
+                candidate = index.get((field, scope, value))
+                if candidate and candidate not in taken:
+                    linked[key] = candidate
+                    taken.add(candidate)
+                    break
+        return linked
 
     @staticmethod
     def _rv_replay_record(record: dict[str, Any]) -> dict[str, Any]:

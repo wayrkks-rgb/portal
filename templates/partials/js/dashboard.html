@@ -191,6 +191,15 @@ function renderResourceFilters(filters){
   [['resource-vcenter',filters.vcenters||[]],['resource-cluster',filters.clusters||[]],['resource-host',filters.hosts||[]]].forEach(([id,values])=>{const el=document.getElementById(id),current=el.value;el.innerHTML='<option value="">전체</option>'+values.map(v=>`<option value="${syncEscape(v)}">${syncEscape(v)}</option>`).join('');if(values.includes(current))el.value=current;});
 }
 function renderResourceUsage(data){
+  // 세지 않은 VM 이 있으면 그 사실을 적는다. vCenter 화면의 대수와 다를 때
+  // 왜 다른지 바로 알 수 있어야 한다.
+  const note=document.getElementById('resource-scope-note'), scope=data.scope||{};
+  if(note){
+    const reasons=Object.entries(scope.by_reason||{}).map(([,i])=>`${syncEscape(i.label)} ${i.count}`).join(' · ');
+    note.innerHTML=scope.excluded_rows
+      ?` · 세지 않은 VM <a href="javascript:void(0)" onclick="openAssetBrowser({source:'RVTOOLS',state:'excluded'},'제외한 VM')">${scope.excluded_rows}대</a>${reasons?` (${reasons})`:''}`
+      :'';
+  }
   const sum=data.summary||{};document.getElementById('resource-host-count').textContent=dashboardNumber(sum.cluster_count!=null?sum.cluster_count:sum.host_count);document.getElementById('resource-vm-count').textContent=dashboardNumber(sum.vm_count);document.getElementById('resource-scale-count').textContent=dashboardNumber(Number(sum.cpu_changed||0)+Number(sum.memory_changed||0));document.getElementById('resource-vm-change-count').textContent=dashboardNumber(Number(sum.vm_added||0)+Number(sum.vm_removed||0));
   const hosts=data.hosts||[],clusters=data.clusters||[],vms=data.vms||[],changes=data.changes||[];
   const clusterBody=document.getElementById('resource-cluster-body');

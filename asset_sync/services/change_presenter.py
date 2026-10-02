@@ -222,8 +222,13 @@ def attach_identity(
             record = {"raw": record} if record else {}
         raw = record.get("raw") or record
 
-        if scope is not None and source == "ITSM" and record:
-            if not scope.decide_itsm(record).included:
+        # 자산에서 뺀 대상의 변경은 내역에도 올리지 않는다. 대수가 다른 화면과
+        # 같아야 하듯, 변경 건수도 같은 대상에서 나와야 한다. vCLS 처럼 vSphere 가
+        # 매일 다시 만드는 VM 이 여기로 쏟아지면 진짜 변경이 묻힌다.
+        if scope is not None and record:
+            if source == "ITSM" and not scope.decide_itsm(record).included:
+                continue
+            if source == "RVTOOLS" and not scope.decide_vcenter(record).included:
                 continue
 
         for name, column, raw_key in _IDENTITY.get(source, ()):
