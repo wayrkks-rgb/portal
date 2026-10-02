@@ -258,3 +258,94 @@ def test_a_system_vms_churn_does_not_flood_the_change_history(tmp_path):
     assert "RV_REMOVED" not in shown_types
     # 진짜 변경(실서버 CPU)은 그대로 보인다.
     assert "RV_CPU_CHANGED" in shown_types
+
+
+# ── ITSM 자산과 vCenter VM 은 서로 섞이지 않는다 ─────────────────────────
+def test_excluding_a_vm_does_not_change_the_server_count(tmp_path):
+    """VM 을 뺐다고 서버 현황 대수가 변하면 안 된다.
+
+    둘은 다른 목록이다. ITSM 은 자산번호(cm_id), vCenter 는 VM 식별자(uuid)로
+    세고, 제외 규칙도 출처별로 따로 저장한다. 같은 서버가 양쪽에 있어도 키가
+    다르므로 한쪽을 빼도 다른 쪽은 그대로다.
+    """
+    import json as _json
+
+    from asset_sync.services.server_status_service import ServerStatusService
+
+    config = AppConfig(root_dir=tmp_path, sqlite_path=Path("data/sep.db"))
+    manager = create_manager(config)
+    manager.initialize()
+    now = datetime.now()
+
+    with manager.connect() as conn:
+        repo = AssetRepository(conn)
+        run = repo.start_collection_run("ITSM", now.isoformat())
+        repo.finish_collection_run(run, "SUCCESS", 3, now.isoformat(), ["ALL"])
+        itsm_id = repo.create_snapshot(
+            "ITSM", now.date().isoformat(), now.isoformat(), run, "SUCCESS", 3, "h")
+        conn.executemany(
+            "INSERT INTO itsm_asset_snapshot(snapshot_id,cm_id,normalized_hostname,primary_ip,"
+            "ip_json,cpu_cores,memory_mb,os_family,os_version,status_code,server_category_code,"
+            "environment_code,eos_value,record_hash,raw_json) VALUES(?,?,?,?,'[]',?,?,?,?,?,?,?,?,?,?)",
+            [(itsm_id, f"CM000{i}", f"host-{i}", "10.0.0.5", 4, 8192, "Linux Redhat", "8.6",
+              "CMSTA010", "CMSVRCATCD020", "CMOWNCATCD0010", "2030-12-31", "h",
+              _json.dumps({"CM_ID": f"CM000{i}", "CM_OS": "CMCIOSCD010",
+                           "CM_OS_VERSION": "8.6", "CM_EOL_DT": "2030-12-31",
+                           "CM_PLACE": "CMPLACE010"}, ensure_ascii=False)) for i in range(3)],
+        )
+        vms = [dict(vm(f"u{i}", f"host-{i}", power_state="poweredoff"), record_hash="h")
+               for i in range(3)]
+        run2 = repo.start_collection_run("RVTOOLS", now.isoformat())
+        repo.finish_collection_run(run2, "SUCCESS", len(vms), now.isoformat(), ["VC1"])
+        rv_id = repo.create_snapshot(
+            "RVTOOLS", now.date().isoformat(), now.isoformat(), run2, "SUCCESS", len(vms), "h")
+        repo.insert_rv_records(rv_id, vms)
+        conn.commit()
+
+    def counts():
+        with manager.connect() as conn:
+            repo = AssetRepository(conn)
+            scope = AssetScope.load(config, repo)
+            servers = ServerStatusService(config, repo).status(itsm_id)
+            kept, _ = scope.split_vcenter(list(repo.load_rv_records(rv_id).values()))
+        return servers["all"]["table"]["rows"]["계"]["소계"], len(kept)
+
+    assert counts() == (3, 3)
+
+    # 전원 꺼진 VM 을 전부 빼도 서버 현황은 그대로다.
+    with manager.connect() as conn:
+        save_rules(AssetRepository(conn), "RVTOOLS",
+                   [{"asset_key": f"u{i}"} for i in range(3)],
+                   mode="EXCLUDE", reason="전원 꺼짐")
+    assert counts() == (3, 0)
+
+    # 거꾸로 ITSM 자산을 빼도 VM 대수는 그대로다.
+    with manager.connect() as conn:
+        save_rules(AssetRepository(conn), "ITSM", [{"asset_key": "CM0000"}], mode="EXCLUDE")
+    assert counts() == (2, 0)
+
+
+def test_the_same_asset_key_in_both_sources_stays_separate(tmp_path):
+    """키가 우연히 같아도 출처가 다르면 다른 규칙이다."""
+    config = AppConfig(root_dir=tmp_path, sqlite_path=Path("data/sep2.db"))
+    manager = create_manager(config)
+    manager.initialize()
+    with manager.connect() as conn:
+        repo = AssetRepository(conn)
+        save_rules(repo, "RVTOOLS", [{"asset_key": "SAME-KEY"}], mode="EXCLUDE", reason="VM 쪽")
+    with manager.connect() as conn:
+        scope = AssetScope.load(config, AssetRepository(conn))
+    assert scope.rule_for("RVTOOLS", "SAME-KEY") is not None
+    assert scope.rule_for("ITSM", "SAME-KEY") is None
+
+
+def test_a_file_from_the_wrong_list_is_recognised():
+    """VM 목록을 ITSM 창에서 올리는 실수를 미리 잡는다."""
+    from asset_sync.services.asset_scope import detect_source
+
+    vm_sheet = [["처리", "제외 사유", "VM 이름", "호스트명", "vCenter", "전원", "VM UUID", "자산키"]]
+    itsm_sheet = [["처리", "제외 사유", "자산번호", "업무명", "물리/논리", "CM_ID", "CM_PLACE"]]
+    assert detect_source(vm_sheet) == "RVTOOLS"
+    assert detect_source(itsm_sheet) == "ITSM"
+    # 어느 쪽인지 알 수 없으면 모른다고 해야 한다. 틀리게 막으면 더 나쁘다.
+    assert detect_source([["자산번호", "메모"]]) is None

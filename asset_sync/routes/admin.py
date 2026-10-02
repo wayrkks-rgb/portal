@@ -174,6 +174,21 @@ def create_admin_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprin
         finally:
             target.unlink(missing_ok=True)
 
+        # 출처를 잘못 고르면 자산키가 아무것도 맞지 않아 조용히 아무 일도
+        # 일어나지 않는다. ITSM 자산과 vCenter VM 은 키 체계가 아예 다르다.
+        looks_like = parsed.get("looks_like")
+        if looks_like and looks_like != source:
+            names = {"ITSM": "ITSM 자산", "RVTOOLS": "vCenter VM"}
+            return jsonify({
+                "success": False,
+                "error": (
+                    f"올린 파일은 {names.get(looks_like, looks_like)} 목록으로 보이는데"
+                    f" {names.get(source, source)} 으로 처리하려 했습니다."
+                    f" {names.get(looks_like, looks_like)} 목록을 여는 창에서 올리세요."
+                ),
+                "parsed": parsed,
+            }), 400
+
         if not parsed["items"] and not parsed["counts"]["unknown"]:
             return jsonify({
                 "success": False,

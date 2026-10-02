@@ -624,6 +624,34 @@ def _find_header(rows: list[list[Any]]) -> tuple[int, dict[str, int]]:
     )
 
 
+#: 파일이 어느 쪽 목록인지 알려 주는 머리글. 잘못 올리는 것을 막는 데 쓴다.
+SOURCE_MARKERS: dict[str, tuple[str, ...]] = {
+    "RVTOOLS": ("VM 이름", "VM UUID", "VM_UUID", "POWERSTATE", "전원"),
+    "ITSM": ("CM_ID", "CM_PLACE", "CM_STA_CD", "업무명", "물리/논리"),
+}
+
+
+def detect_source(rows: list[list[Any]]) -> str | None:
+    """올린 파일이 ITSM 자산 목록인지 vCenter VM 목록인지 가린다.
+
+    둘은 자산키 체계가 아예 다르다(cm_id vs uuid). 출처를 잘못 골라 올리면 아무
+    자산도 맞지 않아 조용히 아무 일도 일어나지 않는다. 그걸 미리 잡는다.
+    """
+    texts: set[str] = set()
+    for row in rows[:12]:
+        texts.update(_cell_text(cell).upper() for cell in row)
+    scores = {
+        source: sum(1 for marker in markers if marker.upper() in texts)
+        for source, markers in SOURCE_MARKERS.items()
+    }
+    best = max(scores, key=lambda key: scores[key])
+    other = min(scores, key=lambda key: scores[key])
+    # 한쪽이 분명히 더 많을 때만 판단한다. 비슷하면 모른다고 한다.
+    if scores[best] >= 2 and scores[best] > scores[other]:
+        return best
+    return None
+
+
 def _sheet_rows(path: Any) -> list[list[Any]]:
     from pathlib import Path
 
@@ -662,6 +690,7 @@ def read_bulk_sheet(path: Any, default_mode: str = "") -> dict[str, Any]:
         raise AssetScopeError(f"기본 처리는 EXCLUDE, INCLUDE, AUTO 중 하나여야 합니다: {default_mode}")
 
     rows = _sheet_rows(path)
+    looks_like = detect_source(rows)
     header_index, columns = _find_header(rows)
     key_at = columns["key"]
     action_at = columns.get("action")
@@ -698,6 +727,7 @@ def read_bulk_sheet(path: Any, default_mode: str = "") -> dict[str, Any]:
 
     return {
         "items": items,
+        "looks_like": looks_like,
         "header_row": header_index + 1,
         "has_action_column": action_at is not None,
         "counts": {
