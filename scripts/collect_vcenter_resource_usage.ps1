@@ -121,18 +121,76 @@ try {
         }
     }
 
-    # VM 메타데이터(소속 호스트·UUID·템플릿 여부)는 한 번에 받는다. $vm.VMHost 를 읽으면
-    # VM 하나당 별도 호출이 나가므로 건드리지 않는다.
     $hostNameById = @{}
     foreach ($vmHost in $hostEntities) { $hostNameById[$vmHost.Id] = $vmHost.Name }
+
+    # 데이터스토어. 디스크는 '쓴 양' 과 '나눠준 양' 이 다르다. 씬 프로비저닝이면
+    # 나눠준 양이 용량을 넘을 수 있고(과할당), 그때는 VM 이 실제로 채우는 순간
+    # 데이터스토어가 꽉 찬다. 그래서 두 값을 따로 담는다.
+    #
+    #   사용   = Capacity - FreeSpace            (지금 실제로 차 있는 양)
+    #   할당   = 사용 + Uncommitted              (VM 에게 약속한 전체 양)
+    #
+    # Uncommitted 는 씬 디스크가 아직 안 쓴 몫이다. vCenter 가 데이터스토어
+    # 요약으로 이미 계산해 두므로 VM 을 하나하나 더하지 않는다.
+    $datastoreRows = @()
+    foreach ($view in Get-View -Server $viServer -ViewType Datastore -Property Name, Summary, Host) {
+        $summary = $view.Summary
+        if ($null -eq $summary) { continue }
+        $mountedHosts = @()
+        $mountedClusters = @()
+        foreach ($mount in @($view.Host)) {
+            if ($null -eq $mount -or $null -eq $mount.Key) { continue }
+            $hostId = $mount.Key.ToString()
+            if ($hostNameById.ContainsKey($hostId)) { $mountedHosts += $hostNameById[$hostId] }
+            if ($hostCluster.ContainsKey($hostId)) { $mountedClusters += $hostCluster[$hostId] }
+        }
+        $mountedClusters = @($mountedClusters | Sort-Object -Unique)
+        $capacity = [double]$summary.Capacity
+        $free = [double]$summary.FreeSpace
+        $uncommitted = if ($null -eq $summary.Uncommitted) { 0 } else { [double]$summary.Uncommitted }
+        $usedBytes = $capacity - $free
+        $datastoreRows += [pscustomobject][ordered]@{
+            vcenter_id = $vcenterId
+            service_name = $vcenterName
+            # 여러 클러스터가 함께 쓰는 데이터스토어는 한 클러스터에 매달 수 없다.
+            cluster_name = if ($mountedClusters.Count -eq 1) { $mountedClusters[0] } else { $null }
+            datastore_name = $view.Name
+            datastore_type = [string]$summary.Type
+            accessible = [bool]$summary.Accessible
+            capacity_mb = [int][math]::Round($capacity / 1MB, 0)
+            free_mb = [int][math]::Round($free / 1MB, 0)
+            used_mb = [int][math]::Round($usedBytes / 1MB, 0)
+            provisioned_mb = [int][math]::Round(($usedBytes + $uncommitted) / 1MB, 0)
+            host_count = @($mountedHosts).Count
+            host_names = @($mountedHosts | Sort-Object -Unique)
+            cluster_names = $mountedClusters
+        }
+    }
+    Mark 'datastore'
+
+    # VM 메타데이터(소속 호스트·UUID·템플릿 여부·디스크)는 한 번에 받는다.
+    # $vm.VMHost 나 $vm.ProvisionedSpaceGB 를 읽으면 VM 하나당 별도 호출이
+    # 나가므로 건드리지 않는다. Summary.Storage 에 이미 다 들어 있다.
     $vmMeta = @{}
-    foreach ($view in Get-View -Server $viServer -ViewType VirtualMachine -Property Name, Config.Template, Config.InstanceUuid, Runtime.Host) {
+    foreach ($view in Get-View -Server $viServer -ViewType VirtualMachine -Property Name, Config.Template, Config.InstanceUuid, Runtime.Host, Summary.Storage) {
         $hostRef = $null
         if ($null -ne $view.Runtime -and $null -ne $view.Runtime.Host) { $hostRef = $view.Runtime.Host.ToString() }
+        $committed = 0
+        $provisioned = 0
+        $storage = $null
+        if ($null -ne $view.Summary) { $storage = $view.Summary.Storage }
+        if ($null -ne $storage) {
+            $committed = [double]$storage.Committed
+            # 할당 = 쓴 양 + 아직 안 쓴 씬 몫. VMDK 로 약속한 전체 크기다.
+            $provisioned = $committed + [double]$storage.Uncommitted
+        }
         $vmMeta[$view.MoRef.ToString()] = @{
             Template = [bool]$view.Config.Template
             InstanceUuid = $view.Config.InstanceUuid
             HostId = $hostRef
+            UsedDiskMb = [int][math]::Round($committed / 1MB, 0)
+            ProvisionedDiskMb = [int][math]::Round($provisioned / 1MB, 0)
         }
     }
     Mark 'vm-meta'
@@ -163,6 +221,8 @@ try {
             power_state = [string]$vm.PowerState
             allocated_cpu_cores = [int]$vm.NumCpu
             allocated_memory_mb = [int]$vm.MemoryMB
+            provisioned_disk_mb = $(if ($null -ne $meta) { $meta.ProvisionedDiskMb } else { $null })
+            used_disk_mb = $(if ($null -ne $meta) { $meta.UsedDiskMb } else { $null })
             cpu_max_pct = $cpu.Max
             cpu_avg_pct = $cpu.Avg
             mem_max_pct = $mem.Max
@@ -181,12 +241,13 @@ try {
         }
         hosts = @($hostRows)
         vms = @($vmRows)
+        datastores = @($datastoreRows)
     }
     $parent = Split-Path -Parent $OutputPath
     if (-not [string]::IsNullOrWhiteSpace($parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
     $payload | ConvertTo-Json -Depth 8 | Set-Content -Path $OutputPath -Encoding UTF8
     Mark 'write'
-    Write-Output ("HOST_COUNT=" + @($hostRows).Count + ";VM_COUNT=" + @($vmRows).Count)
+    Write-Output ("HOST_COUNT=" + @($hostRows).Count + ";VM_COUNT=" + @($vmRows).Count + ";DATASTORE_COUNT=" + @($datastoreRows).Count)
     Write-Output ("TIMING=" + (($marks.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)s" }) -join ' '))
 }
 finally {

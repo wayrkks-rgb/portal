@@ -61,6 +61,7 @@ def test_resource_usage_summary_and_export_from_daily_batch(tmp_path: Path) -> N
         assert target.exists()
         workbook = load_workbook(target, read_only=True)
         assert workbook.sheetnames == [
-            "HostResourceUsage", "ClusterResourceUsage", "VMsResource", "VMChangeHistory",
+            "HostResourceUsage", "ClusterResourceUsage", "DatastoreUsage",
+            "VMsResource", "VMChangeHistory",
         ]
         workbook.close()

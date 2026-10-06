@@ -30,15 +30,21 @@
         <div class="stat-card"><div class="stat-value" id="resource-vm-count">-</div><div class="stat-label">VM 수</div></div>
         <div class="stat-card"><div class="stat-value" id="resource-scale-count">-</div><div class="stat-label">CPU/MEM 변경</div></div>
         <div class="stat-card"><div class="stat-value" id="resource-vm-change-count">-</div><div class="stat-label">신규/삭제/이동</div></div>
+        <div class="stat-card"><div class="stat-value" id="resource-disk-used">-</div><div class="stat-label">디스크 사용률</div><div class="stat-delta" id="resource-disk-note"></div></div>
       </div>
       <div class="resource-table-title">통합기(Cluster)별 자원사용현황</div>
       <div class="text-xs text-muted mb-4">할당률 = VM 에게 나눠준 양 ÷ 통합기 실제 용량. 사용률(MAX/AVG)과 다릅니다. 증설 판단은 할당률로 합니다.
         <span id="resource-scope-note"></span></div>
-      <div class="resource-scroll"><table><thead><tr><th>서비스명</th><th>vCenter</th><th>통합기(Cluster)</th><th>ESXi 대수</th><th>VM 대수</th><th>실제 CPU Core</th><th>실제 MEM(GB)</th><th>VM 할당 CPU</th><th>VM 할당 MEM</th><th>CPU 할당률</th><th>MEM 할당률</th><th>CPU MAX</th><th>CPU AVG</th><th>MEM MAX</th><th>MEM AVG</th></tr></thead><tbody id="resource-cluster-body"><tr><td colspan="15" style="text-align:center">조회 조건을 선택하세요.</td></tr></tbody></table></div>
+      <div class="resource-scroll"><table><thead><tr><th>서비스명</th><th>vCenter</th><th>통합기(Cluster)</th><th>ESXi 대수</th><th>VM 대수</th><th>실제 CPU Core</th><th>실제 MEM(GB)</th><th>VM 할당 CPU</th><th>VM 할당 MEM</th><th>CPU 할당률</th><th>MEM 할당률</th><th>VM 할당 Disk</th><th>VM 사용 Disk</th><th>Disk 실사용률</th><th>CPU MAX</th><th>CPU AVG</th><th>MEM MAX</th><th>MEM AVG</th></tr></thead><tbody id="resource-cluster-body"><tr><td colspan="18" style="text-align:center">조회 조건을 선택하세요.</td></tr></tbody></table></div>
       <div class="resource-table-title">ESXi(통합기 구성 노드)별 자원사용현황</div>
-      <div class="resource-scroll"><table><thead><tr><th>서비스명</th><th>vCenter</th><th>Cluster</th><th>ESXi</th><th>VM 대수</th><th>실제 CPU Core</th><th>실제 MEM(GB)</th><th>VM 할당 CPU</th><th>VM 할당 MEM</th><th>CPU 할당률</th><th>MEM 할당률</th><th>CPU MAX</th><th>CPU AVG</th><th>MEM MAX</th><th>MEM AVG</th></tr></thead><tbody id="resource-host-body"><tr><td colspan="15" style="text-align:center">조회 조건을 선택하세요.</td></tr></tbody></table></div>
+      <div class="resource-scroll"><table><thead><tr><th>서비스명</th><th>vCenter</th><th>Cluster</th><th>ESXi</th><th>VM 대수</th><th>실제 CPU Core</th><th>실제 MEM(GB)</th><th>VM 할당 CPU</th><th>VM 할당 MEM</th><th>CPU 할당률</th><th>MEM 할당률</th><th>VM 할당 Disk</th><th>VM 사용 Disk</th><th>Disk 실사용률</th><th>CPU MAX</th><th>CPU AVG</th><th>MEM MAX</th><th>MEM AVG</th></tr></thead><tbody id="resource-host-body"><tr><td colspan="18" style="text-align:center">조회 조건을 선택하세요.</td></tr></tbody></table></div>
+      <div class="resource-table-title">데이터스토어 디스크 현황</div>
+      <div class="text-xs text-muted mb-4">사용률 = 지금 차 있는 양 ÷ 실제 용량.
+        할당률 = VM 에게 약속한 양(VMDK 전체) ÷ 실제 용량. 씬 프로비저닝이면 할당률이 100% 를 넘을 수 있고(과할당),
+        그때는 VM 이 실제로 채우는 순간 꽉 찹니다.</div>
+      <div class="resource-scroll"><table><thead><tr><th>서비스명</th><th>vCenter</th><th>Cluster</th><th>데이터스토어</th><th>유형</th><th>실제 용량</th><th>사용</th><th>사용률</th><th>기간 최대</th><th>VM 할당</th><th>할당률</th><th>여유</th><th>ESXi</th><th>비고</th></tr></thead><tbody id="resource-datastore-body"><tr><td colspan="14" style="text-align:center">조회 조건을 선택하세요.</td></tr></tbody></table></div>
       <div class="resource-table-title">통합기 내 VM 자원사용현황</div>
-      <div class="resource-scroll"><table><thead><tr><th>서비스명</th><th>Cluster</th><th>통합기</th><th>VM명</th><th>상태</th><th>실제 CPU Core</th><th>실제 MEM(GB)</th><th>CPU MAX</th><th>CPU AVG</th><th>MEM MAX</th><th>MEM AVG</th></tr></thead><tbody id="resource-vm-body"><tr><td colspan="11" style="text-align:center">조회 조건을 선택하세요.</td></tr></tbody></table></div>
+      <div class="resource-scroll"><table><thead><tr><th>서비스명</th><th>Cluster</th><th>통합기</th><th>VM명</th><th>상태</th><th>실제 CPU Core</th><th>실제 MEM(GB)</th><th>할당 Disk</th><th>사용 Disk</th><th>Disk 실사용률</th><th>CPU MAX</th><th>CPU AVG</th><th>MEM MAX</th><th>MEM AVG</th></tr></thead><tbody id="resource-vm-body"><tr><td colspan="14" style="text-align:center">조회 조건을 선택하세요.</td></tr></tbody></table></div>
       <div class="resource-table-title">VM 구성·할당 자원 변경 이력</div>
       <div class="resource-scroll"><table><thead><tr><th>일시</th><th>vCenter</th><th>통합기</th><th>VM명</th><th>변경유형</th><th>필드</th><th>이전값</th><th>현재값</th></tr></thead><tbody id="resource-change-body"><tr><td colspan="8" style="text-align:center">조회 조건을 선택하세요.</td></tr></tbody></table></div>
     </div>

@@ -215,11 +215,89 @@ def _add_asset_exclusion(conn: Any) -> bool:
     return True
 
 
+def _add_datastore_usage(conn: Any) -> bool:
+    """데이터스토어 디스크 사용량 표와 VM 디스크 컬럼.
+
+    디스크는 '쓴 양' 과 'VM 에게 나눠준 양' 이 다르다. 씬 프로비저닝이면 나눠준
+    양이 용량을 넘을 수 있고, 그때는 VM 이 실제로 채우는 순간 데이터스토어가
+    꽉 찬다. 그래서 둘을 따로 담는다.
+    """
+    changed = False
+    for column, sqlite_type, mysql_type in (
+        ("provisioned_disk_mb", "INTEGER", "BIGINT"),
+        ("used_disk_mb", "INTEGER", "BIGINT"),
+    ):
+        if not column_exists(conn, "vm_resource_usage_daily", column):
+            kind = mysql_type if _engine(conn) == "mysql" else sqlite_type
+            apply_step(conn, f"ALTER TABLE vm_resource_usage_daily ADD COLUMN {column} {kind}")
+            changed = True
+    if table_exists(conn, "datastore_usage_daily"):
+        return changed
+    if _engine(conn) == "mysql":
+        apply_step(conn, """
+            CREATE TABLE datastore_usage_daily (
+                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                run_id BIGINT NOT NULL,
+                stat_date VARCHAR(32) NOT NULL,
+                vcenter_id VARCHAR(128) NOT NULL,
+                service_name VARCHAR(255),
+                cluster_name VARCHAR(255),
+                datastore_name VARCHAR(255) NOT NULL,
+                datastore_type VARCHAR(32),
+                accessible TINYINT NOT NULL DEFAULT 1,
+                capacity_mb BIGINT,
+                free_mb BIGINT,
+                used_mb BIGINT,
+                provisioned_mb BIGINT,
+                host_count INT NOT NULL DEFAULT 0,
+                vm_count INT NOT NULL DEFAULT 0,
+                collection_status VARCHAR(32) NOT NULL DEFAULT 'SUCCESS',
+                raw_json LONGTEXT,
+                created_at VARCHAR(32) NOT NULL,
+                UNIQUE KEY uq_datastore_usage_daily (run_id, vcenter_id, datastore_name),
+                KEY idx_datastore_usage_period (stat_date DESC, vcenter_id, datastore_name),
+                CONSTRAINT fk_datastore_usage_run FOREIGN KEY (run_id)
+                    REFERENCES resource_usage_run(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """)
+    else:
+        apply_step(conn, """
+            CREATE TABLE datastore_usage_daily (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL REFERENCES resource_usage_run(id) ON DELETE CASCADE,
+                stat_date TEXT NOT NULL,
+                vcenter_id TEXT NOT NULL,
+                service_name TEXT,
+                cluster_name TEXT,
+                datastore_name TEXT NOT NULL,
+                datastore_type TEXT,
+                accessible INTEGER NOT NULL DEFAULT 1,
+                capacity_mb INTEGER,
+                free_mb INTEGER,
+                used_mb INTEGER,
+                provisioned_mb INTEGER,
+                host_count INTEGER NOT NULL DEFAULT 0,
+                vm_count INTEGER NOT NULL DEFAULT 0,
+                collection_status TEXT NOT NULL DEFAULT 'SUCCESS',
+                raw_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                UNIQUE(run_id, vcenter_id, datastore_name)
+            )
+        """)
+        apply_step(
+            conn,
+            "CREATE INDEX IF NOT EXISTS idx_datastore_usage_period"
+            " ON datastore_usage_daily(stat_date DESC, vcenter_id, datastore_name)",
+        )
+    return True
+
+
 #: 통합 웹(포털)이 소유하는 마이그레이션. 이름 앞에 ``core/`` 가 붙는다.
 CORE_MIGRATIONS: list[Migration] = [
     ("audit_module_id", "audit_log.module_id 추가", _add_audit_module_id),
     ("vcenter_display_name", "통합기·ESXi·데이터스토어 업무명 표 추가", _add_vcenter_display_name),
     ("asset_exclusion", "실제 자산에서 뺄 대상 표 추가", _add_asset_exclusion),
+    ("datastore_usage", "데이터스토어 디스크 사용량 표와 VM 디스크 컬럼 추가", _add_datastore_usage),
 ]
 
 

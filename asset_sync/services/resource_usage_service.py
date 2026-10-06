@@ -72,7 +72,16 @@ class VMResourceUsageExportService:
         "MEMAVG": "mem_avg_pct",
         "MEM_AVG_PCT": "mem_avg_pct",
         "SAMPLE_COUNT": "sample_count",
+        "PROVISIONED_DISK_MB": "provisioned_disk_mb",
+        "USED_DISK_MB": "used_disk_mb",
     }
+
+    #: 데이터스토어 행의 칸 이름. 수집기가 주는 그대로 쓴다.
+    DATASTORE_FIELDS = (
+        "vcenter_id", "service_name", "cluster_name", "datastore_name",
+        "datastore_type", "capacity_mb", "free_mb", "used_mb", "provisioned_mb",
+        "host_count",
+    )
 
     def __init__(
         self,
@@ -137,7 +146,10 @@ class VMResourceUsageExportService:
             hosts, vms = self._enrich_with_inventory(
                 payload.get("hosts", []), payload.get("vms", []), vcenter_snapshot_id
             )
-            self._replace_run_rows(run_id, end_day.isoformat(), vcenter_snapshot_id, hosts, vms)
+            datastores = self._normalize_datastores(payload.get("datastores", []))
+            self._replace_run_rows(
+                run_id, end_day.isoformat(), vcenter_snapshot_id, hosts, vms, datastores
+            )
             status = str(payload.get("status") or "SUCCESS")
             self.repo.conn.execute(
                 """
@@ -162,6 +174,7 @@ class VMResourceUsageExportService:
                 "period_end": end_day.isoformat(),
                 "host_count": len(hosts),
                 "vm_count": len(vms),
+                "datastore_count": len(datastores),
                 "failed_scopes": payload.get("failed_scopes", {}),
             }
         except Exception as exc:
@@ -191,6 +204,9 @@ class VMResourceUsageExportService:
                 "power_state": vm.get("power_state"),
                 "allocated_cpu_cores": vm.get("cpus"),
                 "allocated_memory_mb": vm.get("memory_mb"),
+                # 시연용. 할당 100GB 중 60% 쯤 쓴 모양으로 둔다.
+                "provisioned_disk_mb": 100 * 1024,
+                "used_disk_mb": int(60 * 1024 + index * 128),
                 "cpu_max_pct": round(30 + index * 1.7, 2),
                 "cpu_avg_pct": round(12 + index * 0.8, 2),
                 "mem_max_pct": round(45 + index * 1.3, 2),
@@ -214,7 +230,52 @@ class VMResourceUsageExportService:
                 "mem_avg_pct": round(sum(float(m["mem_avg_pct"]) for m in members) / len(members), 2),
                 "sample_count": 12,
             })
-        return {"status": "SUCCESS", "hosts": hosts, "vms": vms, "success_scopes": sorted({r["vcenter_id"] for r in vms}), "failed_scopes": {}}
+        datastores = []
+        for vc in sorted({str(r["vcenter_id"]) for r in vms}):
+            members = [r for r in vms if str(r["vcenter_id"]) == vc]
+            provisioned = sum(int(r["provisioned_disk_mb"]) for r in members)
+            used = sum(int(r["used_disk_mb"]) for r in members)
+            datastores.append({
+                "vcenter_id": vc, "service_name": vc, "cluster_name": None,
+                "datastore_name": f"{vc}_DEMO_DS01", "datastore_type": "VMFS",
+                "capacity_mb": max(provisioned, used) + 200 * 1024,
+                "free_mb": 200 * 1024, "used_mb": used, "provisioned_mb": provisioned,
+                "host_count": len({str(r["esxi_host"]) for r in members}),
+            })
+        return {
+            "status": "SUCCESS", "hosts": hosts, "vms": vms, "datastores": datastores,
+            "success_scopes": sorted({r["vcenter_id"] for r in vms}), "failed_scopes": {},
+        }
+
+    def _normalize_datastores(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """수집기가 준 데이터스토어 행을 저장할 모양으로."""
+        vc_names = {
+            str(item.get("id") or item.get("name") or ""): str(item.get("name") or item.get("id") or "")
+            for item in self.config.rvtools.get("vcenters", [])
+        }
+        result: list[dict[str, Any]] = []
+        for raw in rows:
+            if not isinstance(raw, dict):
+                continue
+            name = self._text(raw.get("datastore_name") or raw.get("DATASTORE_NAME") or raw.get("name"))
+            if not name:
+                continue
+            vcenter = self._text(raw.get("vcenter_id")) or ""
+            result.append({
+                "vcenter_id": vcenter,
+                "service_name": self._text(raw.get("service_name")) or vc_names.get(vcenter) or vcenter,
+                "cluster_name": self._text(raw.get("cluster_name")),
+                "datastore_name": name,
+                "datastore_type": self._text(raw.get("datastore_type")),
+                "accessible": 0 if str(raw.get("accessible", True)).lower() in {"false", "0", "no"} else 1,
+                "capacity_mb": self._int(raw.get("capacity_mb")),
+                "free_mb": self._int(raw.get("free_mb")),
+                "used_mb": self._int(raw.get("used_mb")),
+                "provisioned_mb": self._int(raw.get("provisioned_mb")),
+                "host_count": self._int(raw.get("host_count")) or 0,
+                "raw": raw,
+            })
+        return result
 
     def _enrich_with_inventory(
         self,
@@ -315,10 +376,12 @@ class VMResourceUsageExportService:
         snapshot_id: int,
         hosts: list[dict[str, Any]],
         vms: list[dict[str, Any]],
+        datastores: list[dict[str, Any]] | None = None,
     ) -> None:
         now = datetime.now().isoformat()
         self.repo.conn.execute("DELETE FROM host_resource_usage_daily WHERE run_id=?", (run_id,))
         self.repo.conn.execute("DELETE FROM vm_resource_usage_daily WHERE run_id=?", (run_id,))
+        self.repo.conn.execute("DELETE FROM datastore_usage_daily WHERE run_id=?", (run_id,))
         self.repo.conn.executemany(
             """
             INSERT INTO host_resource_usage_daily(
@@ -342,20 +405,41 @@ class VMResourceUsageExportService:
             INSERT INTO vm_resource_usage_daily(
                 run_id, stat_date, vcenter_snapshot_id, asset_key, vcenter_id, service_name,
                 cluster_name, esxi_host, vm_uuid, vm_name, power_state, allocated_cpu_cores,
-                allocated_memory_mb, cpu_max_pct, cpu_avg_pct, mem_max_pct, mem_avg_pct,
+                allocated_memory_mb, provisioned_disk_mb, used_disk_mb,
+                cpu_max_pct, cpu_avg_pct, mem_max_pct, mem_avg_pct,
                 sample_count, inventory_status, collection_status, raw_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [(
                 run_id, stat_date, snapshot_id, r.get("asset_key"), str(r.get("vcenter_id") or "UNKNOWN"),
                 r.get("service_name"), r.get("cluster_name"), r.get("esxi_host"), r.get("vm_uuid"),
                 str(r.get("vm_name") or "UNKNOWN"), r.get("power_state"), self._int(r.get("allocated_cpu_cores")),
-                self._int(r.get("allocated_memory_mb")), self._float(r.get("cpu_max_pct")),
+                self._int(r.get("allocated_memory_mb")),
+                self._int(r.get("provisioned_disk_mb")), self._int(r.get("used_disk_mb")),
+                self._float(r.get("cpu_max_pct")),
                 self._float(r.get("cpu_avg_pct")), self._float(r.get("mem_max_pct")),
                 self._float(r.get("mem_avg_pct")), self._int(r.get("sample_count")) or 0,
                 r.get("inventory_status", "CURRENT"), r.get("collection_status", "SUCCESS"),
                 canonical_json(r.get("raw", r)), now,
             ) for r in vms],
+        )
+        self.repo.conn.executemany(
+            """
+            INSERT INTO datastore_usage_daily(
+                run_id, stat_date, vcenter_id, service_name, cluster_name, datastore_name,
+                datastore_type, accessible, capacity_mb, free_mb, used_mb, provisioned_mb,
+                host_count, vm_count, collection_status, raw_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [(
+                run_id, stat_date, str(r.get("vcenter_id") or "UNKNOWN"), r.get("service_name"),
+                r.get("cluster_name"), str(r.get("datastore_name") or "UNKNOWN"),
+                r.get("datastore_type"), int(r.get("accessible", 1)),
+                self._int(r.get("capacity_mb")), self._int(r.get("free_mb")),
+                self._int(r.get("used_mb")), self._int(r.get("provisioned_mb")),
+                self._int(r.get("host_count")) or 0, self._int(r.get("vm_count")) or 0,
+                r.get("collection_status", "SUCCESS"), canonical_json(r.get("raw", r)), now,
+            ) for r in (datastores or [])],
         )
 
     def summary(
@@ -389,6 +473,9 @@ class VMResourceUsageExportService:
         vm_rows, dropped = self._apply_scope(vm_rows)
         hosts = self._aggregate(host_rows, ["vcenter_id", "service_name", "cluster_name", "esxi_host"], host=True)
         vms = self._aggregate(vm_rows, ["vcenter_id", "service_name", "vm_uuid", "vm_name"], host=False)
+        # 데이터스토어는 ESXi 여럿이 함께 쓴다. esxi_host 로 걸러낼 수 없으므로
+        # 그 조건은 빼고 vCenter·클러스터만 본다.
+        datastores = self._datastores(start_day, end_day, vcenter_id, cluster_name)
         changes = self._vm_configuration_changes(start_day, end_day, vcenter_id, esxi_host)
         # 사용률과 별개로 할당률을 붙인다. 증설 판단은 할당률로 한다.
         self._apply_allocation(hosts, vms)
@@ -396,25 +483,132 @@ class VMResourceUsageExportService:
         # 표의 대수와 아래 VM 목록의 줄 수가 어긋난다.
         self._recount_hosts(hosts, vms)
         clusters = self._roll_up_clusters(hosts)
+        # 데이터스토어의 VM 대수는 세지 않는 VM 을 뺀 목록에서 다시 센다.
+        self._attach_datastore_vms(datastores, vm_rows)
         # vc_0001 · esxi-07 같은 이름으로는 보고서에서 무엇인지 알 수 없다. 업무명이
         # 붙어 있으면 그것을 같이 내려보낸다.
-        self._apply_display_names(hosts, vms, changes, clusters)
+        self._apply_display_names(hosts, vms, changes, clusters, datastores)
+        disk = self._disk_totals(datastores)
         return {
             "period": {"start": start_day.isoformat(), "end": end_day.isoformat()},
             "hosts": hosts,
             "clusters": clusters,
             "vms": vms,
+            "datastores": datastores,
+            "disk": disk,
             "changes": changes,
             "filters": self._available_filters(),
             # 무엇을 왜 뺐는지. 대수가 vCenter 화면과 다를 때 따질 수 있어야 한다.
             "scope": dropped,
             "summary": {
                 "host_count": len(hosts), "vm_count": len(vms), "cluster_count": len(clusters),
+                "datastore_count": len(datastores),
+                "disk_capacity_gb": disk.get("capacity_gb"),
+                "disk_used_pct": disk.get("used_pct"),
+                "disk_provision_pct": disk.get("provision_pct"),
+                "disk_over_provisioned": disk.get("over_provisioned"),
                 "cpu_changed": sum(1 for r in changes if r["event_type"] == "RV_CPU_CHANGED"),
                 "memory_changed": sum(1 for r in changes if r["event_type"] == "RV_MEMORY_CHANGED"),
                 "vm_added": sum(1 for r in changes if r["event_type"] == "RV_NEW"),
                 "vm_removed": sum(1 for r in changes if r["event_type"] == "RV_REMOVED"),
             },
+        }
+
+    def _datastores(
+        self,
+        start_day: date,
+        end_day: date,
+        vcenter_id: str | None,
+        cluster_name: str | None,
+    ) -> list[dict[str, Any]]:
+        """기간 안의 마지막 값을 데이터스토어별로 한 줄씩.
+
+        디스크는 CPU·메모리처럼 '평균' 이 쓸모 없다. 지금 얼마나 차 있는지가
+        중요하므로 기간 마지막 날의 값을 쓰고, 기간 중 최대치를 같이 적는다.
+        """
+        filters = ["stat_date>=?", "stat_date<=?"]
+        params: list[Any] = [start_day.isoformat(), end_day.isoformat()]
+        if vcenter_id:
+            filters.append("vcenter_id=?")
+            params.append(vcenter_id)
+        if cluster_name:
+            filters.append("cluster_name=?")
+            params.append(cluster_name)
+        rows = [dict(r) for r in self.repo.conn.execute(
+            f"SELECT * FROM datastore_usage_daily WHERE {' AND '.join(filters)}"
+            " ORDER BY stat_date, service_name, datastore_name", params
+        ).fetchall()]
+        grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            grouped[(str(row.get("vcenter_id") or ""), str(row.get("datastore_name") or ""))].append(row)
+        result: list[dict[str, Any]] = []
+        for (vcenter, name), group in grouped.items():
+            latest = sorted(group, key=lambda r: (str(r.get("stat_date") or ""), int(r.get("id") or 0)))[-1]
+            capacity = self._int(latest.get("capacity_mb")) or 0
+            used = self._int(latest.get("used_mb")) or 0
+            provisioned = self._int(latest.get("provisioned_mb")) or 0
+            free = self._int(latest.get("free_mb"))
+            # 0(접속불가)을 ``or 1`` 로 받으면 1 이 되어 버린다. 없을 때만 1 로 본다.
+            raw_accessible = latest.get("accessible")
+            accessible = True if raw_accessible is None else bool(int(raw_accessible))
+            result.append({
+                "vcenter_id": vcenter or None,
+                "service_name": latest.get("service_name"),
+                "cluster_name": latest.get("cluster_name"),
+                "datastore_name": name,
+                "datastore_type": latest.get("datastore_type"),
+                "accessible": accessible,
+                "capacity_mb": capacity, "capacity_gb": self._mb_to_gb(capacity),
+                "free_mb": free, "free_gb": self._mb_to_gb(free),
+                "used_mb": used, "used_gb": self._mb_to_gb(used),
+                "provisioned_mb": provisioned, "provisioned_gb": self._mb_to_gb(provisioned),
+                # 사용률은 '지금 차 있는 양', 할당률은 'VM 에게 약속한 양' 이다.
+                # 씬 프로비저닝이면 할당률이 100% 를 넘을 수 있고, 그게 위험 신호다.
+                "used_pct": self._ratio(used, capacity),
+                "provision_pct": self._ratio(provisioned, capacity),
+                "over_provisioned": bool(capacity and provisioned > capacity),
+                "host_count": self._int(latest.get("host_count")) or 0,
+                "used_pct_max": self._max([
+                    {"used_pct": self._ratio(self._int(r.get("used_mb")) or 0, self._int(r.get("capacity_mb")) or 0)}
+                    for r in group
+                ], "used_pct"),
+                "latest_stat_date": latest.get("stat_date"),
+            })
+        result.sort(key=lambda r: (str(r.get("service_name") or ""), str(r.get("datastore_name") or "")))
+        return result
+
+    @staticmethod
+    def _attach_datastore_vms(datastores: list[dict[str, Any]], vm_rows: list[dict[str, Any]]) -> None:
+        """데이터스토어가 어느 VM 들을 담고 있는지는 vCenter 만 아는 값이다.
+
+        수집기는 데이터스토어 단위 VM 대수를 주지 않는다. 적어도 그 vCenter 의
+        세는 VM 대수를 적어 두면 "이 데이터스토어가 비어 있는 것인지" 를 가늠할
+        수 있다. 정확한 배치가 필요하면 VM 목록을 봐야 한다.
+        """
+        counted: dict[str, int] = defaultdict(int)
+        for vm in vm_rows:
+            if str(vm.get("inventory_status") or "CURRENT") != "CURRENT":
+                continue
+            counted[str(vm.get("vcenter_id") or "")] += 1
+        for row in datastores:
+            row["vcenter_vm_count"] = counted.get(str(row.get("vcenter_id") or ""), 0)
+
+    def _disk_totals(self, datastores: list[dict[str, Any]]) -> dict[str, Any]:
+        """전체 디스크 한 줄 요약. 쓸 수 없는 데이터스토어는 용량에서 뺀다."""
+        usable = [r for r in datastores if r.get("accessible")]
+        capacity = sum(int(r.get("capacity_mb") or 0) for r in usable)
+        used = sum(int(r.get("used_mb") or 0) for r in usable)
+        provisioned = sum(int(r.get("provisioned_mb") or 0) for r in usable)
+        return {
+            "datastore_count": len(datastores),
+            "inaccessible_count": len(datastores) - len(usable),
+            "capacity_mb": capacity, "capacity_gb": self._mb_to_gb(capacity),
+            "used_mb": used, "used_gb": self._mb_to_gb(used),
+            "free_mb": capacity - used, "free_gb": self._mb_to_gb(capacity - used),
+            "provisioned_mb": provisioned, "provisioned_gb": self._mb_to_gb(provisioned),
+            "used_pct": self._ratio(used, capacity),
+            "provision_pct": self._ratio(provisioned, capacity),
+            "over_provisioned": sum(1 for r in usable if r.get("over_provisioned")),
         }
 
     def _apply_scope(self, rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -464,7 +658,7 @@ class VMResourceUsageExportService:
         VM 목록에 없는(NOT_IN_CURRENT_INVENTORY) 행은 이미 지워진 VM 이므로 뺀다.
         """
         assigned: dict[tuple[str, str], dict[str, int]] = defaultdict(
-            lambda: {"cpu": 0, "memory_mb": 0, "vm_count": 0}
+            lambda: {"cpu": 0, "memory_mb": 0, "vm_count": 0, "disk_mb": 0, "disk_used_mb": 0}
         )
         for vm in vms:
             if str(vm.get("inventory_status") or "CURRENT") != "CURRENT":
@@ -475,16 +669,28 @@ class VMResourceUsageExportService:
             bucket = assigned[(str(vm.get("vcenter_id") or ""), host)]
             bucket["cpu"] += int(vm.get("allocated_cpu_cores") or 0)
             bucket["memory_mb"] += int(vm.get("allocated_memory_mb") or 0)
+            # 디스크는 ESXi 용량이 아니라 데이터스토어 용량에서 나간다. 그래서
+            # 통합기 줄에는 비율 없이 '이 통합기의 VM 이 차지한 양' 만 적는다.
+            bucket["disk_mb"] += int(vm.get("provisioned_disk_mb") or 0)
+            bucket["disk_used_mb"] += int(vm.get("used_disk_mb") or 0)
             bucket["vm_count"] += 1
 
         for row in hosts:
             bucket = assigned.get((str(row.get("vcenter_id") or ""), str(row.get("esxi_host") or "")))
             cpu = int(bucket["cpu"]) if bucket else 0
             memory_mb = int(bucket["memory_mb"]) if bucket else 0
+            disk_mb = int(bucket["disk_mb"]) if bucket else 0
+            disk_used_mb = int(bucket["disk_used_mb"]) if bucket else 0
             row.update({
                 "assigned_cpu_cores": cpu,
                 "assigned_memory_mb": memory_mb,
                 "assigned_memory_gb": self._mb_to_gb(memory_mb),
+                "assigned_disk_mb": disk_mb,
+                "assigned_disk_gb": self._mb_to_gb(disk_mb),
+                "used_disk_mb": disk_used_mb,
+                "used_disk_gb": self._mb_to_gb(disk_used_mb),
+                # 할당한 디스크 중 실제로 쓴 비율. 씬 디스크가 얼마나 비어 있는지다.
+                "disk_fill_pct": self._ratio(disk_used_mb, disk_mb),
                 "assigned_vm_count": int(bucket["vm_count"]) if bucket else 0,
                 "cpu_alloc_pct": self._ratio(cpu, row.get("allocated_cpu_cores")),
                 "mem_alloc_pct": self._ratio(memory_mb, row.get("allocated_memory_mb")),
@@ -509,6 +715,8 @@ class VMResourceUsageExportService:
             capacity_mem = sum(int(m.get("allocated_memory_mb") or 0) for m in members)
             assigned_cpu = sum(int(m.get("assigned_cpu_cores") or 0) for m in members)
             assigned_mem = sum(int(m.get("assigned_memory_mb") or 0) for m in members)
+            assigned_disk = sum(int(m.get("assigned_disk_mb") or 0) for m in members)
+            used_disk = sum(int(m.get("used_disk_mb") or 0) for m in members)
             result.append({
                 "vcenter_id": vcenter_id or None,
                 "service_name": service_name or None,
@@ -521,6 +729,11 @@ class VMResourceUsageExportService:
                 "assigned_cpu_cores": assigned_cpu,
                 "assigned_memory_mb": assigned_mem,
                 "assigned_memory_gb": self._mb_to_gb(assigned_mem),
+                "assigned_disk_mb": assigned_disk,
+                "assigned_disk_gb": self._mb_to_gb(assigned_disk),
+                "used_disk_mb": used_disk,
+                "used_disk_gb": self._mb_to_gb(used_disk),
+                "disk_fill_pct": self._ratio(used_disk, assigned_disk),
                 "cpu_alloc_pct": self._ratio(assigned_cpu, capacity_cpu),
                 "mem_alloc_pct": self._ratio(assigned_mem, capacity_mem),
                 "cpu_max_pct": self._max(members, "cpu_max_pct"),
@@ -545,6 +758,10 @@ class VMResourceUsageExportService:
                     row["cluster_display_name"] = resolver.name("CLUSTER", row["cluster_name"], vcenter)
                 if row.get("esxi_host"):
                     row["esxi_display_name"] = resolver.name("ESXI", row["esxi_host"], vcenter)
+                if row.get("datastore_name"):
+                    row["datastore_display_name"] = resolver.name(
+                        "DATASTORE", row["datastore_name"], vcenter
+                    )
                 if vcenter:
                     row["vcenter_display_name"] = resolver.name("VCENTER", vcenter, vcenter)
 
@@ -561,6 +778,8 @@ class VMResourceUsageExportService:
             ("실제 Memory GB", "allocated_memory_gb"),
             ("VM 할당 CPU Core", "assigned_cpu_cores"), ("VM 할당 Memory GB", "assigned_memory_gb"),
             ("CPU 할당률 %", "cpu_alloc_pct"), ("MEM 할당률 %", "mem_alloc_pct"),
+            ("VM 할당 Disk GB", "assigned_disk_gb"), ("VM 사용 Disk GB", "used_disk_gb"),
+            ("Disk 실사용률 %", "disk_fill_pct"),
             ("CPU MAX %", "cpu_max_pct"),
             ("CPU AVG %", "cpu_avg_pct"), ("MEM MAX %", "mem_max_pct"), ("MEM AVG %", "mem_avg_pct"),
         ], data["hosts"])
@@ -571,15 +790,30 @@ class VMResourceUsageExportService:
             ("실제 CPU Core", "allocated_cpu_cores"), ("실제 Memory GB", "allocated_memory_gb"),
             ("VM 할당 CPU Core", "assigned_cpu_cores"), ("VM 할당 Memory GB", "assigned_memory_gb"),
             ("CPU 할당률 %", "cpu_alloc_pct"), ("MEM 할당률 %", "mem_alloc_pct"),
+            ("VM 할당 Disk GB", "assigned_disk_gb"), ("VM 사용 Disk GB", "used_disk_gb"),
+            ("Disk 실사용률 %", "disk_fill_pct"),
             ("CPU MAX %", "cpu_max_pct"), ("CPU AVG %", "cpu_avg_pct"),
             ("MEM MAX %", "mem_max_pct"), ("MEM AVG %", "mem_avg_pct"),
         ], data["clusters"])
+        ws_datastore = wb.create_sheet("DatastoreUsage")
+        self._write_sheet(ws_datastore, [
+            ("서비스명", "service_name"), ("vCenter", "vcenter_id"), ("Cluster", "cluster_name"),
+            ("데이터스토어", "datastore_name"), ("유형", "datastore_type"),
+            ("실제 용량 GB", "capacity_gb"), ("사용 GB", "used_gb"), ("여유 GB", "free_gb"),
+            ("사용률 %", "used_pct"), ("기간 내 최대 사용률 %", "used_pct_max"),
+            ("VM 할당(프로비저닝) GB", "provisioned_gb"), ("할당률 %", "provision_pct"),
+            ("과할당", "over_provisioned_label"), ("접속 ESXi 대수", "host_count"),
+            ("기준일", "latest_stat_date"),
+        ], self._datastore_export_rows(data["datastores"]))
         ws_vm = wb.create_sheet("VMsResource")
         self._write_sheet(ws_vm, [
             ("서비스명", "service_name"), ("vCenter", "vcenter_id"), ("Cluster", "cluster_name"),
             ("통합기", "esxi_host"), ("VM UUID", "vm_uuid"), ("VM명", "vm_name"),
             ("전원상태", "power_state"), ("실제 CPU Core", "allocated_cpu_cores"),
-            ("실제 Memory GB", "allocated_memory_gb"), ("CPU MAX %", "cpu_max_pct"),
+            ("실제 Memory GB", "allocated_memory_gb"),
+            ("할당 Disk GB", "provisioned_disk_gb"), ("사용 Disk GB", "used_disk_gb"),
+            ("Disk 실사용률 %", "disk_fill_pct"),
+            ("CPU MAX %", "cpu_max_pct"),
             ("CPU AVG %", "cpu_avg_pct"), ("MEM MAX %", "mem_max_pct"), ("MEM AVG %", "mem_avg_pct"),
         ], data["vms"])
         ws_change = wb.create_sheet("VMChangeHistory")
@@ -635,6 +869,14 @@ class VMResourceUsageExportService:
                 "allocated_cpu_cores": latest.get("allocated_cpu_cores"),
                 "allocated_memory_mb": latest.get("allocated_memory_mb"),
                 "allocated_memory_gb": self._mb_to_gb(latest.get("allocated_memory_mb")),
+                # 디스크는 평균이 쓸모 없다. 마지막 날의 값이 지금 모습이다.
+                "provisioned_disk_mb": latest.get("provisioned_disk_mb"),
+                "provisioned_disk_gb": self._mb_to_gb(latest.get("provisioned_disk_mb")),
+                "used_disk_mb": latest.get("used_disk_mb"),
+                "used_disk_gb": self._mb_to_gb(latest.get("used_disk_mb")),
+                "disk_fill_pct": self._ratio(
+                    latest.get("used_disk_mb") or 0, latest.get("provisioned_disk_mb")
+                ),
                 "inventory_status": latest.get("inventory_status"),
                 "cpu_max_pct": self._max(group, "cpu_max_pct"),
                 "cpu_avg_pct": self._weighted_avg(group, "cpu_avg_pct"),
@@ -747,11 +989,25 @@ class VMResourceUsageExportService:
             "power_state": self._text(mapped.get("power_state")),
             "allocated_cpu_cores": self._int(mapped.get("allocated_cpu_cores")),
             "allocated_memory_mb": self._int(mapped.get("allocated_memory_mb")),
+            "provisioned_disk_mb": self._int(mapped.get("provisioned_disk_mb")),
+            "used_disk_mb": self._int(mapped.get("used_disk_mb")),
             "cpu_max_pct": self._float(mapped.get("cpu_max_pct")), "cpu_avg_pct": self._float(mapped.get("cpu_avg_pct")),
             "mem_max_pct": self._float(mapped.get("mem_max_pct")), "mem_avg_pct": self._float(mapped.get("mem_avg_pct")),
             "sample_count": self._int(mapped.get("sample_count")) or 0,
             "collection_status": "SUCCESS", "source_name": "VM_ResourceUsageExport", "raw": raw,
         }
+
+    @staticmethod
+    def _datastore_export_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """엑셀에 쓸 모양으로. True/False 대신 읽을 수 있는 말을 넣는다."""
+        result = []
+        for source in rows:
+            row = dict(source)
+            row["over_provisioned_label"] = "과할당" if row.get("over_provisioned") else ""
+            if not row.get("accessible"):
+                row["over_provisioned_label"] = "접속불가"
+            result.append(row)
+        return result
 
     @classmethod
     def _change_export_rows(cls, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

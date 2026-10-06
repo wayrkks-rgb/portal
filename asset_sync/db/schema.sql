@@ -345,6 +345,8 @@ CREATE TABLE IF NOT EXISTS vm_resource_usage_daily (
     power_state TEXT,
     allocated_cpu_cores INTEGER,
     allocated_memory_mb INTEGER,
+    provisioned_disk_mb INTEGER,
+    used_disk_mb INTEGER,
     cpu_max_pct REAL,
     cpu_avg_pct REAL,
     mem_max_pct REAL,
@@ -359,6 +361,31 @@ CREATE INDEX IF NOT EXISTS idx_vm_resource_usage_period ON vm_resource_usage_dai
 CREATE INDEX IF NOT EXISTS idx_vm_resource_usage_uuid ON vm_resource_usage_daily(vm_uuid, stat_date DESC);
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_vm_resource_usage_daily ON vm_resource_usage_daily(run_id, vcenter_id, vm_name, IFNULL(vm_uuid,''));
+
+-- 데이터스토어 디스크. 용량·여유는 '실제', provisioned 는 'VM 에게 나눠준 양' 이다.
+-- 씬 프로비저닝이면 나눠준 양이 용량을 넘을 수 있으므로 둘을 같이 둔다.
+CREATE TABLE IF NOT EXISTS datastore_usage_daily (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES resource_usage_run(id) ON DELETE CASCADE,
+    stat_date TEXT NOT NULL,
+    vcenter_id TEXT NOT NULL,
+    service_name TEXT,
+    cluster_name TEXT,
+    datastore_name TEXT NOT NULL,
+    datastore_type TEXT,
+    accessible INTEGER NOT NULL DEFAULT 1,
+    capacity_mb INTEGER,
+    free_mb INTEGER,
+    used_mb INTEGER,
+    provisioned_mb INTEGER,
+    host_count INTEGER NOT NULL DEFAULT 0,
+    vm_count INTEGER NOT NULL DEFAULT 0,
+    collection_status TEXT NOT NULL DEFAULT 'SUCCESS',
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    UNIQUE(run_id, vcenter_id, datastore_name)
+);
+CREATE INDEX IF NOT EXISTS idx_datastore_usage_period ON datastore_usage_daily(stat_date DESC, vcenter_id, datastore_name);
 
 -- Cross-WAS mutual exclusion for the daily batch. Mirrored in schema_mysql.sql.
 CREATE TABLE IF NOT EXISTS process_lock (

@@ -391,6 +391,8 @@ CREATE TABLE IF NOT EXISTS vm_resource_usage_daily (
     power_state VARCHAR(32),
     allocated_cpu_cores INT,
     allocated_memory_mb BIGINT,
+    provisioned_disk_mb BIGINT,
+    used_disk_mb BIGINT,
     cpu_max_pct DOUBLE,
     cpu_avg_pct DOUBLE,
     mem_max_pct DOUBLE,
@@ -411,6 +413,32 @@ CREATE TABLE IF NOT EXISTS vm_resource_usage_daily (
     KEY idx_vm_resource_usage_period (stat_date DESC, vcenter_id, esxi_host, vm_name),
     KEY idx_vm_resource_usage_uuid (vm_uuid, stat_date DESC),
     CONSTRAINT fk_vm_usage_run FOREIGN KEY (run_id) REFERENCES resource_usage_run(id) ON DELETE CASCADE
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 데이터스토어 디스크. 용량·여유는 '실제', provisioned 는 'VM 에게 나눠준 양' 이다.
+-- 씬 프로비저닝이면 나눠준 양이 용량을 넘을 수 있으므로 둘을 같이 둔다.
+CREATE TABLE IF NOT EXISTS datastore_usage_daily (
+    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    run_id BIGINT NOT NULL,
+    stat_date VARCHAR(32) NOT NULL,
+    vcenter_id VARCHAR(128) NOT NULL,
+    service_name VARCHAR(255),
+    cluster_name VARCHAR(255),
+    datastore_name VARCHAR(255) NOT NULL,
+    datastore_type VARCHAR(32),
+    accessible TINYINT NOT NULL DEFAULT 1,
+    capacity_mb BIGINT,
+    free_mb BIGINT,
+    used_mb BIGINT,
+    provisioned_mb BIGINT,
+    host_count INT NOT NULL DEFAULT 0,
+    vm_count INT NOT NULL DEFAULT 0,
+    collection_status VARCHAR(32) NOT NULL DEFAULT 'SUCCESS',
+    raw_json LONGTEXT,
+    created_at VARCHAR(32) NOT NULL,
+    UNIQUE KEY uq_datastore_usage_daily (run_id, vcenter_id, datastore_name),
+    KEY idx_datastore_usage_period (stat_date DESC, vcenter_id, datastore_name),
+    CONSTRAINT fk_datastore_usage_run FOREIGN KEY (run_id) REFERENCES resource_usage_run(id) ON DELETE CASCADE
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Cross-WAS mutual exclusion for the daily batch. Shared by both engines.

@@ -73,6 +73,39 @@
       </div>
 
       <div class="card">
+        <div class="flex justify-between items-center mb-4">
+          <div class="card-title" style="margin-bottom:0"><span class="icon">💾</span> 데이터스토어 디스크 현황</div>
+          <div class="flex gap-2 items-center">
+            <div class="text-xs text-muted" id="monthly-datastore-basis"></div>
+            <label class="text-xs flex items-center gap-2">
+              <input type="checkbox" id="monthly-datastore-risk" onchange="renderMonthlyDatastoresAgain()">
+              주의 대상만 (사용률 80% 이상 · 과할당)
+            </label>
+          </div>
+        </div>
+        <div class="text-xs text-muted mb-4">
+          <strong>사용</strong>은 지금 실제로 차 있는 양, <strong>할당</strong>은 VM 에게 약속한 양(VMDK 전체 크기)입니다.
+          씬 프로비저닝이면 할당이 용량을 넘을 수 있고(<strong>과할당</strong>),
+          그때는 VM 이 실제로 채우는 순간 데이터스토어가 꽉 찹니다. 그래서 둘을 같이 봅니다.
+          <div style="margin-top:4px">
+            데이터스토어는 ESXi 여러 대가 함께 쓰므로 통합기 표와 달리 클러스터에 매달지 않습니다.
+            한 클러스터만 쓰는 경우에만 클러스터명이 붙습니다.
+          </div>
+        </div>
+        <div class="grid-4 mb-4">
+          <div class="stat-card"><div class="stat-value" id="monthly-disk-capacity">-</div>
+            <div class="stat-label">전체 용량</div><div class="stat-delta" id="monthly-disk-count"></div></div>
+          <div class="stat-card"><div class="stat-value" id="monthly-disk-used">-</div>
+            <div class="stat-label">사용 (사용률)</div><div class="stat-delta" id="monthly-disk-used-delta"></div></div>
+          <div class="stat-card"><div class="stat-value" id="monthly-disk-provisioned">-</div>
+            <div class="stat-label">VM 할당 (할당률)</div><div class="stat-delta" id="monthly-disk-prov-delta"></div></div>
+          <div class="stat-card"><div class="stat-value" id="monthly-disk-over">-</div>
+            <div class="stat-label">과할당 데이터스토어</div><div class="stat-delta">할당 &gt; 실제 용량</div></div>
+        </div>
+        <div class="table-wrap" style="max-height:520px;overflow:auto"><table id="monthly-datastore-table"></table></div>
+      </div>
+
+      <div class="card">
         <div class="card-title"><span class="icon">🔀</span> 통합기별 VM 생성 · 삭제</div>
         <div class="table-wrap" style="max-height:360px;overflow:auto">
           <table><thead><tr><th>통합기</th><th>생성</th><th>삭제</th><th>순증감</th><th>VM 명</th></tr></thead>

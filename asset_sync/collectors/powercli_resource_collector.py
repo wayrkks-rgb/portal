@@ -126,12 +126,18 @@ class PowerCLIResourceUsageCollector:
             vms = payload.get("vms", []) if isinstance(payload, dict) else []
             if not isinstance(hosts, list) or not isinstance(vms, list):
                 raise RuntimeError("자원사용률 JSON은 hosts/vms 배열을 포함해야 합니다.")
+            # 데이터스토어는 나중에 붙은 항목이다. 옛 스크립트를 쓰는 서버에서도
+            # 호스트·VM 은 그대로 들어와야 하므로 없으면 빈 목록으로 둔다.
+            datastores = payload.get("datastores", []) if isinstance(payload, dict) else []
+            if not isinstance(datastores, list):
+                datastores = []
             return {
                 "id": vc_id,
                 "name": vc_name,
                 "status": "SUCCESS",
                 "hosts": [dict(row) for row in hosts if isinstance(row, dict)],
                 "vms": [dict(row) for row in vms if isinstance(row, dict)],
+                "datastores": [dict(row) for row in datastores if isinstance(row, dict)],
                 "metadata": payload.get("metadata", {}),
             }
         except subprocess.TimeoutExpired:
@@ -161,6 +167,7 @@ class PowerCLIResourceUsageCollector:
         results = [self.run_one(entry, start_date, end_date) for entry in entries]
         hosts: list[dict[str, Any]] = []
         vms: list[dict[str, Any]] = []
+        datastores: list[dict[str, Any]] = []
         success_scopes: list[str] = []
         failed_scopes: dict[str, str] = {}
         for result in results:
@@ -169,6 +176,7 @@ class PowerCLIResourceUsageCollector:
                 success_scopes.append(vc_id)
                 hosts.extend(result.get("hosts", []))
                 vms.extend(result.get("vms", []))
+                datastores.extend(result.get("datastores", []))
             else:
                 failed_scopes[vc_id] = str(result.get("error") or "unknown error")
         status = "SUCCESS" if not failed_scopes else "PARTIAL_SUCCESS" if success_scopes else "FAILED"
@@ -176,6 +184,7 @@ class PowerCLIResourceUsageCollector:
             "status": status,
             "hosts": hosts,
             "vms": vms,
+            "datastores": datastores,
             "success_scopes": success_scopes,
             "failed_scopes": failed_scopes,
             "results": results,

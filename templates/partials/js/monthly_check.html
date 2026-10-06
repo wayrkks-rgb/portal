@@ -433,9 +433,19 @@ function monthlyIntegratedRow(nameCell, vcenter, service, now, old, rowClass) {
     <td>${now ? `<strong>${resourcePair(value(now, 'assigned_cpu_cores'), value(now, 'assigned_memory_mb'))}</strong>` : '-'}</td>
     <td class="text-muted">${old ? allocationPair(value(old, 'cpu_alloc_pct'), value(old, 'mem_alloc_pct')) : '-'}</td>
     <td>${now ? allocationPair(value(now, 'cpu_alloc_pct'), value(now, 'mem_alloc_pct')) : '-'}</td>
+    <td>${now ? diskPair(value(now, 'assigned_disk_gb'), value(now, 'used_disk_gb'), value(now, 'disk_fill_pct')) : '-'}</td>
     <td>${pct(value(now, 'cpu_max_pct'))} / ${pct(value(now, 'mem_max_pct'))}</td>
     <td>${pct(value(now, 'cpu_avg_pct'))} / ${pct(value(now, 'mem_avg_pct'))}</td>
   </tr>`;
+}
+
+// 통합기 줄의 디스크. ESXi 용량이 아니라 데이터스토어에서 나가는 양이므로
+// 비율은 '할당한 것 중 실제로 쓴 몫' 이다. 남은 공간은 아래 데이터스토어 표에서 본다.
+function diskPair(assignedGb, usedGb, fillPct) {
+  if (assignedGb == null && usedGb == null) return '<span class="text-muted">-</span>';
+  const fill = fillPct == null ? '' :
+    `<div class="text-xs text-muted">실사용 ${Number(fillPct).toLocaleString()}%</div>`;
+  return `${diskSize(assignedGb)} / ${diskSize(usedGb)}${fill}`;
 }
 
 // 화면이 다시 그려져야 할 때(검색어·접기·변경분만) 쓰려고 마지막 자료를 들고 있는다.
@@ -510,13 +520,14 @@ function renderMonthlyIntegratedAgain() {
       <th rowspan="2">실제 자원<div class="text-xs text-muted">C / G</div></th>
       <th colspan="2">VM 할당 (C / G)</th>
       <th colspan="2">할당률 (CPU / MEM)</th>
+      <th rowspan="2">VM 디스크<div class="text-xs text-muted">할당 / 사용</div></th>
       <th rowspan="2">사용률 MAX<div class="text-xs text-muted">CPU / MEM</div></th>
       <th rowspan="2">사용률 AVG<div class="text-xs text-muted">CPU / MEM</div></th>
     </tr>
     <tr><th>전월</th><th>당월</th><th>전월</th><th>당월</th><th>전월</th><th>당월</th></tr>
   </thead><tbody>${
     body.length ? body.join('')
-      : `<tr><td colspan="12" style="text-align:center" class="text-muted">${
+      : `<tr><td colspan="13" style="text-align:center" class="text-muted">${
         hostCount ? '조건에 맞는 ESXi 가 없습니다.'
           : '수집된 통합기 자원사용률이 없습니다. 07시 자동배치가 한 번은 돌아야 합니다.'
       }</td></tr>`
@@ -532,6 +543,121 @@ function renderMonthlyIntegratedAgain() {
   document.getElementById('monthly-integrated-basis').textContent =
     `${range.start} ~ ${range.end} 집계 · 클러스터 ${groups.length.toLocaleString()}개 · ESXi ${hostCount.toLocaleString()}대`
     + (previousHosts ? ` · 전월 ESXi ${previousHosts.toLocaleString()}대와 비교` : ' · 비교할 전월 없음');
+}
+
+// ── 데이터스토어 디스크 현황 ───────────────────────────────────────────
+// 사용률(지금 차 있는 양)과 할당률(VM 에게 약속한 양)은 다르다. 씬 프로비저닝이면
+// 할당이 용량을 넘을 수 있고, 그게 과할당이다. 두 값을 한 줄에 같이 둔다.
+const MONTHLY_DATASTORE_KEY = row => `${row.vcenter_id || ''}|${row.datastore_name || ''}`;
+
+function diskSize(gb) {
+  if (gb == null) return '-';
+  const value = Number(gb);
+  return value >= 1024 ? `${(value / 1024).toFixed(1)}TB` : `${Math.round(value).toLocaleString()}GB`;
+}
+
+function diskPct(value, warnAt, dangerAt) {
+  if (value == null) return '<span class="text-muted">-</span>';
+  const number = Number(value);
+  const cls = number >= dangerAt ? 'text-error' : (number >= warnAt ? 'text-warning' : '');
+  return `<span class="${cls}">${number.toLocaleString()}%</span>`;
+}
+
+function datastoreLabel(row) {
+  const name = row.datastore_display_name || row.datastore_name || '(이름 없음)';
+  const raw = row.datastore_name || '';
+  return name === raw ? `<span class="mono">${syncEscape(name)}</span>`
+    : `${syncEscape(name)}<div class="text-xs text-muted mono">${syncEscape(raw)}</div>`;
+}
+
+function renderMonthlyDatastoresAgain() {
+  if (!monthlyIntegratedState) return;
+  const {current, previous, range} = monthlyIntegratedState;
+  const table = document.getElementById('monthly-datastore-table');
+  if (!table) return;
+  const rows = (current && current.datastores) || [];
+  const before = new Map(((previous && previous.datastores) || []).map(r => [MONTHLY_DATASTORE_KEY(r), r]));
+  const riskOnly = !!(document.getElementById('monthly-datastore-risk') || {}).checked;
+  // 주의 대상 = 꽉 차가는 것(80% 이상) 또는 약속을 용량보다 많이 한 것.
+  const shown = riskOnly
+    ? rows.filter(r => r.over_provisioned || !r.accessible || Number(r.used_pct || 0) >= 80)
+    : rows;
+
+  table.className = 'table-sticky';
+  table.innerHTML = `<thead>
+    <tr>
+      <th rowspan="2">데이터스토어</th><th rowspan="2">유형</th>
+      <th rowspan="2">vCenter<div class="text-xs text-muted">클러스터</div></th>
+      <th rowspan="2">실제 용량</th>
+      <th colspan="2">사용 (사용률)</th>
+      <th colspan="2">VM 할당 (할당률)</th>
+      <th rowspan="2">여유</th>
+      <th rowspan="2">ESXi</th><th rowspan="2">비고</th>
+    </tr>
+    <tr><th>전월</th><th>당월</th><th>전월</th><th>당월</th></tr>
+  </thead><tbody>${
+    shown.length ? shown.map(row => {
+      const old = before.get(MONTHLY_DATASTORE_KEY(row)) || {};
+      const notes = [];
+      if (!row.accessible) notes.push('<span class="badge badge-red">접속불가</span>');
+      if (row.over_provisioned) notes.push('<span class="badge badge-yellow">과할당</span>');
+      if (row.used_pct_max != null && Number(row.used_pct_max) > Number(row.used_pct || 0) + 5) {
+        notes.push(`<span class="text-xs text-muted">기간 최대 ${Number(row.used_pct_max).toLocaleString()}%</span>`);
+      }
+      const delta = (row.used_gb != null && old.used_gb != null)
+        ? Number(row.used_gb) - Number(old.used_gb) : null;
+      return `<tr>
+        <td>${datastoreLabel(row)}</td>
+        <td class="text-xs">${syncEscape(row.datastore_type || '-')}</td>
+        <td class="text-xs mono">${syncEscape(row.vcenter_id || '-')}
+          <div class="text-xs text-muted">${syncEscape(row.cluster_display_name || row.cluster_name || '공용')}</div></td>
+        <td>${diskSize(row.capacity_gb)}</td>
+        <td class="text-muted">${old.used_gb == null ? '-' : `${diskSize(old.used_gb)} (${Number(old.used_pct || 0).toLocaleString()}%)`}</td>
+        <td><strong>${diskSize(row.used_gb)}</strong> ${diskPct(row.used_pct, 80, 90)}
+          ${delta ? `<div class="text-xs ${delta > 0 ? 'text-warning' : 'text-success'}">${delta > 0 ? '+' : ''}${diskSize(Math.abs(delta))}</div>` : ''}</td>
+        <td class="text-muted">${old.provisioned_gb == null ? '-' : `${diskSize(old.provisioned_gb)} (${Number(old.provision_pct || 0).toLocaleString()}%)`}</td>
+        <td><strong>${diskSize(row.provisioned_gb)}</strong> ${diskPct(row.provision_pct, 100, 150)}</td>
+        <td>${diskSize(row.free_gb)}</td>
+        <td>${Number(row.host_count || 0).toLocaleString()}</td>
+        <td>${notes.join(' ') || '<span class="text-muted">-</span>'}</td>
+      </tr>`;
+    }).join('')
+    : `<tr><td colspan="11" style="text-align:center" class="text-muted">${
+      rows.length ? '주의할 데이터스토어가 없습니다.'
+        : '수집된 데이터스토어가 없습니다. 07시 자동배치가 새 스크립트로 한 번은 돌아야 합니다.'
+    }</td></tr>`
+  }</tbody>`;
+
+  const disk = (current && current.disk) || {};
+  const text = (id, value) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+  };
+  text('monthly-disk-capacity', diskSize(disk.capacity_gb));
+  text('monthly-disk-count', `데이터스토어 ${Number(disk.datastore_count || 0).toLocaleString()}개`
+    + (disk.inaccessible_count ? ` · 접속불가 ${disk.inaccessible_count}개` : ''));
+  text('monthly-disk-used', disk.used_pct == null ? diskSize(disk.used_gb)
+    : `${diskSize(disk.used_gb)} (${Number(disk.used_pct).toLocaleString()}%)`);
+  text('monthly-disk-provisioned', disk.provision_pct == null ? diskSize(disk.provisioned_gb)
+    : `${diskSize(disk.provisioned_gb)} (${Number(disk.provision_pct).toLocaleString()}%)`);
+  text('monthly-disk-over', Number(disk.over_provisioned || 0).toLocaleString());
+
+  const previousDisk = (previous && previous.disk) || {};
+  const deltaText2 = (id, now, was, label) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (now == null || was == null) { el.textContent = label; return; }
+    const diff = Math.round((Number(now) - Number(was)) * 10) / 10;
+    el.textContent = `전월 ${Number(was).toLocaleString()}% → ${diff > 0 ? '+' : ''}${diff}%p`;
+  };
+  deltaText2('monthly-disk-used-delta', disk.used_pct, previousDisk.used_pct, '비교할 전월 없음');
+  deltaText2('monthly-disk-prov-delta', disk.provision_pct, previousDisk.provision_pct, '비교할 전월 없음');
+
+  const basis = document.getElementById('monthly-datastore-basis');
+  if (basis) {
+    basis.textContent = `${range.start} ~ ${range.end} 기준 · ${shown.length.toLocaleString()} / ${rows.length.toLocaleString()}개 표시`
+      + (before.size ? ` · 전월 ${before.size.toLocaleString()}개와 비교` : '');
+  }
 }
 
 function renderMonthlyIntegratedMoves(current) {
@@ -604,6 +730,7 @@ async function loadMonthlyIntegrated(month) {
     ]);
     alertEl.innerHTML = '';
     renderMonthlyIntegrated(current, previous, range);
+    renderMonthlyDatastoresAgain();
     renderMonthlyIntegratedMoves(current);
   } catch (error) {
     alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(error.message)}</div>`;
