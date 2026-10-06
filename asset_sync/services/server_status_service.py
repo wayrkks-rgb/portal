@@ -17,6 +17,7 @@ from collections import Counter
 from datetime import date
 from typing import Any
 
+from ..normalization.code_maps import ASSET_STATUS
 from .asset_scope import (
     LOCATIONS,
     load_itsm_records,
@@ -135,10 +136,21 @@ class ServerStatusService:
         return criteria
 
     # ── 신규·삭제 상세 ──────────────────────────────────────────────────
+    #: 변동 내역 한 줄에 적을 칸. 이것만 보고 '빼야 할지 둬야 할지' 를 판단한다.
+    MOVEMENT_FIELDS = (
+        "cm_id", "hostname", "primary_ip", "service_name", "location",
+        "os_group", "os_family", "os_version", "eosl_year", "eosl_value",
+        "status_code", "physical",
+    )
+
     def movements(self, snapshot_id: int, previous_snapshot_id: int) -> dict[str, Any]:
         """양식의 '자산 현황 변동 내역'.
 
         위치 → 물리/논리 → OS 묶음 순서로 센다. 양식이 그 순서로 읽히기 때문이다.
+
+        대수만 주면 "8대 늘었다" 는 알아도 **어느 서버인지** 모른다. 그러면 그걸
+        자산에서 빼야 하는지 둬야 하는지 판단할 수 없다. 그래서 실물 목록도 같이
+        돌려준다.
         """
         current, _ = self.select(snapshot_id)
         before, _ = self.select(previous_snapshot_id)
@@ -147,7 +159,25 @@ class ServerStatusService:
 
         created = [current_by_id[key] for key in current_by_id.keys() - before_by_id.keys()]
         removed = [before_by_id[key] for key in before_by_id.keys() - current_by_id.keys()]
-        return {"created": self._breakdown(created), "removed": self._breakdown(removed)}
+        return {
+            "created": {**self._breakdown(created), "items": self._movement_items(created)},
+            "removed": {**self._breakdown(removed), "items": self._movement_items(removed)},
+        }
+
+    def _movement_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """변동 내역 한 줄씩. 읽기 쉬운 순서(위치 → 구분 → 호스트명)로 세운다."""
+        rows = [
+            {key: item.get(key) for key in self.MOVEMENT_FIELDS}
+            for item in items
+        ]
+        for row in rows:
+            row["kind"] = "물리서버" if row.get("physical") else "논리서버"
+            row["status_label"] = ASSET_STATUS.get(str(row.get("status_code") or ""), "")
+        rows.sort(key=lambda r: (
+            str(r.get("location") or ""), str(r.get("kind") or ""),
+            str(r.get("hostname") or ""), str(r.get("cm_id") or ""),
+        ))
+        return rows
 
     def _breakdown(self, items: list[dict[str, Any]]) -> dict[str, Any]:
         tree: dict[str, dict[str, Counter[str]]] = {
@@ -166,14 +196,39 @@ class ServerStatusService:
         return {"total": len(items), "locations": locations}
 
     # ── EOSL 현황 ───────────────────────────────────────────────────────
-    def eosl(self, snapshot_id: int, today: date | None = None) -> dict[str, Any]:
+    def eosl(
+        self,
+        snapshot_id: int,
+        today: date | None = None,
+        previous_snapshot_id: int | None = None,
+    ) -> dict[str, Any]:
         """양식의 EOSL 표. 대상은 서버 현황과 같아야 한다.
 
         연도만 본다. 9999 는 계획 없음이고, 연도를 못 읽으면 미사용으로 센다.
+
+        전월 스냅샷을 주면 칸마다 증감을 같이 낸다. 서버 현황만 증감이 보이고
+        EOSL 은 안 보이면, 늘어난 서버가 어느 연도에 걸렸는지 알 수 없다.
         """
         year = (today or date.today()).year
         included, _ = self.select(snapshot_id)
         physical = [item for item in included if item["physical"]]
+        current = {
+            "physical": {"label": "서버", **self._eosl_row(physical, year)},
+            "all": {"label": "OS", **self._eosl_row(included, year)},
+        }
+        delta: dict[str, dict[str, int]] = {}
+        if previous_snapshot_id:
+            before, _ = self.select(previous_snapshot_id)
+            before_rows = {
+                "physical": self._eosl_row([i for i in before if i["physical"]], year),
+                "all": self._eosl_row(before, year),
+            }
+            for key, row in before_rows.items():
+                delta[key] = {
+                    column: int(current[key]["counts"].get(column, 0)) - int(row["counts"].get(column, 0))
+                    for column in current[key]["counts"]
+                }
+                delta[key]["전체"] = int(current[key]["total"]) - int(row["total"])
         return {
             "criteria": {
                 "eosl_field": self.criteria.eosl_fields[0] if self.criteria.eosl_fields else "",
@@ -182,8 +237,9 @@ class ServerStatusService:
             },
             "columns": self.eosl_columns(year),
             # 양식에서 '서버' 행은 물리서버, 'OS' 행은 전체서버다.
-            "physical": {"label": "서버", **self._eosl_row(physical, year)},
-            "all": {"label": "OS", **self._eosl_row(included, year)},
+            "physical": current["physical"],
+            "all": current["all"],
+            "delta": delta,
             "diagnosis": self.eosl_diagnosis(included),
         }
 

@@ -142,7 +142,10 @@ function renderAssetBrowser(data) {
   document.getElementById('asset-browser-basis').textContent =
     `${data.as_of || '-'} 스냅샷 · ${assetBrowserSource === 'RVTOOLS' ? 'vCenter' : 'ITSM'} 전체 `
     + `${Number(data.snapshot_total || 0).toLocaleString()}건 기준`
-    + (reasons ? ` · 제외 ${reasons}` : '');
+    + (reasons ? ` · 제외 ${reasons}` : '')
+    // 증감을 눌러 들어온 목록이면 무엇과 견준 것인지 밝힌다. 안 적으면 전체
+    // 목록인 줄 알고 "왜 이것만 나오나" 하게 된다.
+    + (data.change_note ? ` · ${data.change_note}` : '');
   updateAssetSelection();
 }
 

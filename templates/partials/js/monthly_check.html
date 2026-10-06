@@ -20,6 +20,22 @@ function deltaText(value) {
   return ` <span class="${cls}" style="font-size:11px">(${sign}${number})</span>`;
 }
 
+// 증감 숫자를 누르면 그 칸의 신규·삭제 서버가 하나씩 보인다. "8대 늘었다" 만
+// 보고는 그걸 자산에서 빼야 할지 둬야 할지 판단할 수 없다.
+function deltaLink(value, filter, label) {
+  const number = Number(value || 0);
+  if (!number) return '';
+  const sign = number > 0 ? '+' : '';
+  const cls = number > 0 ? 'text-success' : 'text-error';
+  // 늘어난 칸은 신규를, 줄어든 칸은 삭제된 것을 본다.
+  const change = number > 0 ? 'created' : 'removed';
+  const args = JSON.stringify(Object.assign({change}, filter || {})).replace(/"/g, '&quot;');
+  const title = `${label} ${change === 'created' ? '신규' : '삭제'}`;
+  return ` <a href="javascript:void(0)" class="${cls}" style="font-size:11px"`
+    + ` title="눌러서 어느 서버인지 보기"`
+    + ` onclick="openMovementBrowser('${change}',${args},'${title}')">(${sign}${number})</a>`;
+}
+
 function renderStatusTable(elementId, table, delta, unitLabel) {
   const element = document.getElementById(elementId);
   if (!element) return;
@@ -45,7 +61,14 @@ function renderStatusTable(elementId, table, delta, unitLabel) {
     const cells = flat.map(([, column]) => {
       const count = Number(values[column] || 0);
       const text = count.toLocaleString();
-      const change = delta && delta[name] ? deltaText(delta[name][column]) : '';
+      const cell_filter = {
+        location: name === '계' ? '' : name,
+        os_group: column === '소계' ? '' : column,
+        kind,
+      };
+      const change = delta && delta[name]
+        ? deltaLink(delta[name][column], cell_filter, `${name} · ${column}`)
+        : '';
       const strong = column === '소계' || name === '계';
       const filter = JSON.stringify({
         location: name === '계' ? '' : name,
@@ -100,6 +123,186 @@ function renderMovements(movements) {
   element.innerHTML = blocks;
 }
 
+// ── 변동 내역: 어느 서버가 늘고 빠졌나 ─────────────────────────────────
+// 대수만 보면 "8대 늘었다" 는 알아도 어느 서버인지 모른다. 그러면 그걸 자산에서
+// 빼야 하는지 둬야 하는지 판단할 수 없다. 한 줄씩 적는다.
+let monthlyMovements = null;
+
+function renderMovementItems() {
+  const table = document.getElementById('monthly-movement-items');
+  if (!table) return;
+  if (!monthlyMovements) {
+    table.innerHTML = '';
+    return;
+  }
+  const term = ((document.getElementById('monthly-movement-search') || {}).value || '')
+    .trim().toLowerCase();
+  const rows = [];
+  [['created', '신규', 'text-success'], ['removed', '삭제', 'text-error']].forEach(([key, label, cls]) => {
+    (monthlyMovements[key] || {}).items?.forEach(item => rows.push({...item, _label: label, _cls: cls, _key: key}));
+  });
+  const shown = term ? rows.filter(item => [
+    item.hostname, item.primary_ip, item.service_name, item.cm_id,
+    item.os_family, item.os_group, item.service_name,
+  ].some(v => String(v || '').toLowerCase().includes(term))) : rows;
+
+  table.className = 'table-sticky';
+  table.innerHTML = `<thead><tr>
+    <th>구분</th><th>자산번호</th><th>호스트명</th><th>IP</th><th>업무명</th>
+    <th>위치</th><th>물리/논리</th><th>OS</th><th>EOSL</th><th>상태</th><th></th>
+  </tr></thead><tbody>${
+    shown.length ? shown.map(item => `<tr>
+      <td><span class="${item._cls}"><strong>${item._label}</strong></span></td>
+      <td class="text-xs mono">${syncEscape(item.cm_id || '-')}</td>
+      <td><strong>${syncEscape(item.hostname || '(호스트명 없음)')}</strong></td>
+      <td class="text-xs mono">${syncEscape(item.primary_ip || '-')}</td>
+      <td>${syncEscape(item.service_name || '-')}</td>
+      <td>${syncEscape(item.location || '-')}</td>
+      <td>${syncEscape(item.kind || '-')}</td>
+      <td>${syncEscape(item.os_group || '-')}
+        ${item.os_version ? `<div class="text-xs text-muted">${syncEscape(item.os_family || '')} ${syncEscape(item.os_version)}</div>` : ''}</td>
+      <td>${item.eosl_year == null ? '<span class="text-muted">미사용</span>' : syncEscape(String(item.eosl_year))}</td>
+      <td class="text-xs">${syncEscape(item.status_label || item.status_code || '-')}</td>
+      <td>${item._key === 'created'
+        ? `<button class="btn btn-secondary btn-sm" onclick="excludeOneAsset('${syncEscape(item.cm_id)}','${syncEscape(item.hostname || '')}')">제외</button>`
+        : ''}</td>
+    </tr>`).join('')
+      : `<tr><td colspan="11" style="text-align:center" class="text-muted">${
+        rows.length ? '검색 결과가 없습니다.' : '이 달에 늘거나 빠진 자산이 없습니다.'
+      }</td></tr>`
+  }</tbody>`;
+
+  const shownEl = document.getElementById('monthly-movement-shown');
+  if (shownEl) {
+    shownEl.textContent = rows.length
+      ? `${shown.length.toLocaleString()} / ${rows.length.toLocaleString()}건 표시`
+      : '';
+  }
+}
+
+// 증감 숫자를 눌렀을 때 그 칸의 신규·삭제 서버만 본다. 목록 팝업에는 검색·엑셀·
+// 일괄 제외가 이미 있으므로 그걸 그대로 쓴다.
+function openMovementBrowser(change, extra, title) {
+  const label = change === 'created' ? '신규 자산' : '삭제된 자산';
+  openAssetBrowser(
+    Object.assign({change, state: 'included'}, extra || {}),
+    title || label
+  );
+}
+
+// 한 건만 바로 뺀다. 목록에서 "이건 자산이 아니다" 가 분명할 때 쓴다.
+// 여러 건이면 [전체 보기] 팝업에서 골라 한꺼번에 처리하는 쪽이 빠르다.
+async function excludeOneAsset(cmId, hostname) {
+  const reason = prompt(`[${hostname || cmId}] 을 자산에서 뺍니다. 사유를 적어주세요.`, '실물 서버 아님');
+  if (reason === null) return;
+  const alertEl = document.getElementById('monthly-alert');
+  const response = await fetch('/api/asset-sync/admin/asset-exclusions', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      source: 'ITSM', mode: 'EXCLUDE', reason,
+      items: [{asset_key: cmId, hostname}],
+    }),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || !result.success) {
+    alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(result.error || 'HTTP ' + response.status)}</div>`;
+    return;
+  }
+  alertEl.innerHTML = `<div class="alert alert-success">✅ ${syncEscape(hostname || cmId)} 을 자산에서 뺐습니다.`
+    + ' 모든 화면에 함께 적용됩니다. 다시 집계합니다.</div>';
+  // 대수가 바뀌었으므로 열려 있는 화면을 다시 센다.
+  if (typeof refreshCountsAfterScopeChange === 'function') refreshCountsAfterScopeChange();
+  else loadMonthlyCheck();
+}
+
+// ── 대수 맞춤 ───────────────────────────────────────────────────────────
+// "대수가 안 맞는다" 에는 두 가지가 섞여 있다. 같아야 하는데 다른 것(버그)과
+// 달라야 정상인 것(ITSM 자산 vs vCenter VM). 표만 보면 가릴 수 없으므로
+// 같아야 하는 쌍을 직접 견주고, 달라도 되는 것은 이유를 적는다.
+const AUDIT_MARK = {OK: '✅', MISMATCH: '❌', STALE: '⚠️', INFO: 'ℹ️'};
+const AUDIT_CLASS = {OK: 'text-success', MISMATCH: 'text-error', STALE: 'text-warning', INFO: 'text-muted'};
+
+function toggleCountAudit() {
+  const detail = document.getElementById('monthly-audit-detail');
+  const button = document.getElementById('monthly-audit-toggle');
+  if (!detail) return;
+  detail.hidden = !detail.hidden;
+  if (button) button.textContent = detail.hidden ? '자세히' : '접기';
+}
+
+function renderCountAudit(audit) {
+  const verdictEl = document.getElementById('monthly-audit-verdict');
+  if (!verdictEl) return;
+  const checks = audit.checks || [];
+  const bad = checks.filter(c => c.verdict === 'MISMATCH');
+  const stale = checks.filter(c => c.verdict === 'STALE');
+
+  if (bad.length) {
+    verdictEl.innerHTML = `<div class="alert alert-error">❌ 같아야 하는 대수가 다릅니다.
+      ${bad.map(c => `<div class="text-xs">· ${syncEscape(c.message)}</div>`).join('')}</div>`;
+  } else if (stale.length) {
+    verdictEl.innerHTML = `<div class="alert alert-warning">⚠️ 대수 자체는 서로 맞습니다.
+      다만 자료 시점이 어긋나 화면 사이의 숫자가 다를 수 있습니다.
+      ${stale.map(c => `<div class="text-xs">· ${syncEscape(c.message)}</div>`).join('')}</div>`;
+  } else {
+    verdictEl.innerHTML = '<div class="alert alert-success">✅ 같아야 하는 대수가 모두 맞습니다.</div>';
+  }
+
+  const table = document.getElementById('monthly-audit-table');
+  if (table) {
+    table.innerHTML = `<thead><tr><th>검사</th><th>결과</th><th>내용</th></tr></thead><tbody>${
+      checks.map(c => `<tr>
+        <td><strong>${syncEscape(c.name)}</strong></td>
+        <td class="${AUDIT_CLASS[c.verdict] || ''}">${AUDIT_MARK[c.verdict] || ''} ${syncEscape(c.verdict)}</td>
+        <td class="text-xs">${syncEscape(c.message)}</td>
+      </tr>`).join('') || '<tr><td colspan="3" style="text-align:center" class="text-muted">검사할 자료가 없습니다.</td></tr>'
+    }</tbody>`;
+  }
+
+  const sources = document.getElementById('monthly-audit-sources');
+  if (sources) {
+    const counts = audit.counts || {}, src = audit.sources || {};
+    const itsm = counts.itsm || {}, vcenter = counts.vcenter || {}, usage = counts.resource_usage || {};
+    const when = info => info ? `${info.snapshot_date}${info.collected_at ? ` (${String(info.collected_at).slice(0, 16).replace('T', ' ')})` : ''}` : '없음';
+    const rows = [
+      ['ITSM 스냅샷 전체', itsm.loaded, when(src.itsm)],
+      ['└ 자산으로 세는 것', itsm.selected, '서버현황·EOSL·대시보드가 쓰는 수'],
+      ['└ 제외', itsm.excluded, '상태·빈 값·수동 제외'],
+      ['└ 물리서버', itsm.physical, '서버현황(물리) · EOSL 서버 행'],
+      ['vCenter 스냅샷 전체 VM', vcenter.loaded, when(src.vcenter)],
+      ['└ 세는 VM', vcenter.selected, 'vCLS 등 제외 후'],
+      ['통합기(ESXi) 줄 수', usage.host_rows,
+        src.resource_usage ? `자원사용률 ${src.resource_usage.period_end} 기준` : '수집 없음'],
+      ['└ 통합기 표 VM 합', usage.host_vm_total, '통합서버 자원사용현황 표의 합'],
+      ['└ VM 목록 줄 수', usage.vm_rows, '같아야 한다'],
+      ['데이터스토어', usage.datastore_rows, ''],
+    ];
+    sources.innerHTML = `<thead><tr><th>항목</th><th>대수</th><th>출처 · 기준</th></tr></thead><tbody>${
+      rows.map(([label, value, note]) => `<tr>
+        <td>${syncEscape(label)}</td>
+        <td><strong>${value == null ? '-' : Number(value).toLocaleString()}</strong></td>
+        <td class="text-xs text-muted">${syncEscape(note)}</td>
+      </tr>`).join('')
+    }</tbody>`;
+  }
+
+  const basis = document.getElementById('monthly-audit-basis');
+  if (basis) {
+    const mark = AUDIT_MARK[audit.verdict] || '';
+    basis.textContent = `${audit.base_day} 기준 ${mark}`;
+  }
+}
+
+async function loadCountAudit(month) {
+  if (!document.getElementById('monthly-audit-verdict')) return;
+  try {
+    renderCountAudit(await apiFetch('/api/asset-sync/count-audit' + (month ? `?month=${month}` : '')));
+  } catch (error) {
+    document.getElementById('monthly-audit-verdict').innerHTML =
+      `<div class="alert alert-error">❌ 대수 맞춤 실패: ${syncEscape(error.message)}</div>`;
+  }
+}
+
 function renderEosl(eosl) {
   const element = document.getElementById('monthly-eosl');
   if (!element) return;
@@ -112,17 +315,22 @@ function renderEosl(eosl) {
   const rows = ['physical','all'].map(key => {
     const row = eosl[key];
     const kind = key === 'physical' ? 'physical' : '';
+    // 전월 대비 증감. 서버현황만 증감이 보이고 EOSL 은 안 보이면, 늘어난 서버가
+    // 어느 연도에 걸렸는지 알 수 없다.
+    const delta = (eosl.delta || {})[key] || {};
     const cells = columns.slice(0, -1).map(c => {
       const count = Number(row.counts[c] || 0);
       const text = count.toLocaleString();
-      if (!count) return `<td>${text}</td>`;
+      const change = deltaLink(delta[c], {eosl: c, kind}, `EOSL ${c} · ${row.label}`);
+      if (!count) return `<td>${text}${change}</td>`;
       const filter = JSON.stringify({eosl: c, kind, state: 'included'}).replace(/"/g, '&quot;');
-      return `<td><a href="javascript:void(0)" onclick="openAssetBrowser(${filter},'EOSL ${syncEscape(c)} · ${syncEscape(row.label)} ${text}대')">${text}</a></td>`;
+      return `<td><a href="javascript:void(0)" onclick="openAssetBrowser(${filter},'EOSL ${syncEscape(c)} · ${syncEscape(row.label)} ${text}대')">${text}</a>${change}</td>`;
     }).join('');
     const unused = Number(row.counts['미사용'] || 0);
     const totalFilter = JSON.stringify({kind, state: 'included'}).replace(/"/g, '&quot;');
+    const totalChange = deltaLink(delta['전체'], {kind}, `${row.label} 전체`);
     return `<tr><td><strong>${syncEscape(row.label)}</strong></td>
-      <td><strong><a href="javascript:void(0)" onclick="openAssetBrowser(${totalFilter},'${syncEscape(row.label)} 전체')">${Number(row.total).toLocaleString()}</a></strong></td>${cells}
+      <td><strong><a href="javascript:void(0)" onclick="openAssetBrowser(${totalFilter},'${syncEscape(row.label)} 전체')">${Number(row.total).toLocaleString()}</a></strong>${totalChange}</td>${cells}
       <td>${unused ? `미사용 ${unused}대` : ''}</td></tr>`;
   }).join('');
   element.innerHTML = head + `<tbody>${rows}</tbody>`;
@@ -250,7 +458,11 @@ async function loadMonthlyCheck() {
   renderStatusTable('monthly-server-all', res.all.table, res.all.delta, '물리 + 논리 소계');
   renderStatusTable('monthly-server-physical', res.physical.table, res.physical.delta, '물리 소계');
   renderMovements(res.movements);
+  monthlyMovements = res.movements || null;
+  renderMovementItems();
   renderEosl(res.eosl);
+  // 대수가 서로 맞는지 따로 확인한다. 표를 다 그린 뒤라 느려도 화면이 안 막힌다.
+  loadCountAudit(month);
 
   // 기준을 드러낸다. 대수가 ITSM 과 다를 때 어느 쪽이 틀렸는지 따질 수 있어야 한다.
   const criteria = res.criteria;

@@ -638,6 +638,16 @@ class VMResourceUsageExportService:
 
     @staticmethod
     def _recount_hosts(hosts: list[dict[str, Any]], vms: list[dict[str, Any]]) -> None:
+        """통합기의 VM 대수를 **지금 걸러낸 목록에서** 다시 센다.
+
+        저장된 수는 수집 당시의 수다. 그 뒤에 VM 을 자산에서 빼면 목록은 줄지만
+        저장된 수는 그대로다. 예전에는 '세어 본 값이 있을 때만' 덮어써서, 어느
+        통합기의 VM 이 전부 빠지면 그 통합기만 옛 수를 들고 있었다. 그러면 통합기
+        표의 합이 아래 VM 목록의 줄 수보다 커진다 -- 실제로 그랬다.
+
+        그래서 세어 본 값이 없으면 0 으로 적는다. 0 이 맞는 값이다. 대신 저장된
+        수를 ``stored_vm_count`` 로 남겨, 수집 자체가 비었을 때 따져볼 수 있게 한다.
+        """
         counted: dict[tuple[str, str], int] = defaultdict(int)
         for vm in vms:
             if str(vm.get("inventory_status") or "CURRENT") != "CURRENT":
@@ -645,8 +655,8 @@ class VMResourceUsageExportService:
             counted[(str(vm.get("vcenter_id") or ""), str(vm.get("esxi_host") or ""))] += 1
         for row in hosts:
             key = (str(row.get("vcenter_id") or ""), str(row.get("esxi_host") or ""))
-            if key in counted:
-                row["vm_count"] = counted[key]
+            row["stored_vm_count"] = row.get("vm_count")
+            row["vm_count"] = counted.get(key, 0)
 
     def _apply_allocation(self, hosts: list[dict[str, Any]], vms: list[dict[str, Any]]) -> None:
         """통합기별 VM 할당량과 할당률을 붙인다.

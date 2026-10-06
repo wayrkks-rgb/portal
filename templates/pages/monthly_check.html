@@ -117,6 +117,30 @@
     <div class="tab-panel active" id="monthly-panel-server">
       <div class="card">
         <div class="flex justify-between items-center mb-4">
+          <div class="card-title" style="margin-bottom:0"><span class="icon">🧮</span> 대수 맞춤 (어디서 갈라지는지)</div>
+          <div class="flex gap-2 items-center">
+            <div class="text-xs text-muted" id="monthly-audit-basis"></div>
+            <button class="btn btn-secondary btn-sm" onclick="toggleCountAudit()" id="monthly-audit-toggle">자세히</button>
+          </div>
+        </div>
+        <div id="monthly-audit-verdict"></div>
+        <div id="monthly-audit-detail" hidden>
+          <div class="text-xs text-muted mb-4">
+            <strong>같아야 하는 것</strong>: 서버현황 표의 계 = 자산 대수 = EOSL 전체 수량.
+            이게 다르면 버그입니다.
+            <div style="margin-top:4px">
+              <strong>달라도 정상인 것</strong>: ITSM 자산 대수와 vCenter VM 대수는 애초에 다른 것을 셉니다.
+              통합기를 새로 붙이면 vCenter 쪽이 먼저 늘고, 통합서버 자원사용현황은 07시 배치가
+              한 번 돌아야 그 통합기를 봅니다.
+            </div>
+          </div>
+          <div class="table-wrap"><table id="monthly-audit-table"></table></div>
+          <div class="table-wrap mt-4"><table id="monthly-audit-sources"></table></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="flex justify-between items-center mb-4">
           <div class="card-title" style="margin-bottom:0"><span class="icon">🗄️</span> 서버현황 (전체 서버)</div>
           <button class="btn btn-secondary btn-sm" onclick="exportMonthly('server_all')">Excel</button>
           <div class="text-xs text-muted" id="monthly-server-basis"></div>
@@ -130,6 +154,21 @@
           <button class="btn btn-secondary btn-sm" onclick="exportMonthly('movements')">Excel</button>
         </div>
         <div id="monthly-movements"></div>
+        <div class="text-xs text-muted mb-4" style="margin-top:12px">
+          어느 서버가 늘거나 빠졌는지 한 줄씩 적습니다. 빼야 할 대상이면
+          <strong>[제외]</strong> 를 눌러 바로 자산에서 뺄 수 있고, 목록이 길면
+          <strong>[전체 보기]</strong> 에서 검색·엑셀·일괄 제외를 씁니다.
+        </div>
+        <div class="flex gap-2 items-center mb-4">
+          <button class="btn btn-secondary btn-sm" onclick="openMovementBrowser('created')">신규 전체 보기</button>
+          <button class="btn btn-secondary btn-sm" onclick="openMovementBrowser('removed')">삭제 전체 보기</button>
+          <input class="form-input" id="monthly-movement-search" style="width:220px"
+                 placeholder="호스트명·IP·업무명 검색" oninput="renderMovementItems()">
+          <span class="text-xs text-muted" id="monthly-movement-shown"></span>
+        </div>
+        <div class="table-wrap" style="max-height:420px;overflow:auto">
+          <table id="monthly-movement-items"></table>
+        </div>
       </div>
 
       <div class="card">

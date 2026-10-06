@@ -296,3 +296,32 @@ def test_the_screens_show_both_numbers() -> None:
     report_js = (ROOT / "templates" / "partials" / "js" / "dashboard.html").read_text(encoding="utf-8")
     assert 'id="resource-datastore-body"' in report
     assert "resource-datastore-body" in report_js
+
+
+def test_the_host_vm_count_always_matches_the_vm_list(tmp_path: Path) -> None:
+    """통합기 표의 VM 합은 아래 VM 목록의 줄 수와 같아야 한다.
+
+    저장된 수는 수집 당시의 수다. 그 뒤에 VM 을 자산에서 빼면 목록은 줄지만
+    저장된 수는 그대로다. 어느 통합기의 VM 이 **전부** 빠지면 예전에는 그
+    통합기만 옛 수를 들고 있어서, 표의 합이 목록보다 컸다.
+    """
+    cfg, manager = _service(tmp_path)
+    with manager.connect() as conn:
+        run = _run(conn)
+        _host(conn, run, "esxi-01")
+        _host(conn, run, "esxi-02")
+        # 수집 당시 esxi-01 에 3대, esxi-02 에 1대였다고 저장해 둔다.
+        conn.execute("UPDATE host_resource_usage_daily SET vm_count=3 WHERE esxi_host='esxi-01'")
+        conn.execute("UPDATE host_resource_usage_daily SET vm_count=1 WHERE esxi_host='esxi-02'")
+        # 지금 남아 있는 VM 은 esxi-02 의 1대뿐이다(esxi-01 의 3대는 전부 제외됨).
+        _vm(conn, run, "vm-live", esxi="esxi-02", provisioned_mb=10 * GB, used_mb=5 * GB)
+        conn.commit()
+        result = VMResourceUsageExportService(cfg, AssetRepository(conn)).summary(STAT_DATE, STAT_DATE)
+
+    hosts = {row["esxi_host"]: row for row in result["hosts"]}
+    assert hosts["esxi-01"]["vm_count"] == 0, "VM 이 전부 빠진 통합기는 0 이어야 한다"
+    assert hosts["esxi-01"]["stored_vm_count"] == 3, "저장된 수는 따져볼 수 있게 남긴다"
+    assert hosts["esxi-02"]["vm_count"] == 1
+    assert sum(h["vm_count"] for h in result["hosts"]) == len(result["vms"])
+    # 클러스터 합계도 같은 수를 써야 한다.
+    assert sum(c["vm_count"] for c in result["clusters"]) == len(result["vms"])

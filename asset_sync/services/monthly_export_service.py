@@ -138,6 +138,31 @@ class MonthlyCheckExportService:
                             sheet.append([label, area, kind, os_name, int(count)])
             sheet.append([label, "합계", "", "", int(block.get("total") or 0)])
             sheet.cell(row=sheet.max_row, column=5).font = Font(bold=True)
+
+        # 대수만 적으면 "8대 늘었다" 는 알아도 어느 서버인지 모른다. 그러면 그걸
+        # 자산에서 빼야 하는지 둬야 하는지 판단할 수 없다. 한 줄씩 붙인다.
+        items = [
+            (label, item)
+            for key, label in (("created", "신규 생성"), ("removed", "삭제"))
+            for item in ((movements.get(key) or {}).get("items") or [])
+        ]
+        if items:
+            sheet.append([])
+            sheet.append(["변동 대상 목록"])
+            sheet.cell(row=sheet.max_row, column=1).font = Font(bold=True, size=12)
+            columns = [
+                ("구분", None), ("자산번호", "cm_id"), ("호스트명", "hostname"),
+                ("IP", "primary_ip"), ("업무명", "service_name"), ("위치", "location"),
+                ("물리/논리", "kind"), ("OS 묶음", "os_group"), ("OS", "os_family"),
+                ("OS 버전", "os_version"), ("EOSL 연도", "eosl_year"),
+                ("EOSL 원본값", "eosl_value"), ("상태", "status_label"),
+            ]
+            sheet.append([name for name, _ in columns])
+            _style_header(sheet, sheet.max_row)
+            for label, item in items:
+                sheet.append([
+                    label if key is None else item.get(key) for _, key in columns
+                ])
         _fit(sheet)
 
     def _write_eosl(self, sheet: Any) -> None:

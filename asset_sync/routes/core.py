@@ -16,7 +16,8 @@ from ..config import AppConfig
 from ..db.manager import DatabaseManager
 from ..repositories import AssetRepository
 from ..services import (
-    AutomatedReportService, ChangeSyncService, DailyComparisonService, DashboardService, ExportService,
+    AutomatedReportService, ChangeSyncService, CountAuditService, DailyComparisonService,
+    DashboardService, ExportService,
     IntegratedDashboardService, PeriodService, ReconciliationExceptionService,
     MONTHLY_SECTIONS, MonthlyCheckExportService,
     ReconciliationService, ServerStatusService, VMResourceUsageExportService, present_all,
@@ -134,8 +135,9 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         previous_day = base_day.replace(day=1) - timedelta(days=1)
         previous = repo.snapshot_on_or_before("ITSM", previous_day.isoformat())
         service = ServerStatusService(cfg, repo, include_all=_include_all())
-        result = service.status(int(current["id"]), int(previous["id"]) if previous else None)
-        result["eosl"] = service.eosl(int(current["id"]))
+        previous_id = int(previous["id"]) if previous else None
+        result = service.status(int(current["id"]), previous_id)
+        result["eosl"] = service.eosl(int(current["id"]), previous_snapshot_id=previous_id)
         if previous:
             result["movements"] = service.movements(int(current["id"]), int(previous["id"]))
         result.update({
@@ -162,6 +164,24 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
                 "message": "해당 기간까지의 ITSM 스냅샷이 없습니다. 수집을 먼저 실행하세요.",
             })
         return jsonify(result)
+
+    @bp.route("/api/asset-sync/count-audit")
+    @login_required
+    def count_audit() -> Any:
+        """대수가 안 맞을 때 어디서 갈라지는지 한 자리에서 본다.
+
+        같아야 하는 쌍(서버 현황 표의 계 = 자산 대수 = EOSL 전체 수량)은 직접
+        견주고, 달라도 정상인 것(ITSM 자산 vs vCenter VM)은 왜 다른지 적는다.
+        통합기를 새로 붙인 뒤 배치가 아직 안 돌았으면 그 사실도 짚어 준다.
+        """
+        try:
+            base_day = _month_end(request.args.get("month"))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        with manager.connect() as conn:
+            return jsonify(CountAuditService(
+                cfg, AssetRepository(conn), include_all=_include_all()
+            ).audit(base_day))
 
     @bp.route("/api/asset-sync/server-status/export")
     @login_required
@@ -258,6 +278,8 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         state = str(request.args.get("state") or "").strip().lower()    # included | excluded
         # EOSL 표의 열 이름("2028년 이상", "계획 없음"). 표의 숫자를 눌렀을 때 쓴다.
         eosl_bucket = str(request.args.get("eosl") or "").strip()
+        # 전월 대비 증감(+8)을 눌렀을 때. created = 이번에 생긴 것, removed = 빠진 것.
+        change = str(request.args.get("change") or "").strip().lower()
 
         repo = AssetRepository(conn)
         snapshot = repo.snapshot_on_or_before("ITSM", base_day.isoformat())
@@ -266,6 +288,32 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         # 목록은 제외된 것도 함께 보여야 한다. 제외 사유를 달고 나온다.
         service = ServerStatusService(cfg, repo, include_all=True)
         rows = service.records(int(snapshot["id"]))
+
+        # 증감을 보려면 전월 말일까지의 마지막 스냅샷과 견준다. 월간 점검 표가
+        # 쓰는 것과 **같은 기준**이어야 표의 (+8) 과 목록의 줄 수가 맞는다.
+        change_note = ""
+        if change in {"created", "removed"}:
+            previous_day = base_day.replace(day=1) - timedelta(days=1)
+            previous = repo.snapshot_on_or_before("ITSM", previous_day.isoformat())
+            if not previous:
+                rows = []
+                change_note = "비교할 전월 스냅샷이 없습니다."
+            else:
+                before = service.records(int(previous["id"]))
+                # 자산으로 세는 것만 견준다. 제외된 것이 섞이면 표의 증감과 달라진다.
+                now_ids = {r["cm_id"] for r in rows if not r.get("exclude_reason")}
+                before_ids = {r["cm_id"] for r in before if not r.get("exclude_reason")}
+                if change == "created":
+                    rows = [r for r in rows
+                            if not r.get("exclude_reason") and r["cm_id"] not in before_ids]
+                else:
+                    # 빠진 것은 이번 스냅샷에 없다. 전월 자료에서 꺼내야 한다.
+                    rows = [r for r in before
+                            if not r.get("exclude_reason") and r["cm_id"] not in now_ids]
+                change_note = (
+                    f"{previous['snapshot_date']} → {snapshot['snapshot_date']} "
+                    + ("신규" if change == "created" else "삭제")
+                )
 
         def keep(item: dict[str, Any]) -> bool:
             if wanted_os and item.get("os_group") != wanted_os:
@@ -300,6 +348,8 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
             "base_day": base_day,
             "snapshot_total": len(rows),
             "criteria": service.describe_criteria(),
+            "change": change or None,
+            "change_note": change_note or None,
         }
 
     @bp.route("/api/asset-sync/assets")
@@ -336,6 +386,9 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
             "items": items,
             "criteria": meta["criteria"],
             "scope": meta.get("scope"),
+            # 증감을 눌러 들어온 목록이면 무엇과 견준 것인지 적는다.
+            "change": meta.get("change"),
+            "change_note": meta.get("change_note"),
         })
 
     @bp.route("/api/asset-sync/assets/export")
