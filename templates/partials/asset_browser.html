@@ -51,6 +51,11 @@
           <span class="mono">제외 / 포함 / 자동</span> 을 적고(엑셀에서 고를 수 있습니다)
           그대로 다시 올리면 한 번에 적용됩니다.
           <span class="text-muted">[처리] 칸을 비워 두고 올리면 아래에서 고른 처리가 전체에 적용됩니다.</span>
+          <div style="margin-top:4px">
+            <strong>값 보정도 같은 파일로</strong> — 초록 머리글(ITSM 원본 컬럼) 칸에 값을 적으면 그 값으로 보정됩니다.
+            ITSM 에 EOSL 이 비어 '미사용' 으로 잡히는 자산은 <span class="mono">CM_EOL_DT</span> 칸에 날짜를 적으세요.
+            <span class="text-muted">파란 머리글(계산값)은 고쳐도 반영되지 않습니다.</span>
+          </div>
         </div>
         <div class="flex gap-2 items-center" style="flex-wrap:wrap">
           <input type="file" id="asset-bulk-file" accept=".xlsx,.xlsm,.csv,.tsv"

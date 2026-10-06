@@ -19,6 +19,7 @@ from typing import Any
 
 from .asset_scope import (
     LOCATIONS,
+    load_itsm_records,
     LOGICAL_CATEGORY,
     NO_PLAN_YEAR,
     OTHER_GROUP,
@@ -44,19 +45,21 @@ class ServerStatusService:
         self.criteria = self.scope.criteria
         self.include_all = include_all
 
+    def load_records(self, snapshot_id: int) -> list[dict[str, Any]]:
+        """사람이 고친 값(보정)을 반영한 레코드. 집계는 모두 이것을 쓴다."""
+        return load_itsm_records(self.config, self.repo, snapshot_id)
+
     # ── 대상 고르기 ─────────────────────────────────────────────────────
     def select(self, snapshot_id: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """(집계 대상, 제외 대상). 제외한 것도 화면에 보여야 하므로 함께 돌려준다."""
-        records = self.repo.load_itsm_records(snapshot_id).values()
-        return self.scope.split_itsm(records)
+        return self.scope.split_itsm(self.load_records(snapshot_id))
 
     def records(self, snapshot_id: int) -> list[dict[str, Any]]:
         """한 건씩 펼친 전체 목록. 제외된 것도 사유를 달고 들어 있다.
 
         화면에서 OS·위치를 눌러 그 대수의 실물이 무엇인지 볼 때 쓴다.
         """
-        records = self.repo.load_itsm_records(snapshot_id).values()
-        return [self.scope.describe_itsm(record) for record in records]
+        return [self.scope.describe_itsm(record) for record in self.load_records(snapshot_id)]
 
     # ── 서버 현황 ───────────────────────────────────────────────────────
     def _table(self, items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -100,7 +103,7 @@ class ServerStatusService:
 
         all_table = self._table(included)
         physical_table = self._table(physical)
-        records = list(self.repo.load_itsm_records(snapshot_id).values())
+        records = self.load_records(snapshot_id)
         return {
             "criteria": self.describe_criteria(),
             "counts": {"selected": len(included), "excluded": len(excluded), "physical": len(physical)},

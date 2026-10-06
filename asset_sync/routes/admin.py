@@ -164,8 +164,19 @@ def create_admin_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprin
         target = cfg.resolve("data/temp/asset_exclusion_upload") / Path(upload.filename).name
         target.parent.mkdir(parents=True, exist_ok=True)
         upload.save(target)
+        # 엑셀에서 원본 컬럼을 고쳐 올릴 수 있다. 무엇이 바뀌었는지 견주려면
+        # 지금 저장된 값이 필요하다.
+        current_values: dict[str, Any] = {}
+        if source == "ITSM":
+            with manager.connect() as conn:
+                repo = AssetRepository(conn)
+                snapshot = repo.latest_snapshot("ITSM")
+                if snapshot:
+                    current_values = asset_scope.current_raw_values(
+                        cfg, repo, int(snapshot["id"])
+                    )
         try:
-            parsed = asset_scope.read_bulk_sheet(target, default_mode)
+            parsed = asset_scope.read_bulk_sheet(target, default_mode, current_values)
         except asset_scope.AssetScopeError as exc:
             return jsonify({"success": False, "error": str(exc)}), 400
         except Exception as exc:
@@ -189,15 +200,20 @@ def create_admin_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprin
                 "parsed": parsed,
             }), 400
 
-        if not parsed["items"] and not parsed["counts"]["unknown"]:
-            return jsonify({
-                "success": False,
-                "error": (
-                    "적용할 줄이 없습니다. [처리] 칸에 제외/포함/자동 을 적거나,"
-                    " 화면에서 처리 방법을 고른 뒤 다시 올리세요."
-                ),
-                "parsed": parsed,
-            }), 400
+        if (not parsed["items"] and not parsed["counts"]["unknown"]
+                and not parsed["counts"].get("corrections")):
+            message = (
+                "적용할 줄이 없습니다. [처리] 칸에 제외/포함/자동 을 적거나,"
+                " 원본 컬럼(초록 머리글)에 값을 적은 뒤 다시 올리세요."
+            )
+            if parsed["counts"].get("ignored_edits"):
+                columns = sorted({item["column"] for item in parsed.get("ignored_edits") or []})
+                message = (
+                    "고친 칸이 계산값 열입니다(" + ", ".join(columns) + ")."
+                    " 계산값은 고쳐도 반영되지 않습니다."
+                    " EOSL 을 채우려면 원본 컬럼 칸(CM_EOL_DT 등)에 날짜를 적으세요."
+                )
+            return jsonify({"success": False, "error": message, "parsed": parsed}), 400
 
         with manager.connect() as conn:
             repo = AssetRepository(conn)
@@ -224,10 +240,17 @@ def create_admin_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprin
             result = asset_scope.apply_bulk(
                 repo, source, parsed["items"], reason=reason, updated_by=user
             )
+            # 원본 컬럼을 고친 것은 보정으로 저장한다. 수집 결과는 건드리지 않아
+            # 다시 수집해도 남는다.
+            if parsed.get("corrections"):
+                result["corrections"] = asset_scope.apply_corrections(
+                    repo, parsed["corrections"], reason=reason, updated_by=user
+                )
             repo.audit(
                 user, "ASSET_EXCLUSION_BULK", "asset_exclusion", source, reason,
                 None, {"file": upload.filename, "counts": parsed["counts"],
-                       "applied": result["applied"]},
+                       "applied": result["applied"],
+                       "corrections": result.get("corrections")},
                 module_id=MODULE_ID,
             )
             conn.commit()

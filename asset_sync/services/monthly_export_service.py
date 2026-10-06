@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Protection, Side
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
 
@@ -300,7 +300,7 @@ class MonthlyCheckExportService:
             cell.font = Font(bold=True, color="FFFFFF")
             cell.alignment = Alignment(horizontal="center")
             cell.border = _BORDER
-            lower = sheet.cell(row=name_row, column=index, value="(집계값)")
+            lower = sheet.cell(row=name_row, column=index, value="(계산값·수정불가)")
             lower.fill = _SUB_FILL
             lower.font = Font(size=9, color="333333")
             lower.alignment = Alignment(horizontal="center")
@@ -343,6 +343,22 @@ class MonthlyCheckExportService:
                     value = json.dumps(value, ensure_ascii=False)
                 sheet.cell(row=line, column=index, value="" if value is None else value)
 
+        # 계산값 열은 엑셀에서 아예 못 고치게 잠근다. 고친 뒤 "왜 반영이 안 되지"
+        # 를 묻는 것보다, 고치는 순간 엑셀이 막아 주는 쪽이 낫다. 고쳐야 하는 칸
+        # (처리·제외 사유·원본 컬럼)만 열어 둔다.
+        editable = Protection(locked=False)
+        for line_number in range(name_row + 1, max(line, name_row) + 1):
+            for index in range(1, edits + 1):
+                sheet.cell(row=line_number, column=index).protection = editable
+            for index in range(offset + 1, offset + len(raw_columns) + 1):
+                sheet.cell(row=line_number, column=index).protection = editable
+        sheet.protection.sheet = True
+        # 잠그더라도 정렬·필터는 되어야 한다. 그걸 막으면 쓸 수가 없다.
+        sheet.protection.autoFilter = False
+        sheet.protection.sort = False
+        sheet.protection.formatColumns = False
+        sheet.protection.formatRows = False
+
         sheet.freeze_panes = f"C{name_row + 1}"
         last = get_column_letter(offset + len(raw_columns)) if raw_columns else get_column_letter(offset)
         if line > name_row:
@@ -359,8 +375,11 @@ class MonthlyCheckExportService:
             choices.add(f"A{name_row + 1}:A{line}")
         # 쓰는 법을 파일 안에 적어 둔다. 설명을 따로 찾지 않아도 되게.
         sheet["A3"] = (
-            "▶ [처리] 칸에 제외 / 포함 / 자동 을 적고(또는 골라) 이 파일을 그대로 다시 올리면"
-            " 한 번에 적용됩니다. 비워 두면 그대로 둡니다. [제외 사유] 는 선택입니다."
+            "▶ 고칠 수 있는 칸은 두 종류입니다. ①주황 머리글 [처리]·[제외 사유]"
+            " ②초록 머리글(ITSM 원본 컬럼) -- 여기에 값을 적으면 그 값으로 보정됩니다"
+            " (예: CM_EOL_DT 가 비어 있으면 2031-12-31 로 채워 넣기)."
+            "  파란 머리글(계산값)은 계산 결과라 잠겨 있습니다."
+            "  채운 뒤 이 파일을 그대로 다시 올리면 됩니다."
         )
         sheet["A3"].font = Font(size=10, bold=True, color="C55A11")
         _fit(sheet)

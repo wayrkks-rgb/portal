@@ -9,6 +9,7 @@ from ..normalization.code_maps import ASSET_STATUS, ENVIRONMENT, SERVER_CATEGORY
 from ..repositories import AssetRepository
 from .asset_scope import (
     ACTIVE_STATUS as SCOPE_ACTIVE_STATUS,
+    load_itsm_records,
     location as scope_location,
     LOGICAL_CATEGORY,
     NO_PLAN_YEAR,
@@ -73,8 +74,9 @@ class IntegratedDashboardService:
         원본(raw)까지 읽는다. 설치 위치와 EOSL 은 원본 컬럼에만 있어서, 원본
         없이 판정하면 모든 자산이 같은 값으로 떨어진다 -- 실제로 그랬다.
         """
-        records = self.repo.load_itsm_records(snapshot_id).values()
-        included, _ = self.scope.split_itsm(records)
+        included, _ = self.scope.split_itsm(
+            load_itsm_records(self.scope.config, self.repo, snapshot_id)
+        )
         return included
 
     def _counting_basis(self, snapshot_id: int) -> dict[str, Any]:
@@ -83,7 +85,7 @@ class IntegratedDashboardService:
         ITSM 총 건수와 화면의 대수가 다를 때, 기준이 안 보이면 어느 쪽이 틀렸는지
         따질 수가 없다. 사유별 건수를 같이 돌려준다.
         """
-        records = list(self.repo.load_itsm_records(snapshot_id).values())
+        records = load_itsm_records(self.scope.config, self.repo, snapshot_id)
         basis = self.scope.summary(records)
         # 상태코드별 내역도 함께. 어느 상태가 몇 건 빠졌는지 바로 보여야 한다.
         included: Counter[str] = Counter()

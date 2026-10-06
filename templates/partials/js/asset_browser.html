@@ -246,6 +246,25 @@ function renderAssetBulk(data, applied) {
     + (lines.join(' · ') || '적용할 줄이 없습니다.')
     + ` <span class="text-muted">머리글 ${parsed.header_row || '?'}행 기준</span></div>`;
 
+  // 원본 컬럼을 고친 것은 보정으로 들어간다. 무엇이 어떻게 바뀌는지 보여 준다.
+  if (counts.corrections) {
+    const samples = (parsed.correction_samples || []).slice(0, 8)
+      .map(c => `${syncEscape(c.asset_key)} ${syncEscape(c.field)}: ${syncEscape(c.old || '(빔)')} → ${syncEscape(c.new || '(빔)')}`);
+    html += `<div class="alert alert-info" style="margin-bottom:6px">`
+      + `값 보정 <strong>${Number(counts.corrections).toLocaleString()}건</strong>`
+      + (applied ? ' 적용' : '')
+      + `<div class="text-xs" style="margin-top:4px">${samples.join('<br>')}`
+      + (counts.corrections > samples.length ? `<br>외 ${counts.corrections - samples.length}건` : '')
+      + `</div></div>`;
+  }
+  // 계산값 열을 고쳐도 반영되지 않는다. 그걸 모르면 "왜 안 되지" 가 된다.
+  if (counts.ignored_edits) {
+    const columns = [...new Set((parsed.ignored_edits || []).map(i => i.column))];
+    html += `<div class="text-error">· 계산값 열을 고치셨습니다(${columns.map(syncEscape).join(', ')}).`
+      + ` 계산값은 고쳐도 반영되지 않습니다. 초록 머리글(ITSM 원본 컬럼) 칸에 적으세요`
+      + ` — 예: EOSL 은 <span class="mono">CM_EOL_DT</span> 칸.</div>`;
+  }
+
   // 넘어간 줄은 반드시 알려 준다. 몇 건이 왜 빠졌는지 모르면 더 나쁘다.
   if (counts.blank) {
     html += `<div class="text-muted">· [처리] 칸이 빈 줄 ${Number(counts.blank).toLocaleString()}건은 그대로 두었습니다.`
@@ -282,8 +301,8 @@ async function previewAssetBulk() {
     return;
   }
   renderAssetBulk(data, false);
-  assetBulkReady = Number((data.parsed || {}).items ? data.parsed.items.length : 0) > 0
-    || Number((data.parsed.counts || {}).total || 0) > 0;
+  const counts = (data.parsed || {}).counts || {};
+  assetBulkReady = Number(counts.total || 0) > 0 || Number(counts.corrections || 0) > 0;
   button.disabled = !assetBulkReady;
 }
 

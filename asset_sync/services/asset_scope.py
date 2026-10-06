@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -77,6 +78,8 @@ REASON_LABELS = {
     "SYSTEM_VM": "vSphere 가 스스로 만드는 VM",
     "TEMPLATE": "템플릿 또는 SRM 자리표시자",
 }
+
+LOGGER = logging.getLogger(__name__)
 
 SOURCES = ("ITSM", "RVTOOLS")
 MODES = ("EXCLUDE", "INCLUDE")
@@ -297,10 +300,15 @@ class AssetScope:
     criteria: Criteria
     rules: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
     include_all: bool = False
+    #: 보정값을 반영할 때 필요하다. 없으면 기본 기준으로 돈다.
+    config: Any = None
 
     @classmethod
     def load(cls, config: Any, repository: Any, *, include_all: bool = False) -> "AssetScope":
-        return cls(criteria_from(config), load_rules(repository), include_all=include_all)
+        return cls(
+            criteria_from(config), load_rules(repository),
+            include_all=include_all, config=config,
+        )
 
     def rule_for(self, source: str, key: str) -> dict[str, Any] | None:
         return self.rules.get((str(source).upper(), str(key)))
@@ -479,6 +487,24 @@ class AssetScope:
 
 
 # ── 수동 규칙 읽고 쓰기 ──────────────────────────────────────────────────
+def load_itsm_records(config: Any, repository: Any, snapshot_id: int) -> list[dict[str, Any]]:
+    """집계에 쓸 ITSM 레코드. **사람이 고친 값(보정)을 반영한다.**
+
+    ITSM 에 값이 없어 빠지는 자산이 있다. EOSL 이 비어 있으면 '미사용' 으로 세는
+    것이 그 예다. 그때 사람이 값을 채워 넣으면 그게 집계에 반영되어야 한다.
+    예전에는 보정이 정합성·품질 화면에만 반영되고 서버 현황·대시보드에는 닿지
+    않아, 고쳐도 숫자가 그대로였다.
+    """
+    from .override_service import OverrideService
+
+    records = repository.load_itsm_records(snapshot_id)
+    try:
+        records = OverrideService(config, repository).apply(records)
+    except Exception:          # 표가 없거나 설정이 비어도 집계는 돌아야 한다
+        LOGGER.warning("자산 보정값을 반영하지 못했습니다.", exc_info=True)
+    return list(records.values())
+
+
 def load_rules(repository: Any) -> dict[tuple[str, str], dict[str, Any]]:
     """저장된 수동 제외·재포함 규칙. 표가 아직 없으면 빈 값이다."""
     try:
@@ -588,6 +614,18 @@ ACTION_WORDS: dict[str, str] = {
 ACTION_CHOICES = ("제외", "포함", "자동")
 
 
+def _header_text(value: Any) -> str:
+    """머리글을 맞춰 보기 좋게 다듬는다.
+
+    사람이 머리글에 별표나 설명을 덧붙여 놓는 일이 있다. 그래도 열을 찾아야
+    한다 -- 못 찾으면 파일 전체가 거절된다.
+    """
+    text = _cell_text(value).upper()
+    for noise in ("*", "ⓘ", "(필수)", "(선택)"):
+        text = text.replace(noise, "")
+    return text.strip()
+
+
 def _cell_text(value: Any) -> str:
     if value is None:
         return ""
@@ -604,7 +642,7 @@ def _find_header(rows: list[list[Any]]) -> tuple[int, dict[str, int]]:
     가정하지 않고 자산번호 열이 보이는 줄을 찾는다.
     """
     for index, row in enumerate(rows[:12]):
-        texts = [_cell_text(cell).upper() for cell in row]
+        texts = [_header_text(cell) for cell in row]
         if not any(text in {h.upper() for h in KEY_HEADERS} for text in texts):
             continue
         found: dict[str, int] = {}
@@ -676,7 +714,11 @@ def _sheet_rows(path: Any) -> list[list[Any]]:
     raise AssetScopeError("지원 파일은 XLSX, CSV, TSV 입니다.")
 
 
-def read_bulk_sheet(path: Any, default_mode: str = "") -> dict[str, Any]:
+#: 계산값 열의 아랫줄 표시. 이 열을 고쳐도 반영되지 않으므로 알려 줘야 한다.
+DERIVED_MARK = "계산값"
+
+
+def read_bulk_sheet(path: Any, default_mode: str = "", current: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """올린 파일을 읽어 (자산번호, 처리) 목록을 만든다.
 
     ``처리`` 열이 비어 있으면 ``default_mode`` 를 쓴다. 엑셀에서 걸러 남긴
@@ -696,29 +738,56 @@ def read_bulk_sheet(path: Any, default_mode: str = "") -> dict[str, Any]:
     action_at = columns.get("action")
     reason_at = columns.get("reason")
 
+    # 원본 컬럼(초록 머리글)에 값을 적으면 그 값으로 보정한다. 어느 열이 원본
+    # 컬럼인지는 머리글 아랫줄에 적힌 원래 이름으로 안다. 계산값 열은 고쳐도
+    # 반영되지 않으므로 따로 모아 알려 준다.
+    raw_at, derived_at = _value_columns(rows, header_index, set(columns.values()))
+
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
     unknown: list[dict[str, Any]] = []
     blank = 0
     duplicated: list[str] = []
+    corrections: list[dict[str, Any]] = []
+    ignored_edits: list[dict[str, Any]] = []
+    stored = dict(current or {})
 
     for line, row in enumerate(rows[header_index + 1:], start=header_index + 2):
         key = _cell_text(row[key_at] if key_at < len(row) else "")
-        # 머리글 두 줄짜리 파일의 둘째 줄("(집계값)" 등)은 자료가 아니다.
-        if not key or key.upper() in {h.upper() for h in KEY_HEADERS} or key.startswith("("):
+        # 머리글 두 줄짜리 파일의 둘째 줄("(계산값…)" 등)은 자료가 아니다.
+        if not key or _header_text(key) in {h.upper() for h in KEY_HEADERS} or key.startswith("("):
             continue
+        if key in seen:
+            duplicated.append(key)
+            continue
+        seen.add(key)
+
+        # ── 값 보정 ──
+        # 처리 칸과 무관하게 먼저 본다. 제외는 안 하고 값만 고치려는 경우가
+        # 대부분이다. 예전에는 처리 칸이 비면 줄 전체를 건너뛰어, 값을 적어도
+        # 아무 일도 일어나지 않았다.
+        before = (stored.get(key) or {}) if stored else {}
+        if stored:
+            for position, name in raw_at.items():
+                if position >= len(row):
+                    continue
+                value = _cell_text(row[position])
+                if value == _cell_text(before.get(name)):
+                    continue
+                corrections.append({
+                    "row": line, "asset_key": key, "field": name,
+                    "old": _cell_text(before.get(name)), "new": value,
+                })
+
+        # ── 제외·포함 처리 ──
         written = _cell_text(row[action_at]) if action_at is not None and action_at < len(row) else ""
-        mode = ACTION_WORDS.get(written.upper()) if written else default_mode
+        mode = ACTION_WORDS.get(_header_text(written)) if written else default_mode
         if written and mode is None:
             unknown.append({"row": line, "asset_key": key, "value": written})
             continue
         if not mode:
             blank += 1
             continue
-        if key in seen:
-            duplicated.append(key)
-            continue
-        seen.add(key)
         items.append({
             "asset_key": key,
             "mode": mode,
@@ -727,6 +796,8 @@ def read_bulk_sheet(path: Any, default_mode: str = "") -> dict[str, Any]:
 
     return {
         "items": items,
+        "corrections": corrections,
+        "ignored_edits": ignored_edits[:50],
         "looks_like": looks_like,
         "header_row": header_index + 1,
         "has_action_column": action_at is not None,
@@ -736,10 +807,118 @@ def read_bulk_sheet(path: Any, default_mode: str = "") -> dict[str, Any]:
             "blank": blank,
             "unknown": len(unknown),
             "duplicated": len(duplicated),
+            "corrections": len(corrections),
+            "ignored_edits": len(ignored_edits),
         },
         "unknown": unknown[:50],
         "duplicated": duplicated[:50],
+        "correction_samples": corrections[:50],
         "action_choices": list(ACTION_CHOICES),
+    }
+
+
+def _value_columns(
+    rows: list[list[Any]],
+    header_index: int,
+    taken: set[int],
+) -> tuple[dict[int, str], dict[int, str]]:
+    """({위치: 원본 컬럼명}, {위치: 계산값 열 이름}).
+
+    내보낸 파일은 머리글이 두 줄이다. 윗줄이 한글 이름, 아랫줄이 원래 컬럼명
+    이고, 계산값 열의 아랫줄에는 '계산값' 이 적혀 있다. 아랫줄이 없으면(직접
+    만든 파일) 보정할 열이 없는 것으로 본다 -- 어느 열이 원본인지 알 수 없다.
+    """
+    if header_index + 1 >= len(rows):
+        return {}, {}
+    labels = rows[header_index]
+    names = rows[header_index + 1]
+
+    # 우리가 내보낸 파일인지 한 번에 가린다. 계산값 표시가 한 칸이라도 있으면
+    # 머리글이 두 줄인 그 파일이다. 직접 만든 한 줄 머리글 파일에서는 어느 열이
+    # 원본 컬럼인지 알 수 없으므로 값 보정을 하지 않는다.
+    #
+    # 예전에는 열마다 "윗줄과 아랫줄이 같으면 한 줄 머리글" 로 봤는데, 한글
+    # 이름이 없는 원본 컬럼(CM_EOL_DT 등)은 윗줄에도 같은 이름이 적히므로 그
+    # 열이 통째로 빠졌다. 정작 고쳐야 할 EOSL 칸이 안 먹던 이유다.
+    if not any(DERIVED_MARK in _cell_text(cell) for cell in names):
+        return {}, {}
+
+    raw_at: dict[int, str] = {}
+    derived_at: dict[int, str] = {}
+    for position, cell in enumerate(names):
+        if position in taken:
+            continue
+        text = _cell_text(cell)
+        if not text:
+            continue
+        if DERIVED_MARK in text:
+            label = _cell_text(labels[position]) if position < len(labels) else ""
+            derived_at[position] = label or text
+            continue
+        raw_at[position] = text
+    return raw_at, derived_at
+
+
+def apply_corrections(
+    repository: Any,
+    corrections: Iterable[Mapping[str, Any]],
+    *,
+    reason: str = "",
+    updated_by: str = "",
+) -> dict[str, Any]:
+    """엑셀에서 고친 원본 값을 보정으로 저장한다.
+
+    수집 결과(스냅샷)는 건드리지 않는다. 다시 수집해도 보정은 남아야 하고,
+    원본이 나중에 제대로 들어오면 그때 지우면 된다. 관리자가 올린 것이므로
+    바로 적용(APPROVED)한다 -- 올린 사람이 곧 승인자다.
+    """
+    now = datetime.now()
+    applied = cleared = 0
+    for item in corrections:
+        cm_id = str(item.get("asset_key") or "").strip()
+        field = str(item.get("field") or "").strip()
+        if not cm_id or not field:
+            continue
+        value = str(item.get("new") or "").strip()
+        # 같은 자산·같은 항목의 예전 보정은 지운다. 쌓이면 어느 것이 적용되는지
+        # 알 수 없다.
+        repository.conn.execute(
+            "DELETE FROM manual_asset_override WHERE cm_id=? AND field_name=?",
+            (cm_id, field),
+        )
+        if not value:
+            # 값을 비웠으면 보정을 거둔다는 뜻이다. 원본 값으로 돌아간다.
+            cleared += 1
+            continue
+        repository.conn.execute(
+            "INSERT INTO manual_asset_override(cm_id, field_name, override_value, reason,"
+            " approval_status, created_by, created_at, approved_by, approved_at)"
+            " VALUES(?,?,?,?,'APPROVED',?,?,?,?)",
+            (cm_id, field, value, reason or "엑셀 일괄 보정",
+             updated_by or "unknown", now.isoformat(),
+             updated_by or "unknown", now.isoformat()),
+        )
+        applied += 1
+    repository.conn.commit()
+    return {"applied": applied, "cleared": cleared}
+
+
+def current_raw_values(config: Any, repository: Any, snapshot_id: int) -> dict[str, dict[str, Any]]:
+    """{자산번호: 원본 컬럼 값}. 엑셀에서 무엇이 바뀌었는지 견주는 기준이다.
+
+    보정이 이미 들어간 값과 견준다. 그래야 두 번째 업로드에서 같은 보정을 다시
+    쓰지 않는다.
+    """
+    from .override_service import OverrideService
+
+    records = repository.load_itsm_records(snapshot_id)
+    try:
+        records = OverrideService(config, repository).apply(records)
+    except Exception:
+        LOGGER.warning("보정 반영에 실패했습니다. 원본 값으로 견줍니다.", exc_info=True)
+    return {
+        str(key): dict(record.get("raw") or {})
+        for key, record in records.items()
     }
 
 

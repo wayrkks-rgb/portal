@@ -303,3 +303,143 @@ def test_what_is_already_excluded_is_marked_in_the_file(portal, tmp_path):
             break
     else:
         pytest.fail("CM0005 를 찾지 못했습니다")
+
+
+# ── 엑셀에서 값 자체를 고쳐 올리기 ───────────────────────────────────────
+def _raw_column(sheet, name: str) -> int:
+    return [cell.value for cell in sheet[5]].index(name) + 1
+
+
+def _label_column(sheet, name: str) -> int:
+    return [cell.value for cell in sheet[4]].index(name) + 1
+
+
+def test_the_computed_columns_are_locked_in_excel(portal, tmp_path):
+    """계산값은 고쳐도 반영되지 않는다. 그러니 애초에 못 고치게 잠근다.
+
+    고친 뒤 "왜 반영이 안 되지" 를 묻는 것보다 엑셀이 그 자리에서 막는 쪽이 낫다.
+    """
+    config, manager, snapshot_id = portal
+    path = export_list(config, manager, snapshot_id, tmp_path / "out")
+    sheet = load_workbook(path).active
+
+    assert sheet.protection.sheet is True, "시트가 잠겨 있지 않습니다"
+    # 고쳐야 하는 칸은 열려 있어야 한다.
+    for name in ("처리", "제외 사유"):
+        assert sheet.cell(row=6, column=_label_column(sheet, name)).protection.locked is False, name
+    assert sheet.cell(row=6, column=_raw_column(sheet, "CM_EOL_DT")).protection.locked is False
+    # 계산값 칸은 잠겨 있어야 한다.
+    assert sheet.cell(row=6, column=_label_column(sheet, "EOSL 연도")).protection.locked is True
+    # 잠갔더라도 정렬·필터는 되어야 한다. 막으면 쓸 수가 없다.
+    assert sheet.protection.autoFilter is False
+    assert sheet.protection.sort is False
+
+
+def test_filling_in_a_raw_column_becomes_a_correction(portal, tmp_path):
+    """ITSM 에 EOSL 이 없어 '미사용' 으로 잡히는 자산을 엑셀에서 채워 넣는다."""
+    from asset_sync.services.asset_scope import apply_corrections, current_raw_values
+
+    config, manager, snapshot_id = portal
+    path = export_list(config, manager, snapshot_id, tmp_path / "out")
+
+    with manager.connect() as conn:
+        current = current_raw_values(config, AssetRepository(conn), snapshot_id)
+
+    workbook = load_workbook(path)
+    sheet = workbook.active
+    column = _raw_column(sheet, "CM_EOL_DT")
+    keys = []
+    for line in range(6, 9):
+        sheet.cell(row=line, column=column, value="2032-06-30")
+        keys.append(sheet.cell(row=line, column=key_column(sheet)).value)
+    workbook.save(path)
+    workbook.close()
+
+    parsed = read_bulk_sheet(path, current=current)
+    assert parsed["counts"]["corrections"] == 3
+    assert {item["field"] for item in parsed["corrections"]} == {"CM_EOL_DT"}
+    assert {item["new"] for item in parsed["corrections"]} == {"2032-06-30"}
+    # 제외는 하지 않았다. 값만 고친 것이다.
+    assert parsed["counts"]["total"] == 0
+
+    with manager.connect() as conn:
+        repo = AssetRepository(conn)
+        result = apply_corrections(repo, parsed["corrections"], reason="담당자 확인", updated_by="admin")
+        assert result["applied"] == 3
+        # 보정은 수집 결과를 건드리지 않는다. 다시 수집해도 남아야 한다.
+        after = current_raw_values(config, repo, snapshot_id)
+    for key in keys:
+        assert after[key]["CM_EOL_DT"] == "2032-06-30"
+
+
+def test_the_same_file_twice_does_not_pile_up_corrections(portal, tmp_path):
+    """두 번째 업로드에서 같은 보정이 또 쌓이면 어느 것이 적용되는지 알 수 없다."""
+    from asset_sync.services.asset_scope import apply_corrections, current_raw_values
+
+    config, manager, snapshot_id = portal
+    path = export_list(config, manager, snapshot_id, tmp_path / "out")
+    workbook = load_workbook(path)
+    sheet = workbook.active
+    sheet.cell(row=6, column=_raw_column(sheet, "CM_EOL_DT"), value="2032-06-30")
+    workbook.save(path)
+    workbook.close()
+
+    with manager.connect() as conn:
+        repo = AssetRepository(conn)
+        first = read_bulk_sheet(path, current=current_raw_values(config, repo, snapshot_id))
+        apply_corrections(repo, first["corrections"], updated_by="admin")
+
+    with manager.connect() as conn:
+        repo = AssetRepository(conn)
+        second = read_bulk_sheet(path, current=current_raw_values(config, repo, snapshot_id))
+        assert second["counts"]["corrections"] == 0
+        rows = conn.execute("SELECT COUNT(*) AS n FROM manual_asset_override").fetchone()
+        assert dict(rows)["n"] == 1
+
+
+def test_clearing_a_corrected_value_takes_the_correction_back(portal, tmp_path):
+    from asset_sync.services.asset_scope import apply_corrections, current_raw_values
+
+    config, manager, snapshot_id = portal
+    path = export_list(config, manager, snapshot_id, tmp_path / "out")
+    workbook = load_workbook(path)
+    sheet = workbook.active
+    column = _raw_column(sheet, "CM_EOL_DT")
+    sheet.cell(row=6, column=column, value="2032-06-30")
+    workbook.save(path)
+    workbook.close()
+
+    with manager.connect() as conn:
+        repo = AssetRepository(conn)
+        apply_corrections(
+            repo, read_bulk_sheet(path, current=current_raw_values(config, repo, snapshot_id))["corrections"],
+            updated_by="admin")
+
+    # 이제 그 칸을 비워 다시 올리면 원래 값으로 돌아간다.
+    workbook = load_workbook(path)
+    sheet = workbook.active
+    # openpyxl 의 cell(value=None) 은 아무 일도 하지 않는다. 값을 직접 지운다.
+    sheet.cell(row=6, column=column).value = None
+    workbook.save(path)
+    workbook.close()
+
+    with manager.connect() as conn:
+        repo = AssetRepository(conn)
+        parsed = read_bulk_sheet(path, current=current_raw_values(config, repo, snapshot_id))
+        assert parsed["counts"]["corrections"] == 1
+        result = apply_corrections(repo, parsed["corrections"], updated_by="admin")
+        assert result["cleared"] == 1
+        left = conn.execute("SELECT COUNT(*) AS n FROM manual_asset_override").fetchone()
+        assert dict(left)["n"] == 0
+
+
+def test_a_hand_made_sheet_does_not_trigger_corrections(tmp_path):
+    """머리글이 한 줄이면 어느 열이 원본 컬럼인지 알 수 없다. 건드리지 않는다."""
+    path = tmp_path / "hand.csv"
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["CM_ID", "처리"])
+        writer.writerow(["CM0001", "제외"])
+    parsed = read_bulk_sheet(path, current={"CM0001": {"CM_EOL_DT": "2030-12-31"}})
+    assert parsed["counts"]["corrections"] == 0
+    assert parsed["counts"]["EXCLUDE"] == 1
