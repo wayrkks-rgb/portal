@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import logging
 import shutil
 from datetime import datetime
@@ -138,8 +139,14 @@ class CollectionService:
 
                 snapshot_service = SnapshotService(self.config, repo)
                 records, validation = snapshot_service.normalize_rvtools(raw)
-                baseline = self._check_baseline(repo, "RVTOOLS", len(records))
                 failed_scopes = list((collector_metadata or {}).get("failed_scopes", {}).keys())
+                success_scopes = list((collector_metadata or {}).get("success_scopes", []) or [])
+                # 통합기 일부가 실패하면 당연히 건수가 줄어든다. 그걸 '이상' 으로
+                # 보면 안 된다. 성공한 통합기끼리만 견준다.
+                baseline = self._check_baseline(
+                    repo, "RVTOOLS", len(records),
+                    scopes=success_scopes if failed_scopes else None,
+                )
                 status = (
                     "PARTIAL_SUCCESS"
                     if failed_scopes or baseline.get("warning") or baseline.get("critical")
@@ -402,11 +409,35 @@ class CollectionService:
             })
         return reasons
 
-    def _check_baseline(self, repo: AssetRepository, source: str, current_count: int) -> dict[str, Any]:
+    def _check_baseline(
+        self,
+        repo: AssetRepository,
+        source: str,
+        current_count: int,
+        scopes: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """건수가 전일보다 크게 줄었는지 본다.
+
+        ``scopes`` 를 주면 **그 통합기들만** 견준다. 통합기 10 대 중 3 대가
+        연결에 실패하면 건수는 당연히 줄어든다. 그걸 전체와 견주면 임계값 미만
+        으로 떨어져 '이상' 으로 판정되고, 그러면 변경 이벤트 생성이 보류되면서
+        성공한 통합기의 추가·삭제까지 화면에 안 나온다. 실제로 그랬다.
+        """
         previous = repo.latest_snapshot(source)
         if not previous or int(previous["record_count"]) <= 0:
             return {"status": "NO_BASELINE", "previous_count": None, "current_count": current_count, "warning": False, "critical": False}
         previous_count = int(previous["record_count"])
+        compared_scopes: list[str] | None = None
+        if source == "RVTOOLS" and scopes:
+            wanted = {str(name) for name in scopes}
+            counted = Counter(
+                str(record.get("vcenter") or "")
+                for record in repo.load_rv_records(int(previous["id"])).values()
+            )
+            restricted = sum(count for name, count in counted.items() if name in wanted)
+            if restricted > 0:
+                previous_count = restricted
+                compared_scopes = sorted(wanted)
         ratio = current_count / previous_count
         prefix = "rvtools" if source == "RVTOOLS" else "itsm"
         warning_ratio = float(self.config.quality.get(f"{prefix}_count_warning_ratio", 0.70))
@@ -420,4 +451,6 @@ class CollectionService:
             "ratio": ratio,
             "warning": warning,
             "critical": critical,
+            # 어느 통합기끼리 견줬는지. 숫자가 이상할 때 따질 수 있어야 한다.
+            "compared_scopes": compared_scopes,
         }

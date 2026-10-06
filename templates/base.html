@@ -183,6 +183,15 @@ th{background:var(--surface2);padding:10px 14px;text-align:left;color:var(--text
 td{padding:10px 14px;border-bottom:1px solid rgba(30,45,64,0.5);color:var(--text-dim);}
 tr:hover td{background:var(--surface2);color:var(--text);}
 tr:last-child td{border-bottom:none;}
+/* 줄이 수백 개인 표(통합기별 ESXi 등)에서 머리글이 따라오게 한다. */
+.table-sticky thead th{position:sticky;top:0;z-index:2;}
+.table-sticky thead tr:nth-child(2) th{top:34px;}
+/* 묶음 머리줄 = 합계, 그 아래가 낱개. 눈으로 바로 갈라져야 한다. */
+tr.row-group td{background:var(--surface2);color:var(--text);font-weight:600;
+  border-top:1px solid var(--border2);}
+tr.row-child td:first-child{padding-left:30px;}
+tr.row-total td{background:var(--surface2);color:var(--text);font-weight:700;
+  border-top:2px solid var(--border2);}
 
 /* ── 배지 ── */
 .badge{display:inline-flex;align-items:center;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;}

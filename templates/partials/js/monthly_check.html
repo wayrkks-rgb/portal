@@ -228,6 +228,8 @@ async function loadMonthlyCheck() {
   alertEl.innerHTML = '<div class="alert alert-info"><span class="loading"></span> 서버 현황 집계 중...</div>';
   // 통합서버 자원사용현황은 다른 표를 쓰므로 따로 받는다. 한쪽이 없어도 다른 쪽은 보인다.
   loadMonthlyIntegrated(month);
+  // 통합기 일부가 실패했으면 왜 대수가 적은지 알려준다.
+  showCollectionNotice('monthly-collection-notice', true);
   let res;
   try {
     res = await apiFetch('/api/asset-sync/server-status' + (month ? `?month=${month}` : ''));
@@ -297,6 +299,9 @@ function renderMonthlyExcluded(items, scope) {
 // 양식대로 전월과 당월을 한 줄에 놓고 비교한다. 자원은 "128C / 896G" 처럼 한 칸에
 // 적는다. 07시 배치가 쌓아 둔 일별 값을 그대로 쓰므로 여기서 새로 수집하지 않는다.
 const MONTHLY_CLUSTER_KEY = row => `${row.vcenter_id || ''}|${row.cluster_name || ''}`;
+// ESXi 한 대를 가리키는 키. 클러스터가 바뀌어도 호스트는 그대로이므로 클러스터는
+// 키에 넣지 않는다. 그래야 호스트가 다른 클러스터로 옮겨가도 전월과 이어진다.
+const MONTHLY_HOST_KEY = row => `${row.vcenter_id || ''}|${row.esxi_host || ''}`;
 
 function resourcePair(cores, memoryMb) {
   const core = cores == null ? '-' : `${Number(cores).toLocaleString()}C`;
@@ -318,14 +323,189 @@ function clusterLabel(row) {
     : `${syncEscape(name)}<div class="text-xs text-muted mono">${syncEscape(raw)}</div>`;
 }
 
-function renderMonthlyIntegrated(current, previous, range) {
-  const table = document.getElementById('monthly-integrated-table');
-  const rows = current.clusters || [];
-  const before = new Map((previous && previous.clusters || []).map(r => [MONTHLY_CLUSTER_KEY(r), r]));
+function hostLabel(row) {
+  const name = row.esxi_display_name || row.esxi_host || '(호스트 미상)';
+  const raw = row.esxi_host || '';
+  return name === raw ? `<span class="mono">${syncEscape(name)}</span>`
+    : `${syncEscape(name)}<div class="text-xs text-muted mono">${syncEscape(raw)}</div>`;
+}
 
+// 호스트 여러 대를 한 줄로 접는다. 클러스터 합계와 맨 아래 총계가 이걸 쓴다.
+// 서버가 내려준 클러스터 집계가 있으면 그걸 그대로 쓰고, 전월에만 있던 묶음처럼
+// 집계가 없을 때만 여기서 더한다.
+function monthlyFold(rows) {
+  if (!rows.length) return null;
+  const sum = key => rows.reduce((acc, r) => acc + Number(r[key] || 0), 0);
+  const peak = key => {
+    const values = rows.map(r => r[key]).filter(v => v != null).map(Number);
+    return values.length ? Math.max(...values) : null;
+  };
+  const mean = key => {
+    const values = rows.map(r => r[key]).filter(v => v != null).map(Number);
+    return values.length ? Math.round(values.reduce((a, b) => a + b, 0) / values.length * 10) / 10 : null;
+  };
+  const cpu = sum('allocated_cpu_cores');
+  const memory = sum('allocated_memory_mb');
+  const assignedCpu = sum('assigned_cpu_cores');
+  const assignedMemory = sum('assigned_memory_mb');
+  return {
+    vm_count: sum('vm_count'),
+    allocated_cpu_cores: cpu, allocated_memory_mb: memory,
+    assigned_cpu_cores: assignedCpu, assigned_memory_mb: assignedMemory,
+    cpu_alloc_pct: cpu ? Math.round(assignedCpu / cpu * 1000) / 10 : null,
+    mem_alloc_pct: memory ? Math.round(assignedMemory / memory * 1000) / 10 : null,
+    cpu_max_pct: peak('cpu_max_pct'), mem_max_pct: peak('mem_max_pct'),
+    cpu_avg_pct: mean('cpu_avg_pct'), mem_avg_pct: mean('mem_avg_pct'),
+  };
+}
+
+// 클러스터(통합기) 아래에 ESXi 를 매단 묶음 목록을 만든다. 당월에 없어진 호스트도
+// 전월 자료에서 끌어와 한 줄로 남긴다. 빠진 것을 안 보여주면 비교가 아니다.
+function monthlyIntegratedGroups(current, previous) {
+  const beforeHosts = new Map(((previous && previous.hosts) || []).map(r => [MONTHLY_HOST_KEY(r), r]));
+  const beforeClusters = new Map(((previous && previous.clusters) || []).map(r => [MONTHLY_CLUSTER_KEY(r), r]));
+  const groups = new Map();
+  const touch = row => {
+    const key = MONTHLY_CLUSTER_KEY(row);
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key, vcenter_id: row.vcenter_id, cluster_name: row.cluster_name,
+        cluster_display_name: row.cluster_display_name, service_name: row.service_name,
+        cluster: null, hosts: new Map(),
+      });
+    }
+    return groups.get(key);
+  };
+
+  ((current && current.hosts) || []).forEach(row => {
+    const key = MONTHLY_HOST_KEY(row);
+    touch(row).hosts.set(key, {now: row, old: beforeHosts.get(key) || null});
+  });
+  ((previous && previous.hosts) || []).forEach(row => {
+    const group = touch(row);
+    const key = MONTHLY_HOST_KEY(row);
+    if (!group.hosts.has(key)) group.hosts.set(key, {now: null, old: row});
+  });
+  ((current && current.clusters) || []).forEach(row => { touch(row).cluster = row; });
+
+  const list = [...groups.values()];
+  list.forEach(group => {
+    group.oldCluster = beforeClusters.get(group.key) || null;
+    group.rows = [...group.hosts.values()].sort((a, b) =>
+      String((a.now || a.old).esxi_host || '').localeCompare(String((b.now || b.old).esxi_host || '')));
+  });
+  list.sort((a, b) =>
+    String(a.service_name || '').localeCompare(String(b.service_name || ''))
+    || String(a.vcenter_id || '').localeCompare(String(b.vcenter_id || ''))
+    || String(a.cluster_name || '').localeCompare(String(b.cluster_name || '')));
+  return list;
+}
+
+function monthlyHostChanged(pair) {
+  if (!pair.now || !pair.old) return true;           // 새로 생겼거나 없어졌다
+  const differs = key => Number(pair.now[key] || 0) !== Number(pair.old[key] || 0);
+  return differs('vm_count') || differs('assigned_cpu_cores') || differs('assigned_memory_mb')
+    || differs('allocated_cpu_cores') || differs('allocated_memory_mb');
+}
+
+function monthlyIntegratedMatches(text, ...values) {
+  if (!text) return true;
+  return values.some(value => String(value || '').toLowerCase().includes(text));
+}
+
+// 줄 하나를 그린다. 이름 칸만 다르고 나머지 열은 클러스터 합계·ESXi·총계가 같다.
+function monthlyIntegratedRow(nameCell, vcenter, service, now, old, rowClass) {
+  const value = (row, key) => (row && row[key] != null) ? row[key] : null;
+  const pct = v => v == null ? '-' : `${Number(v).toLocaleString()}%`;
+  const vmNow = value(now, 'vm_count');
+  const vmOld = value(old, 'vm_count');
+  const delta = (vmNow != null && vmOld != null) ? Number(vmNow) - Number(vmOld) : 0;
+  return `<tr class="${rowClass}">
+    <td>${nameCell}</td>
+    <td class="text-xs mono">${syncEscape(vcenter || '-')}</td>
+    <td>${syncEscape(service || '-')}</td>
+    <td class="text-muted">${vmOld == null ? '-' : Number(vmOld).toLocaleString()}</td>
+    <td>${vmNow == null
+      ? '<span class="text-error">없음</span>'
+      : `<strong>${Number(vmNow).toLocaleString()}</strong>${delta ? deltaText(delta) : ''}`}</td>
+    <td>${now ? resourcePair(value(now, 'allocated_cpu_cores'), value(now, 'allocated_memory_mb')) : '-'}</td>
+    <td class="text-muted">${old ? resourcePair(value(old, 'assigned_cpu_cores'), value(old, 'assigned_memory_mb')) : '-'}</td>
+    <td>${now ? `<strong>${resourcePair(value(now, 'assigned_cpu_cores'), value(now, 'assigned_memory_mb'))}</strong>` : '-'}</td>
+    <td class="text-muted">${old ? allocationPair(value(old, 'cpu_alloc_pct'), value(old, 'mem_alloc_pct')) : '-'}</td>
+    <td>${now ? allocationPair(value(now, 'cpu_alloc_pct'), value(now, 'mem_alloc_pct')) : '-'}</td>
+    <td>${pct(value(now, 'cpu_max_pct'))} / ${pct(value(now, 'mem_max_pct'))}</td>
+    <td>${pct(value(now, 'cpu_avg_pct'))} / ${pct(value(now, 'mem_avg_pct'))}</td>
+  </tr>`;
+}
+
+// 화면이 다시 그려져야 할 때(검색어·접기·변경분만) 쓰려고 마지막 자료를 들고 있는다.
+let monthlyIntegratedState = null;
+
+function renderMonthlyIntegrated(current, previous, range) {
+  monthlyIntegratedState = {current, previous, range};
+  renderMonthlyIntegratedAgain();
+}
+
+function renderMonthlyIntegratedAgain() {
+  if (!monthlyIntegratedState) return;
+  const {current, previous, range} = monthlyIntegratedState;
+  const table = document.getElementById('monthly-integrated-table');
+  if (!table) return;
+  const search = (document.getElementById('monthly-integrated-search') || {}).value || '';
+  const text = search.trim().toLowerCase();
+  const foldOnly = !!(document.getElementById('monthly-integrated-fold') || {}).checked;
+  const changedOnly = !!(document.getElementById('monthly-integrated-changed') || {}).checked;
+
+  const groups = monthlyIntegratedGroups(current, previous);
+  const body = [];
+  let hostCount = 0;
+  let shownHosts = 0;
+  const shownNow = [];
+
+  groups.forEach(group => {
+    hostCount += group.rows.length;
+    const groupHit = monthlyIntegratedMatches(
+      text, group.cluster_name, group.cluster_display_name, group.service_name, group.vcenter_id);
+    let pairs = group.rows.filter(pair => {
+      const row = pair.now || pair.old;
+      return groupHit || monthlyIntegratedMatches(text, row.esxi_host, row.esxi_display_name);
+    });
+    if (changedOnly) pairs = pairs.filter(monthlyHostChanged);
+    if (!pairs.length) return;
+
+    const nowRows = pairs.map(p => p.now).filter(Boolean);
+    const oldRows = pairs.map(p => p.old).filter(Boolean);
+    // 검색이나 '변경분만' 으로 일부만 남았으면 남은 것만 더해야 표의 합이 맞는다.
+    const partial = pairs.length !== group.rows.length;
+    const nowTotal = (!partial && group.cluster) ? group.cluster : monthlyFold(nowRows);
+    const oldTotal = (!partial && group.oldCluster) ? group.oldCluster : monthlyFold(oldRows);
+    const header = `<strong>${clusterLabel(group)}</strong>`
+      + `<div class="text-xs text-muted">ESXi ${pairs.length.toLocaleString()}대`
+      + (partial ? ` / 전체 ${group.rows.length.toLocaleString()}대` : '') + '</div>';
+    body.push(monthlyIntegratedRow(
+      header, group.vcenter_id, group.service_name, nowTotal, oldTotal, 'row-group'));
+    if (!foldOnly) {
+      pairs.forEach(pair => {
+        const row = pair.now || pair.old;
+        body.push(monthlyIntegratedRow(
+          hostLabel(row), row.vcenter_id, row.service_name, pair.now, pair.old, 'row-child'));
+      });
+    }
+    shownHosts += pairs.length;
+    nowRows.forEach(row => shownNow.push(row));
+  });
+
+  const grand = monthlyFold(shownNow);
+  if (grand && body.length) {
+    body.push(monthlyIntegratedRow(
+      `<strong>합계</strong><div class="text-xs text-muted">ESXi ${shownHosts.toLocaleString()}대</div>`,
+      '', '', grand, null, 'row-total'));
+  }
+
+  table.className = 'table-sticky';
   table.innerHTML = `<thead>
     <tr>
-      <th rowspan="2">통합기</th><th rowspan="2">서비스명</th>
+      <th rowspan="2">클러스터 · ESXi</th><th rowspan="2">vCenter</th><th rowspan="2">서비스명</th>
       <th colspan="2">VM 대수</th>
       <th rowspan="2">실제 자원<div class="text-xs text-muted">C / G</div></th>
       <th colspan="2">VM 할당 (C / G)</th>
@@ -335,29 +515,23 @@ function renderMonthlyIntegrated(current, previous, range) {
     </tr>
     <tr><th>전월</th><th>당월</th><th>전월</th><th>당월</th><th>전월</th><th>당월</th></tr>
   </thead><tbody>${
-    rows.length ? rows.map(row => {
-      const old = before.get(MONTHLY_CLUSTER_KEY(row)) || {};
-      const vmDelta = Number(row.vm_count || 0) - Number(old.vm_count || 0);
-      return `<tr>
-        <td><strong>${clusterLabel(row)}</strong></td>
-        <td>${syncEscape(row.service_name || '-')}</td>
-        <td class="text-muted">${old.vm_count == null ? '-' : Number(old.vm_count).toLocaleString()}</td>
-        <td><strong>${Number(row.vm_count || 0).toLocaleString()}</strong>${deltaText(vmDelta)}</td>
-        <td>${resourcePair(row.allocated_cpu_cores, row.allocated_memory_mb)}</td>
-        <td class="text-muted">${old.assigned_cpu_cores == null ? '-' : resourcePair(old.assigned_cpu_cores, old.assigned_memory_mb)}</td>
-        <td><strong>${resourcePair(row.assigned_cpu_cores, row.assigned_memory_mb)}</strong></td>
-        <td class="text-muted">${old.cpu_alloc_pct == null && old.mem_alloc_pct == null ? '-' : allocationPair(old.cpu_alloc_pct, old.mem_alloc_pct)}</td>
-        <td>${allocationPair(row.cpu_alloc_pct, row.mem_alloc_pct)}</td>
-        <td>${row.cpu_max_pct == null ? '-' : Number(row.cpu_max_pct).toLocaleString() + '%'} / ${row.mem_max_pct == null ? '-' : Number(row.mem_max_pct).toLocaleString() + '%'}</td>
-        <td>${row.cpu_avg_pct == null ? '-' : Number(row.cpu_avg_pct).toLocaleString() + '%'} / ${row.mem_avg_pct == null ? '-' : Number(row.mem_avg_pct).toLocaleString() + '%'}</td>
-      </tr>`;
-    }).join('')
-    : '<tr><td colspan="11" style="text-align:center" class="text-muted">수집된 통합기 자원사용률이 없습니다. 07시 자동배치가 한 번은 돌아야 합니다.</td></tr>'
+    body.length ? body.join('')
+      : `<tr><td colspan="12" style="text-align:center" class="text-muted">${
+        hostCount ? '조건에 맞는 ESXi 가 없습니다.'
+          : '수집된 통합기 자원사용률이 없습니다. 07시 자동배치가 한 번은 돌아야 합니다.'
+      }</td></tr>`
   }</tbody>`;
 
+  const shownEl = document.getElementById('monthly-integrated-shown');
+  if (shownEl) {
+    shownEl.textContent = hostCount
+      ? `ESXi ${shownHosts.toLocaleString()} / ${hostCount.toLocaleString()}대 표시`
+      : '';
+  }
+  const previousHosts = ((previous && previous.hosts) || []).length;
   document.getElementById('monthly-integrated-basis').textContent =
-    `${range.start} ~ ${range.end} 집계 · 통합기 ${rows.length.toLocaleString()}개`
-    + (before.size ? ` · 전월 ${before.size.toLocaleString()}개와 비교` : ' · 비교할 전월 없음');
+    `${range.start} ~ ${range.end} 집계 · 클러스터 ${groups.length.toLocaleString()}개 · ESXi ${hostCount.toLocaleString()}대`
+    + (previousHosts ? ` · 전월 ESXi ${previousHosts.toLocaleString()}대와 비교` : ' · 비교할 전월 없음');
 }
 
 function renderMonthlyIntegratedMoves(current) {

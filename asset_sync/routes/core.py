@@ -385,6 +385,39 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         ]
         return "조건: " + (" · ".join(parts) if parts else "전체")
 
+    @bp.route("/api/asset-sync/collection-health")
+    @login_required
+    def collection_health() -> Any:
+        """마지막 배치가 어디까지 됐는지 한 덩어리로 돌려준다.
+
+        통합기 10 대 중 3 대가 실패하면 VM 대수는 당연히 줄어든다. 그걸 모르면
+        화면만 보고 "VM 60 대가 삭제됐다" 고 읽는다. 어느 통합기가 빠졌는지와
+        수집공백 건수를 어느 화면에서든 같은 모양으로 띄우기 위한 가벼운 주소다.
+        """
+        with manager.connect() as conn:
+            repo = AssetRepository(conn)
+            batch = repo.latest_daily_batch()
+            metadata = json.loads((batch or {}).get("metadata_json") or "{}")
+            payload: dict[str, Any] = {
+                "status": (batch or {}).get("status") or "NO_RUN",
+                "started_at": (batch or {}).get("started_at"),
+                "ended_at": (batch or {}).get("ended_at"),
+                "reasons": [
+                    item for item in (metadata.get("status_reasons") or [])
+                    if isinstance(item, dict)
+                ],
+                "scopes": {},
+            }
+            run = repo.latest_collection_run("RVTOOLS")
+            if run:
+                payload["scopes"] = {
+                    "status": run.get("status"),
+                    "collected_at": run.get("ended_at") or run.get("started_at"),
+                    "success": json.loads(run.get("success_scope_json") or "[]"),
+                    "failed": json.loads(run.get("failed_scope_json") or "[]"),
+                }
+            return jsonify(payload)
+
     @bp.route("/api/collection-runs")
     @bp.route("/api/asset-sync/collection-runs")
     @login_required

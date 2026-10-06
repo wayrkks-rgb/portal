@@ -13,6 +13,7 @@
   </div>
   <div class="content">
     <div id="monthly-alert"></div>
+    <div id="monthly-collection-notice"></div>
 
     <div class="tabs">
       <div class="tab" onclick="switchMonthlyTab('key_resource', this)">주요서버 자원 현황</div>
@@ -51,8 +52,24 @@
             더 뺄 것이 있으면 <strong>[VM 제외 관리]</strong> 에서 고르거나 엑셀로 한꺼번에 처리하세요.
             여기서 정한 것은 전월·당월 비교와 보고서에도 같이 적용됩니다.
           </div>
+          <div style="margin-top:4px">
+            줄은 <strong>ESXi 호스트 한 대</strong>가 하나입니다. 클러스터 합계 줄은 그 아래 호스트를 더한 값입니다.
+          </div>
         </div>
-        <div class="table-wrap"><table id="monthly-integrated-table"></table></div>
+        <div class="flex gap-2 items-center mb-4">
+          <input class="form-input" id="monthly-integrated-search" style="width:240px"
+                 placeholder="vCenter·클러스터·ESXi 검색" oninput="renderMonthlyIntegratedAgain()">
+          <label class="text-xs flex items-center gap-2">
+            <input type="checkbox" id="monthly-integrated-fold" onchange="renderMonthlyIntegratedAgain()">
+            클러스터 합계만 보기
+          </label>
+          <label class="text-xs flex items-center gap-2">
+            <input type="checkbox" id="monthly-integrated-changed" onchange="renderMonthlyIntegratedAgain()">
+            전월과 달라진 호스트만
+          </label>
+          <span class="text-xs text-muted" id="monthly-integrated-shown"></span>
+        </div>
+        <div class="table-wrap" style="max-height:620px;overflow:auto"><table id="monthly-integrated-table"></table></div>
       </div>
 
       <div class="card">

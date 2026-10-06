@@ -249,6 +249,14 @@ class AssetRepository:
             ],
         )
 
+    def latest_collection_run(self, source: str) -> dict[str, Any] | None:
+        """그 출처의 마지막 수집 기록. 어느 통합기가 빠졌는지 여기 들어 있다."""
+        row = self.conn.execute(
+            "SELECT * FROM collection_run WHERE source=? ORDER BY started_at DESC, id DESC LIMIT 1",
+            (source.upper(),),
+        ).fetchone()
+        return dict(row) if row else None
+
     def collection_runs(self, limit: int = 100) -> list[dict[str, Any]]:
         rows = self.conn.execute("SELECT * FROM collection_run ORDER BY started_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]

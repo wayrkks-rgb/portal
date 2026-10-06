@@ -17,6 +17,8 @@ async function loadDailyCheck() {
     renderDailyComposition(summary);
     renderDailyChanges('itsm', itsm);
     renderDailyChanges('vcenter', vcenter);
+    // 통합기 일부가 실패했으면 왜 대수가 적은지 여기서 알려준다.
+    showCollectionNotice('daily-collection-notice', true);
   } catch (error) {
     alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(error.message)}</div>`;
   }
@@ -84,7 +86,12 @@ function renderDailyChanges(key, result) {
   const counts = result.counts || {}, records = result.record_counts || {};
   badges.innerHTML = [['ADDED','신규','badge-green'], ['REMOVED','삭제','badge-red'],
                       ['CHANGED','변경','badge-yellow'], ['STATUS_CHANGED','상태변경','badge-blue']]
-    .map(([code, label, cls]) => `<span class="badge ${cls}">${label} ${counts[code] || 0}</span>`).join('');
+    .map(([code, label, cls]) => `<span class="badge ${cls}">${label} ${counts[code] || 0}</span>`).join('')
+    // 수집공백은 삭제가 아니다. 통합기 연결이 실패해 못 읽은 것이다. 0 이면 숨긴다.
+    + (Number(counts.COLLECTION_GAP || 0)
+      ? `<span class="badge badge-yellow" title="통합기 수집이 실패해 못 읽은 자산입니다. 삭제가 아닙니다.">`
+        + `수집공백 ${Number(counts.COLLECTION_GAP).toLocaleString()}</span>`
+      : '');
   basis.textContent = `${result.previous.snapshot_date} (${Number(records.previous || 0).toLocaleString()}건)`
     + ` → ${result.current.snapshot_date} (${Number(records.current || 0).toLocaleString()}건),`
     + ` 순증감 ${Number(records.net || 0).toLocaleString()}`;
@@ -151,6 +158,7 @@ async function loadWeeklyCheck() {
   }
   alertEl.innerHTML = '';
   renderWeekly(rows, monday);
+  showCollectionNotice('weekly-collection-notice');
 }
 
 // 생성·삭제로 세는 이벤트. 나머지는 변경으로 본다.
