@@ -374,6 +374,39 @@ function renderEoslDiagnosis(diagnosis, criteria) {
   holder.innerHTML = verdict + `<div class="text-xs text-muted">EOSL 값 출처${lines}</div>`;
 }
 
+// 보고자료에 그대로 붙일 장표 한 벌. 원본 추출(exportMonthly)과 다르다 --
+// 그쪽은 받아서 다시 거르는 용도이고, 이쪽은 장표 모양 그대로다.
+async function exportMonthlyReport() {
+  const alertEl = document.getElementById('monthly-alert');
+  const month = document.getElementById('monthly-month').value;
+  alertEl.innerHTML = '<div class="alert alert-info"><span class="loading"></span> 월간 보고서 생성 중...</div>';
+  let response;
+  try {
+    response = await fetch('/api/asset-sync/monthly-report' + (month ? `?month=${month}` : ''));
+  } catch (error) {
+    alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(error.message)}</div>`;
+    return;
+  }
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(data.error || 'HTTP ' + response.status)}</div>`;
+    return;
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const match = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+  link.href = url;
+  link.download = match ? decodeURIComponent(match[1]) : `월간보고_${month || ''}.xlsx`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  alertEl.innerHTML = '<div class="alert alert-success">✅ 월간 보고서를 내려받았습니다.'
+    + ' 시트 4장: 통합서버자원사용현황 · 통합기별 VM 상세 · 서버현황(전체) · 서버현황(물리)</div>';
+}
+
 // 화면에 보이는 장표를 그대로 엑셀로 받는다. 집계는 서버가 화면에 쓴 것과 같은
 // 계산을 쓰므로 화면과 파일의 숫자가 다를 수 없다.
 async function exportMonthly(section) {

@@ -8,7 +8,9 @@
     <div class="flex gap-2 items-center">
       <input class="form-input" type="month" id="monthly-month" style="width:150px" onchange="loadMonthlyCheck()">
       <button class="btn btn-secondary btn-sm" onclick="loadMonthlyCheck()">새로고침</button>
-      <button class="btn btn-primary btn-sm" onclick="exportMonthly('all')">전체 Excel</button>
+      <button class="btn btn-primary btn-sm" onclick="exportMonthlyReport()"
+              title="보고자료에 그대로 붙일 장표 4장">월간 보고서</button>
+      <button class="btn btn-secondary btn-sm" onclick="exportMonthly('all')">원본 Excel</button>
     </div>
   </div>
   <div class="content">

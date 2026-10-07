@@ -19,7 +19,7 @@ from ..services import (
     AutomatedReportService, ChangeSyncService, CountAuditService, DailyComparisonService,
     DashboardService, ExportService,
     IntegratedDashboardService, PeriodService, ReconciliationExceptionService,
-    MONTHLY_SECTIONS, MonthlyCheckExportService,
+    MONTHLY_SECTIONS, MonthlyCheckExportService, MonthlyReportService,
     ReconciliationService, ServerStatusService, VMResourceUsageExportService, present_all,
 )
 from ..services.asset_scope import AssetScope
@@ -212,6 +212,30 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
                 )
             except ValueError as exc:
                 return jsonify({"error": str(exc)}), 400
+        return send_file(path, as_attachment=True, download_name=path.name)
+
+    @bp.route("/api/asset-sync/monthly-report")
+    @login_required
+    def monthly_report() -> Any:
+        """월간 보고 장표 한 벌. 보고자료에 그대로 붙일 모양으로 낸다.
+
+        시트 네 장: 통합서버자원사용현황(전월·당월), 통합기별 VM 상세,
+        서버현황 대시보드(전체), 서버현황 대시보드(물리).
+        """
+        try:
+            base_day = _month_end(request.args.get("month"))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        with manager.connect() as conn:
+            service = MonthlyReportService(
+                cfg, AssetRepository(conn), include_all=_include_all()
+            )
+            workbook = service.build(base_day)
+            target = cfg.resolve("data/export/monthly_report")
+            target.mkdir(parents=True, exist_ok=True)
+            path = target / service.file_name(base_day)
+            workbook.save(path)
+            workbook.close()
         return send_file(path, as_attachment=True, download_name=path.name)
 
     @bp.route("/api/asset-sync/server-status/sections")

@@ -568,6 +568,11 @@ class VMResourceUsageExportService:
                 "provision_pct": self._ratio(provisioned, capacity),
                 "over_provisioned": bool(capacity and provisioned > capacity),
                 "host_count": self._int(latest.get("host_count")) or 0,
+                # 어느 클러스터들이 이 데이터스토어를 쓰는가. 장표에서 디스크
+                # 사용률은 통합기 하나가 아니라 **같은 데이터스토어를 쓰는 묶음**
+                # 단위로 적으므로, 그 묶음을 만들려면 이 목록이 필요하다.
+                "cluster_names": self._raw_list(latest.get("raw_json"), "cluster_names"),
+                "host_names": self._raw_list(latest.get("raw_json"), "host_names"),
                 "used_pct_max": self._max([
                     {"used_pct": self._ratio(self._int(r.get("used_mb")) or 0, self._int(r.get("capacity_mb")) or 0)}
                     for r in group
@@ -576,6 +581,20 @@ class VMResourceUsageExportService:
             })
         result.sort(key=lambda r: (str(r.get("service_name") or ""), str(r.get("datastore_name") or "")))
         return result
+
+    @staticmethod
+    def _raw_list(raw_json: Any, key: str) -> list[str]:
+        """수집기가 담아 둔 원본에서 목록 하나를 꺼낸다. 없으면 빈 목록."""
+        try:
+            raw = json.loads(raw_json or "{}")
+        except (TypeError, ValueError):
+            return []
+        value = raw.get(key) if isinstance(raw, dict) else None
+        if isinstance(value, str):
+            return [value] if value else []
+        if isinstance(value, list):
+            return [str(item) for item in value if item not in (None, "")]
+        return []
 
     @staticmethod
     def _attach_datastore_vms(datastores: list[dict[str, Any]], vm_rows: list[dict[str, Any]]) -> None:
