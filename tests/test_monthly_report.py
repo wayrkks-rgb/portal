@@ -105,7 +105,7 @@ def seed_usage(manager, day: date, clusters: list[dict]) -> int:
                      item["cpu"] + 10, item["cpu"], item["mem"] + 10, item["mem"], day.isoformat()),
                 )
             for index in range(item["vms"]):
-                name = f"{item['name']}-vm{index:02d}"
+                name = f"{item['hosts'][0]}-vm{index:02d}"
                 conn.execute(
                     "INSERT INTO vm_resource_usage_daily(run_id, stat_date, vcenter_snapshot_id,"
                     " asset_key, vcenter_id, service_name, cluster_name, esxi_host, vm_uuid,"
@@ -152,9 +152,9 @@ def fleet(*, with_new: bool = False) -> list[dict]:
     return rows
 
 
-def build(config, manager, base_day: date = BASE_DAY):
+def build(config, manager, base_day: date = BASE_DAY, **options):
     with manager.connect() as conn:
-        return MonthlyReportService(config, AssetRepository(conn)).build(base_day)
+        return MonthlyReportService(config, AssetRepository(conn), **options).build(base_day)
 
 
 def saved(config, workbook, name: str = "report.xlsx"):
@@ -185,7 +185,7 @@ def test_the_first_sheet_matches_the_form_layout(portal) -> None:
     config, manager = portal
     seed_itsm(manager, BASE_DAY, [asset("CM001")])
     seed_usage(manager, BASE_DAY, fleet())
-    sheet = saved(config, build(config, manager))["통합서버자원사용현황"]
+    sheet = saved(config, build(config, manager, unit="CLUSTER"))["통합서버자원사용현황"]
 
     assert sheet["B2"].value == "서버"
     assert sheet["D2"].value == "’26.09", "당월 라벨이 양식 표기와 달라졌다"
@@ -206,7 +206,7 @@ def test_the_first_sheet_puts_last_month_and_this_month_side_by_side(portal) -> 
     seed_itsm(manager, BASE_DAY, [asset("CM001")])
     seed_usage(manager, LAST_MONTH, fleet())
     seed_usage(manager, BASE_DAY, fleet())
-    sheet = saved(config, build(config, manager))["통합서버자원사용현황"]
+    sheet = saved(config, build(config, manager, unit="CLUSTER"))["통합서버자원사용현황"]
 
     rows = {}
     for row in range(5, sheet.max_row + 1):
@@ -228,7 +228,7 @@ def test_a_new_integrator_is_marked_not_counted_as_a_drop(portal) -> None:
     seed_itsm(manager, BASE_DAY, [asset("CM001")])
     seed_usage(manager, LAST_MONTH, fleet())
     seed_usage(manager, BASE_DAY, fleet(with_new=True))
-    sheet = saved(config, build(config, manager))["통합서버자원사용현황"]
+    sheet = saved(config, build(config, manager, unit="CLUSTER"))["통합서버자원사용현황"]
 
     line = next(row for row in range(5, sheet.max_row + 1)
                 if sheet.cell(row, 3).value == "신규 LINUX 통합 #1")
@@ -243,7 +243,7 @@ def test_the_disk_column_is_merged_per_datastore_group(portal) -> None:
     config, manager = portal
     seed_itsm(manager, BASE_DAY, [asset("CM001")])
     seed_usage(manager, BASE_DAY, fleet())
-    sheet = saved(config, build(config, manager))["통합서버자원사용현황"]
+    sheet = saved(config, build(config, manager, unit="CLUSTER"))["통합서버자원사용현황"]
 
     merged = {str(r) for r in sheet.merged_cells.ranges}
     # Windows #1·#2 가 DS_WIN 을 함께 쓰므로 디스크 칸이 두 줄로 묶인다.
@@ -281,7 +281,7 @@ def test_the_change_block_counts_then_names_the_vms(portal) -> None:
         }])
         conn.commit()
 
-    sheet = saved(config, build(config, manager))["통합서버자원사용현황"]
+    sheet = saved(config, build(config, manager, unit="CLUSTER"))["통합서버자원사용현황"]
     text = "\n".join(
         " ".join(str(c) for c in row if c is not None)
         for row in sheet.iter_rows(values_only=True)
@@ -300,7 +300,7 @@ def test_the_detail_sheet_groups_vms_by_integrator_in_the_same_order(portal) -> 
     config, manager = portal
     seed_itsm(manager, BASE_DAY, [asset("CM001")])
     seed_usage(manager, BASE_DAY, fleet())
-    book = saved(config, build(config, manager))
+    book = saved(config, build(config, manager, unit="CLUSTER"))
     first, detail = book["통합서버자원사용현황"], book["통합서버자원사용현황(상세)"]
 
     # 위치 칸은 병합돼 있어 첫 줄만 값이 있다. 통합기명 칸으로 읽고 계 줄에서 멈춘다.
@@ -326,7 +326,7 @@ def test_the_detail_sheet_shows_cpu_and_memory_per_vm(portal) -> None:
     config, manager = portal
     seed_itsm(manager, BASE_DAY, [asset("CM001")])
     seed_usage(manager, BASE_DAY, fleet())
-    sheet = saved(config, build(config, manager))["통합서버자원사용현황(상세)"]
+    sheet = saved(config, build(config, manager, unit="CLUSTER"))["통합서버자원사용현황(상세)"]
 
     header = next(row for row in range(1, sheet.max_row + 1)
                   if sheet.cell(row, 2).value == "구분 (VM)")
@@ -506,3 +506,200 @@ def test_the_button_is_wired_on_the_screen() -> None:
     body = script.read_text(encoding="utf-8")
     assert "function exportMonthlyReport(" in body
     assert "/api/asset-sync/monthly-report" in body
+
+
+# ── 줄 단위와 정렬 ─────────────────────────────────────────────────────
+
+
+def sortable() -> list[dict]:
+    """자연 정렬을 시험할 묶음. #2 가 #10 보다 앞에 와야 한다."""
+    rows = []
+    for index in (1, 2, 10, 11):
+        rows.append({
+            "name": "Linux 클러스터", "hosts": [f"esxi-l{index:02d}"], "cores": 48,
+            "memory_gb": 448, "cpu": 10 + index, "mem": 30, "vms": index,
+            "service": "업무A",
+        })
+    for index in (1, 2, 10):
+        rows.append({
+            "name": "Windows 클러스터", "hosts": [f"esxi-w{index:02d}"], "cores": 64,
+            "memory_gb": 448, "cpu": 20 + index, "mem": 20, "vms": index,
+            "service": "업무B",
+        })
+    return rows
+
+
+def first_rows(sheet, *, columns: int = 4) -> list[tuple]:
+    """자료 줄만. 계 줄에서 멈춘다."""
+    out = []
+    for row in range(5, sheet.max_row + 1):
+        if sheet.cell(row, 2).value == "계":
+            break
+        if any(sheet.cell(row, column).value is not None for column in range(2, columns + 2)):
+            out.append(tuple(sheet.cell(row, column).value for column in range(2, columns + 2)))
+    return out
+
+
+def test_the_default_unit_is_one_row_per_integrator(portal) -> None:
+    """통합기(ESXi) 한 대가 한 줄이고, 클러스터는 묶음 칸이 된다."""
+    config, manager = portal
+    seed_itsm(manager, BASE_DAY, [asset("CM001")])
+    seed_usage(manager, BASE_DAY, sortable())
+    sheet = saved(config, build(config, manager))["통합서버자원사용현황"]
+
+    # B=위치, C=클러스터, D=통합기, E=실제자원
+    assert sheet["B2"].value == "서버"
+    assert sheet["E3"].value == "CPU/MEM", "클러스터 칸이 하나 늘어난다"
+    names = [row[2] for row in first_rows(sheet)]
+    assert names == ["esxi-l01", "esxi-l02", "esxi-l10", "esxi-l11",
+                     "esxi-w01", "esxi-w02", "esxi-w10"], names
+    clusters = [row[1] for row in first_rows(sheet)]
+    assert clusters[0] == "Linux 클러스터"
+    # ESXi 7 대 전부가 줄이 된다. 클러스터는 둘뿐이다.
+    assert len(names) == 7
+
+
+def test_names_sort_naturally_not_as_text(portal) -> None:
+    """'#2' 가 '#10' 보다 앞에 와야 한다. 글자로 견주면 거꾸로 된다."""
+    config, manager = portal
+    seed_itsm(manager, BASE_DAY, [asset("CM001")])
+    seed_usage(manager, BASE_DAY, [
+        {"name": "Linux 클러스터", "hosts": [f"통합기 #{index}"], "cores": 48,
+         "memory_gb": 448, "cpu": 10, "mem": 30, "vms": 1}
+        for index in (1, 2, 3, 10, 11, 20)
+    ])
+    sheet = saved(config, build(config, manager))["통합서버자원사용현황"]
+    names = [row[2] for row in first_rows(sheet)]
+    assert names == ["통합기 #1", "통합기 #2", "통합기 #3",
+                     "통합기 #10", "통합기 #11", "통합기 #20"], names
+
+
+def test_hosts_named_by_ip_sort_numerically(portal) -> None:
+    """IP 로 이름을 붙인 곳도 10.0.0.9 < 10.0.0.10 이 되어야 한다."""
+    config, manager = portal
+    seed_itsm(manager, BASE_DAY, [asset("CM001")])
+    seed_usage(manager, BASE_DAY, [
+        {"name": "DMZ 클러스터", "hosts": [f"10.0.0.{index}"], "cores": 32,
+         "memory_gb": 256, "cpu": 10, "mem": 30, "vms": 1}
+        for index in (2, 9, 10, 100)
+    ])
+    sheet = saved(config, build(config, manager))["통합서버자원사용현황"]
+    assert [row[2] for row in first_rows(sheet)] == ["10.0.0.2", "10.0.0.9",
+                                                      "10.0.0.10", "10.0.0.100"]
+
+
+def test_the_sort_basis_can_be_chosen(portal) -> None:
+    """현장마다 보는 순서가 다르다. 기준을 고를 수 있어야 한다."""
+    config, manager = portal
+    seed_itsm(manager, BASE_DAY, [asset("CM001")])
+    seed_usage(manager, BASE_DAY, sortable())
+
+    # VM 대수 많은 순.
+    sheet = saved(config, build(config, manager, sort="-vm_count"), "by_vm.xlsx")["통합서버자원사용현황"]
+    # B=위치 C=클러스터 D=통합기 E=실제자원 F=CPU G=MEM H=현재 대수
+    counts = [row[6] for row in first_rows(sheet, columns=7)]
+    assert counts == sorted(counts, reverse=True), counts
+
+    # 업무명 → 호스트명.
+    sheet = saved(config, build(config, manager, sort=["service", "host"]),
+                  "by_service.xlsx")["통합서버자원사용현황"]
+    names = [row[2] for row in first_rows(sheet)]
+    assert names[:4] == ["esxi-l01", "esxi-l02", "esxi-l10", "esxi-l11"], names
+    assert names[4:] == ["esxi-w01", "esxi-w02", "esxi-w10"], names
+
+
+def test_an_unknown_sort_basis_is_reported_not_ignored(portal) -> None:
+    """조용히 버리면 '왜 정렬이 안 되나' 를 사람이 한참 뒤진다."""
+    config, manager = portal
+    with manager.connect() as conn:
+        with pytest.raises(ValueError, match="정렬 기준"):
+            MonthlyReportService(config, AssetRepository(conn), sort="호스트명")
+        with pytest.raises(ValueError, match="줄 단위"):
+            MonthlyReportService(config, AssetRepository(conn), unit="VM")
+
+
+def test_the_config_sets_the_default(portal, tmp_path: Path) -> None:
+    """파일로도 정할 수 있어야 한다. 매번 화면에서 고르게 하면 안 된다."""
+    config, manager = portal
+    config.report = {"unit": "CLUSTER", "sort": ["-vm_count"]}
+    with manager.connect() as conn:
+        service = MonthlyReportService(config, AssetRepository(conn))
+    assert service.unit == "CLUSTER"
+    assert service.sort == ("-vm_count",)
+    assert "클러스터 단위" in service.describe()["unit_label"]
+    assert "내림차순" in service.describe()["sort_label"]
+
+
+def test_the_detail_sheet_follows_the_unit(portal) -> None:
+    """첫 시트가 통합기 단위면 VM 도 통합기별로 묶여야 한다."""
+    config, manager = portal
+    seed_itsm(manager, BASE_DAY, [asset("CM001")])
+    seed_usage(manager, BASE_DAY, sortable())
+    book = saved(config, build(config, manager))
+    first, detail = book["통합서버자원사용현황"], book["통합서버자원사용현황(상세)"]
+
+    order = [row[2] for row in first_rows(first)]
+    titles = [str(detail.cell(row, 2).value) for row in range(1, detail.max_row + 1)
+              if detail.cell(row, 2).value and "가상서버 운영" in str(detail.cell(row, 2).value)]
+    assert len(titles) == len(order)
+    for name, title in zip(order, titles):
+        assert title.startswith(name), f"{name} vs {title}"
+
+
+def test_the_sheet_says_how_it_was_split_and_sorted(portal) -> None:
+    """나중에 "왜 이 순서지?" 를 파일만 보고 알 수 있어야 한다."""
+    config, manager = portal
+    seed_itsm(manager, BASE_DAY, [asset("CM001")])
+    seed_usage(manager, BASE_DAY, sortable())
+    sheet = saved(config, build(config, manager, sort=["cluster", "host"]))["통합서버자원사용현황"]
+    note = " ".join(str(sheet.cell(1, column).value or "") for column in range(2, 8))
+    assert "통합기(ESXi) 단위" in note
+    assert "클러스터 이름" in note and "ESXi 호스트명" in note
+
+
+def test_the_screen_can_choose_the_unit_and_sort(web) -> None:
+    """현장에서 설정 파일을 못 고칠 때도 화면에서 고를 수 있어야 한다."""
+    from asset_sync.config import load_config
+    from asset_sync.db.manager import create_manager
+
+    config = load_config()
+    manager = create_manager(config)
+    seed_itsm(manager, BASE_DAY, [asset("CM001")])
+    seed_usage(manager, BASE_DAY, sortable())
+
+    client = web.test_client()
+    with client.session_transaction() as session:
+        session["user"] = {"id": 1, "username": "admin", "role": "admin", "name": "admin"}
+    month = BASE_DAY.strftime("%Y-%m")
+
+    options = client.get("/api/asset-sync/monthly-report/options").get_json()
+    assert [item["id"] for item in options["units"]] == ["ESXI", "CLUSTER"]
+    assert any(item["id"] == "host" for item in options["sort_fields"])
+    assert options["current"]["unit"] == "ESXI"
+
+    for unit, sort in (("ESXI", "cluster,host"), ("CLUSTER", "-vm_count")):
+        response = client.get(
+            f"/api/asset-sync/monthly-report?month={month}&unit={unit}&sort={sort}"
+        )
+        assert response.status_code == 200, response.get_data()[:300]
+        assert response.data[:2] == b"PK"
+
+    # 모르는 기준은 400 으로 알려준다. 조용히 기본값으로 떨어지면 안 된다.
+    bad = client.get(f"/api/asset-sync/monthly-report?month={month}&sort=호스트명")
+    assert bad.status_code == 400
+    assert "정렬 기준" in bad.get_json()["error"]
+    bad = client.get(f"/api/asset-sync/monthly-report?month={month}&unit=VM")
+    assert bad.status_code == 400
+
+
+def test_the_screen_shows_what_the_default_is() -> None:
+    page = (Path(__file__).resolve().parents[1] / "templates" / "pages" / "monthly_check.html")
+    script = (Path(__file__).resolve().parents[1] / "templates" / "partials" / "js"
+              / "monthly_check.html")
+    body = page.read_text(encoding="utf-8")
+    code = script.read_text(encoding="utf-8")
+    for element_id in ("monthly-report-unit", "monthly-report-sort"):
+        assert f'id="{element_id}"' in body, f"{element_id} 가 화면에 없다"
+        assert f"'{element_id}'" in code, f"{element_id} 를 스크립트가 안 찾는다"
+    assert "/api/asset-sync/monthly-report/options" in code
+    assert "loadMonthlyReportOptions" in code

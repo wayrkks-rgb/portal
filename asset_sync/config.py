@@ -28,6 +28,7 @@ class AppConfig:
     scheduler: dict[str, Any] = field(default_factory=dict)
     hmc: dict[str, Any] = field(default_factory=dict)
     server_status: dict[str, Any] = field(default_factory=dict)
+    report: dict[str, Any] = field(default_factory=dict)
 
     def resolve(self, value: str | Path) -> Path:
         path = Path(value)
@@ -291,6 +292,14 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             "location_field": "CM_PLACE",
             "dr_keywords": ["DR", "재해", "재해복구"],
         },
+        # 월간 보고 장표의 줄 단위와 정렬. 현장마다 '통합기' 가 가리키는 것이
+        # 다르므로 설정으로 둔다. unit=ESXI 면 ESXi 한 대가 한 줄이고 클러스터는
+        # 묶음이 된다. sort 는 앞에서부터 차례로 견준다. 이름은 자연 정렬이라
+        # '#2' 가 '#10' 보다 앞에 온다.
+        "report": {
+            "unit": "ESXI",
+            "sort": ["location", "cluster", "name"],
+        },
     }
 
     base_yaml = _load_yaml(base_config_path)
@@ -380,4 +389,5 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         scheduler=merged["scheduler"],
         hmc=merged["hmc"],
         server_status=merged["server_status"],
+        report=merged["report"],
     )

@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from datetime import date, timedelta
 from typing import Any
@@ -49,6 +50,58 @@ HEAD_TOP = 2
 HEAD_MID = 3
 HEAD_BOTTOM = 4
 FIRST_DATA_ROW = 5
+
+#: 줄 단위. 현장마다 '통합기' 가 가리키는 것이 다르다.
+#:   ESXI    = ESXi 한 대가 한 줄. 클러스터는 묶음 칸이 된다(기본).
+#:   CLUSTER = 클러스터 한 줄. 받은 양식과 칸 수가 같다.
+UNITS = ("ESXI", "CLUSTER")
+DEFAULT_UNIT = "ESXI"
+
+#: 정렬에 쓸 수 있는 기준. 앞에서부터 차례로 견준다. ``-`` 를 붙이면 내림차순.
+#: 이름·호스트명은 **자연 정렬**이다. 그래야 '#2' 가 '#10' 보다 앞에 온다.
+SORT_FIELDS = {
+    "location": "위치(IDC 먼저)",
+    "cluster": "클러스터 이름",
+    "service": "업무명",
+    "vcenter": "vCenter",
+    "name": "줄 이름(통합기)",
+    "host": "ESXi 호스트명 · IP",
+    "ip": "ESXi 호스트명 · IP",
+    "disk": "디스크 묶음",
+    "vm_count": "VM 대수",
+    "cores": "CPU Core",
+    "memory": "메모리",
+    "new_last": "신규 통합기를 뒤로",
+}
+DEFAULT_SORT = ("location", "cluster", "name")
+
+
+def _natural(text: Any) -> tuple[Any, ...]:
+    """자연 정렬 키. '통합기 #2' 가 '통합기 #10' 보다 앞에 오게 한다.
+
+    글자만으로 견주면 '#10' < '#2' 가 된다. 숫자 토막은 숫자로 견준다.
+    '10.0.0.9' 와 '10.0.0.10' 처럼 IP 로 이름을 붙인 곳도 이 규칙으로 맞는다.
+    """
+    parts = re.split(r"(\d+)", str(text or ""))
+    return tuple((1, int(part)) if part.isdigit() else (0, part.lower()) for part in parts)
+
+
+class _Reverse:
+    """내림차순으로 견주기 위한 싸개.
+
+    숫자는 음수로 뒤집을 수 있지만 글자는 그럴 수 없다. 비교만 뒤집는다.
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+    def __lt__(self, other: Any) -> bool:
+        return bool(other.value < self.value)
+
+    def __eq__(self, other: Any) -> bool:
+        return bool(isinstance(other, _Reverse) and other.value == self.value)
 
 
 def _month_label(day: date) -> str:
@@ -115,12 +168,68 @@ def _delta_text(current: Any, previous: Any) -> Any:
 class MonthlyReportService:
     """월간 보고 장표 한 벌을 만든다."""
 
-    def __init__(self, config: Any, repository: Any, *, include_all: bool = False) -> None:
+    def __init__(
+        self,
+        config: Any,
+        repository: Any,
+        *,
+        include_all: bool = False,
+        unit: str | None = None,
+        sort: Any = None,
+    ) -> None:
         self.config = config
         self.repo = repository
         self.include_all = include_all
         self.status_service = ServerStatusService(config, repository, include_all=include_all)
         self.usage_service = VMResourceUsageExportService(config, repository)
+        settings = getattr(config, "report", None) or {}
+        self.unit = self._unit(unit if unit is not None else settings.get("unit"))
+        self.sort = self._sort(sort if sort is not None else settings.get("sort"))
+
+    @staticmethod
+    def _unit(value: Any) -> str:
+        unit = str(value or DEFAULT_UNIT).strip().upper()
+        if unit in {"HOST", "ESX", "통합기"}:
+            unit = "ESXI"
+        if unit not in UNITS:
+            raise ValueError(f"줄 단위는 {', '.join(UNITS)} 중 하나여야 합니다: {value!r}")
+        return unit
+
+    @staticmethod
+    def _sort(value: Any) -> tuple[str, ...]:
+        """정렬 기준을 받는다. 문자열이면 쉼표로 나눈다.
+
+        모르는 기준이 섞여 있으면 조용히 버리지 않고 알려준다. 조용히 버리면
+        "왜 정렬이 안 되나" 를 사람이 한참 뒤지게 된다.
+        """
+        if value in (None, "", [], ()):
+            return DEFAULT_SORT
+        items = value.split(",") if isinstance(value, str) else list(value)
+        keys: list[str] = []
+        for item in items:
+            key = str(item or "").strip()
+            if not key:
+                continue
+            name = key[1:] if key.startswith("-") else key
+            if name not in SORT_FIELDS:
+                raise ValueError(
+                    f"정렬 기준은 {', '.join(SORT_FIELDS)} 중에서 고릅니다(앞에 - 를 붙이면 내림차순): {key}"
+                )
+            keys.append(key)
+        return tuple(keys) or DEFAULT_SORT
+
+    def describe(self) -> dict[str, Any]:
+        """무엇을 기준으로 쪼개고 정렬했는지. 장표에도 적고 화면에도 보여준다."""
+        return {
+            "unit": self.unit,
+            "unit_label": "통합기(ESXi) 단위" if self.unit == "ESXI" else "클러스터 단위",
+            "sort": list(self.sort),
+            "sort_label": " → ".join(
+                ("내림차순 " if key.startswith("-") else "")
+                + SORT_FIELDS[key[1:] if key.startswith("-") else key]
+                for key in self.sort
+            ),
+        }
 
     # ── 자료 모으기 ─────────────────────────────────────────────────────
     def collect(self, base_day: date) -> dict[str, Any]:
@@ -175,11 +284,16 @@ class MonthlyReportService:
         세부내용에 이름을 적기 위한 자료다.
         """
         usage = self._usage(base_day) or {}
-        by_host = {
-            f"{row.get('vcenter_id') or ''}|{row.get('esxi_host') or ''}":
-                row.get("cluster_display_name") or row.get("cluster_name") or row.get("esxi_host")
-            for row in (usage.get("hosts") or [])
-        }
+        # 줄 단위에 맞춰 묶는다. ESXi 단위면 호스트 이름으로, 클러스터 단위면
+        # 그 호스트가 속한 클러스터 이름으로 모은다.
+        by_host = {}
+        for row in usage.get("hosts") or []:
+            key = f"{row.get('vcenter_id') or ''}|{row.get('esxi_host') or ''}"
+            if self.unit == "ESXI":
+                by_host[key] = row.get("esxi_display_name") or row.get("esxi_host")
+            else:
+                by_host[key] = (row.get("cluster_display_name") or row.get("cluster_name")
+                                or row.get("esxi_host"))
         result: dict[str, dict[str, list[str]]] = defaultdict(lambda: {"created": [], "removed": []})
         for change in usage.get("changes") or []:
             kind = {"RV_NEW": "created", "RV_REMOVED": "removed"}.get(str(change.get("event_type")))
@@ -218,25 +332,29 @@ class MonthlyReportService:
         return points
 
     # ── 통합기 묶음 ─────────────────────────────────────────────────────
-    def _disk_groups(self, usage: dict[str, Any] | None) -> dict[str, str]:
-        """클러스터 → 디스크 묶음 이름.
+    def _disk_groups(self, usage: dict[str, Any] | None) -> dict[str, dict[str, str]]:
+        """클러스터·ESXi → 디스크 묶음 이름.
 
-        장표의 디스크 사용률은 통합기 하나가 아니라 **같은 데이터스토어를 쓰는
-        묶음** 단위로 적혀 있다(H5:H26 처럼 병합). 어느 클러스터들이 같은
+        장표의 디스크 사용률은 한 줄이 아니라 **같은 데이터스토어를 쓰는 묶음**
+        단위로 적혀 있다(H5:H26 처럼 병합). 어느 클러스터·호스트가 같은
         데이터스토어를 쓰는지는 수집기가 담아 둔 목록으로 알 수 있다.
         """
         if not usage:
-            return {}
+            return {"cluster": {}, "host": {}}
         by_cluster: dict[str, set[str]] = defaultdict(set)
+        by_host: dict[str, set[str]] = defaultdict(set)
         for datastore in usage.get("datastores") or []:
-            names = datastore.get("cluster_names") or (
+            name = str(datastore.get("datastore_name") or "")
+            clusters = datastore.get("cluster_names") or (
                 [datastore["cluster_name"]] if datastore.get("cluster_name") else []
             )
-            for cluster in names:
-                by_cluster[str(cluster)].add(str(datastore.get("datastore_name") or ""))
+            for cluster in clusters:
+                by_cluster[str(cluster)].add(name)
+            for host in datastore.get("host_names") or []:
+                by_host[str(host)].add(name)
         return {
-            cluster: "|".join(sorted(names)) if names else ""
-            for cluster, names in by_cluster.items()
+            "cluster": {key: "|".join(sorted(names)) for key, names in by_cluster.items()},
+            "host": {key: "|".join(sorted(names)) for key, names in by_host.items()},
         }
 
     def _disk_usage(self, usage: dict[str, Any] | None, signature: str) -> float | None:
@@ -257,7 +375,7 @@ class MonthlyReportService:
         return round(used / capacity * 100, 1)
 
     def _rows(self, data: dict[str, Any]) -> list[dict[str, Any]]:
-        """첫 시트의 줄. 위치 → 디스크 묶음 → 통합기 순서다.
+        """첫 시트의 줄. 줄 단위와 정렬은 설정이 정한다.
 
         이 순서를 둘째 시트도 그대로 쓴다. 두 시트의 순서가 다르면 장표를 나란히
         놓고 읽을 수 없다.
@@ -267,25 +385,36 @@ class MonthlyReportService:
         if not usage:
             return []
         groups = self._disk_groups(usage)
+        source = "hosts" if self.unit == "ESXI" else "clusters"
         before = {
-            f"{row.get('vcenter_id') or ''}|{row.get('cluster_name') or ''}": row
-            for row in ((previous or {}).get("clusters") or [])
+            self._row_key(row): row for row in ((previous or {}).get(source) or [])
         }
         rows: list[dict[str, Any]] = []
-        for cluster in usage.get("clusters") or []:
-            key = f"{cluster.get('vcenter_id') or ''}|{cluster.get('cluster_name') or ''}"
-            name = str(cluster.get("cluster_name") or "")
-            signature = groups.get(name, "")
-            old = before.get(key)
+        for item in usage.get(source) or []:
+            cluster_name = str(item.get("cluster_name") or "")
+            host_name = str(item.get("esxi_host") or "")
+            if self.unit == "ESXI":
+                # 호스트가 어느 데이터스토어를 쓰는지 모르면 그 클러스터의 것을 쓴다.
+                signature = groups["host"].get(host_name) or groups["cluster"].get(cluster_name, "")
+                name = item.get("esxi_display_name") or host_name or "(통합기 미상)"
+            else:
+                signature = groups["cluster"].get(cluster_name, "")
+                name = item.get("cluster_display_name") or cluster_name or "(통합기 미상)"
+            old = before.get(self._row_key(item))
             rows.append({
-                "location": self._location_of(cluster, usage),
-                "name": cluster.get("cluster_display_name") or name or "(통합기 미상)",
-                "cluster_name": name,
-                "vcenter_id": cluster.get("vcenter_id"),
-                "resource": self._resource_text(cluster),
-                "cpu_pct": cluster.get("cpu_avg_pct"),
-                "mem_pct": cluster.get("mem_avg_pct"),
-                "vm_count": int(cluster.get("vm_count") or 0),
+                "location": self._location_of(item, usage, unit=self.unit),
+                "name": name,
+                "cluster_name": cluster_name,
+                "cluster_label": item.get("cluster_display_name") or cluster_name or "(클러스터 없음)",
+                "esxi_host": host_name,
+                "service_name": item.get("service_name"),
+                "vcenter_id": item.get("vcenter_id"),
+                "resource": self._resource_text(item),
+                "cores": int(item.get("allocated_cpu_cores") or 0),
+                "memory_gb": float(item.get("allocated_memory_gb") or 0),
+                "cpu_pct": item.get("cpu_avg_pct"),
+                "mem_pct": item.get("mem_avg_pct"),
+                "vm_count": int(item.get("vm_count") or 0),
                 "disk_signature": signature,
                 "disk_pct": self._disk_usage(usage, signature),
                 # 전월. 없으면 이번에 새로 붙인 통합기다.
@@ -294,33 +423,72 @@ class MonthlyReportService:
                 "old_mem_pct": (old or {}).get("mem_avg_pct"),
                 "old_vm_count": None if old is None else int(old.get("vm_count") or 0),
                 "old_disk_pct": self._disk_usage(previous, signature),
-                "cluster": cluster,
+                "cluster": item,
             })
-        # 위치 → (기존/신규) → 디스크 묶음 → 이름. 장표의 병합 순서가 이것이다.
-        # 새로 붙인 통합기는 묶음 맨 뒤로 보낸다. 양식도 그렇게 적혀 있고, 전월이
-        # 없는 줄이 중간에 끼면 표가 읽히지 않는다.
-        rows.sort(key=lambda r: (
-            0 if r["location"] == "IDC" else 1,
-            1 if r["is_new"] else 0,
-            r["disk_signature"],
-            str(r["name"]),
-        ))
+        rows.sort(key=self._sort_key)
         return rows
 
+    def _row_key(self, item: dict[str, Any]) -> str:
+        """전월과 이어 붙일 열쇠.
+
+        ESXi 단위에서는 클러스터를 넣지 않는다. 호스트가 다른 클러스터로 옮겨가도
+        같은 장비이므로 전월과 이어져야 한다.
+        """
+        vcenter = str(item.get("vcenter_id") or "")
+        if self.unit == "ESXI":
+            return f"{vcenter}|{item.get('esxi_host') or ''}"
+        return f"{vcenter}|{item.get('cluster_name') or ''}"
+
+    def _sort_key(self, row: dict[str, Any]) -> tuple[Any, ...]:
+        """설정한 기준으로 차례로 견준다. 숫자 기준은 내림차순(-)도 된다."""
+        values: list[Any] = []
+        for key in self.sort:
+            descending = key.startswith("-")
+            name = key[1:] if descending else key
+            if name == "location":
+                value: Any = (0,) if row["location"] == "IDC" else (1,)
+            elif name == "cluster":
+                value = _natural(row["cluster_label"])
+            elif name == "service":
+                value = _natural(row.get("service_name"))
+            elif name == "vcenter":
+                value = _natural(row.get("vcenter_id"))
+            elif name == "name":
+                value = _natural(row["name"])
+            elif name in {"host", "ip"}:
+                value = _natural(row.get("esxi_host"))
+            elif name == "disk":
+                value = _natural(row["disk_signature"])
+            elif name == "new_last":
+                value = (1,) if row["is_new"] else (0,)
+            elif name == "vm_count":
+                value = (int(row["vm_count"]),)
+            elif name == "cores":
+                value = (int(row["cores"]),)
+            else:                                     # memory
+                value = (float(row["memory_gb"]),)
+            values.append((_Reverse(value),) if descending else value)
+        # 같은 값이면 이름으로 가른다. 그래야 돌릴 때마다 순서가 바뀌지 않는다.
+        values.append(_natural(row["name"]))
+        values.append(_natural(row.get("esxi_host")))
+        return tuple(values)
+
     @staticmethod
-    def _location_of(cluster: dict[str, Any], usage: dict[str, Any]) -> str:
-        """통합기의 위치. ESXi 이름이나 업무명에 DR 이 들어 있으면 DR 로 본다.
+    def _location_of(item: dict[str, Any], usage: dict[str, Any], *, unit: str) -> str:
+        """줄의 위치. 이름에 DR 이 들어 있으면 DR 로 본다.
 
         vCenter 는 IDC·DR 을 따로 알려주지 않는다. ITSM 의 설치위치 코드와 달리
         여기서는 이름으로 가늠할 수밖에 없다.
         """
         text = " ".join(str(value or "") for value in (
-            cluster.get("cluster_name"), cluster.get("cluster_display_name"),
-            cluster.get("service_name"), cluster.get("vcenter_id"),
+            item.get("cluster_name"), item.get("cluster_display_name"),
+            item.get("esxi_host"), item.get("esxi_display_name"),
+            item.get("service_name"), item.get("vcenter_id"),
         )).upper()
-        for host in usage.get("hosts") or []:
-            if str(host.get("cluster_name") or "") == str(cluster.get("cluster_name") or ""):
-                text += " " + str(host.get("esxi_host") or "").upper()
+        if unit == "CLUSTER":
+            for host in usage.get("hosts") or []:
+                if str(host.get("cluster_name") or "") == str(item.get("cluster_name") or ""):
+                    text += " " + str(host.get("esxi_host") or "").upper()
         return "DR" if "DR" in text else "IDC"
 
     @staticmethod
@@ -336,38 +504,63 @@ class MonthlyReportService:
         return f"{core_text} / {memory_text}"
 
     # ── 시트 1: 통합서버자원사용현황 ────────────────────────────────────
+    def _columns(self) -> dict[str, int]:
+        """칸 번호. 클러스터 단위면 받은 양식과 칸 수가 같다.
+
+        ESXi 단위에서는 클러스터 칸이 하나 더 필요하다. 어느 클러스터의 호스트인지
+        모르면 줄을 묶어 읽을 수 없고, 엑셀에서 다시 정렬할 수도 없다.
+        """
+        start = 2
+        names = ["location"]
+        if self.unit == "ESXI":
+            names.append("cluster")
+        names += ["name", "resource", "cpu", "mem", "vm", "disk",
+                  "old_cpu", "old_mem", "old_vm", "old_disk"]
+        return {name: start + index for index, name in enumerate(names)}
+
     def _write_usage_sheet(self, sheet: Any, data: dict[str, Any]) -> None:
         rows = self._rows(data)
+        column = self._columns()
+        last = max(column.values())
         sheet.sheet_view.showGridLines = False
         sheet["B1"] = f"통합서버 자원사용현황 ({data['month_label']})"
         sheet["B1"].font = Font(bold=True, size=14)
+        basis = self.describe()
+        sheet.cell(1, column["resource"],
+                   f"{basis['unit_label']} · 정렬 {basis['sort_label']}").font = Font(
+            size=9, color="666666")
 
-        # 머리글 두 줄. B2:C4 = '서버', D2:H2 = 당월, I2:L2 = 전월.
-        sheet.merge_cells(start_row=HEAD_TOP, start_column=2, end_row=HEAD_BOTTOM, end_column=3)
-        _head(sheet.cell(HEAD_TOP, 2), "서버")
-        for column in (2, 3):
+        # 머리글 두 줄. 왼쪽은 '서버', 그 오른쪽은 당월, 다시 전월.
+        sheet.merge_cells(start_row=HEAD_TOP, start_column=column["location"],
+                          end_row=HEAD_BOTTOM, end_column=column["name"])
+        _head(sheet.cell(HEAD_TOP, column["location"]), "서버")
+        for index in range(column["location"], column["name"] + 1):
             for row in range(HEAD_TOP, HEAD_BOTTOM + 1):
-                _head(sheet.cell(row, column))
-        sheet.merge_cells(start_row=HEAD_TOP, start_column=4, end_row=HEAD_TOP, end_column=8)
-        _head(sheet.cell(HEAD_TOP, 4), data["month_label"])
-        sheet.merge_cells(start_row=HEAD_TOP, start_column=9, end_row=HEAD_TOP, end_column=12)
-        _head(sheet.cell(HEAD_TOP, 9), data["previous_label"])
-        for column in range(4, 13):
-            _head(sheet.cell(HEAD_TOP, column))
+                _head(sheet.cell(row, index))
+        sheet.merge_cells(start_row=HEAD_TOP, start_column=column["resource"],
+                          end_row=HEAD_TOP, end_column=column["disk"])
+        _head(sheet.cell(HEAD_TOP, column["resource"]), data["month_label"])
+        sheet.merge_cells(start_row=HEAD_TOP, start_column=column["old_cpu"],
+                          end_row=HEAD_TOP, end_column=column["old_disk"])
+        _head(sheet.cell(HEAD_TOP, column["old_cpu"]), data["previous_label"])
+        for index in range(column["resource"], last + 1):
+            _head(sheet.cell(HEAD_TOP, index))
 
         # 당월: CPU/MEM(실제) · CPU 사용률 · MEM 사용률 · 현재 대수 · 디스크 사용률
         plan = [
-            (4, "CPU/MEM", None, True), (5, "CPU", "사용률", False), (6, "MEM", "사용률", False),
-            (7, "현재 대수", None, True), (8, "디스크", "사용률", False),
-            (9, "CPU", "사용률", False), (10, "MEM", "사용률", False),
-            (11, "현재 대수", None, True), (12, "디스크", "사용률", False),
+            ("resource", "CPU/MEM", None, True), ("cpu", "CPU", "사용률", False),
+            ("mem", "MEM", "사용률", False), ("vm", "현재 대수", None, True),
+            ("disk", "디스크", "사용률", False),
+            ("old_cpu", "CPU", "사용률", False), ("old_mem", "MEM", "사용률", False),
+            ("old_vm", "현재 대수", None, True), ("old_disk", "디스크", "사용률", False),
         ]
-        for column, top, bottom, merge in plan:
+        for name, top, bottom, merge in plan:
+            index = column[name]
             if merge:
-                sheet.merge_cells(start_row=HEAD_MID, start_column=column,
-                                  end_row=HEAD_BOTTOM, end_column=column)
-            _head(sheet.cell(HEAD_MID, column), top)
-            _head(sheet.cell(HEAD_BOTTOM, column), bottom if bottom else None)
+                sheet.merge_cells(start_row=HEAD_MID, start_column=index,
+                                  end_row=HEAD_BOTTOM, end_column=index)
+            _head(sheet.cell(HEAD_MID, index), top)
+            _head(sheet.cell(HEAD_BOTTOM, index), bottom if bottom else None)
 
         if not rows:
             sheet.cell(FIRST_DATA_ROW, 2, "수집된 통합기 자원사용현황이 없습니다."
@@ -377,52 +570,61 @@ class MonthlyReportService:
 
         line = FIRST_DATA_ROW
         for row in rows:
-            _body(sheet.cell(line, 2), row["location"], bold=True, fill=GROUP_FILL)
-            _body(sheet.cell(line, 3), row["name"], fill=GROUP_FILL).alignment = LEFT
-            _body(sheet.cell(line, 4), row["resource"])
-            _body(sheet.cell(line, 5), row["cpu_pct"])
-            _body(sheet.cell(line, 6), row["mem_pct"])
-            _body(sheet.cell(line, 7), row["vm_count"], bold=True)
-            _body(sheet.cell(line, 8), row["disk_pct"])
+            _body(sheet.cell(line, column["location"]), row["location"],
+                  bold=True, fill=GROUP_FILL)
+            if "cluster" in column:
+                _body(sheet.cell(line, column["cluster"]), row["cluster_label"],
+                      fill=GROUP_FILL).alignment = LEFT
+            _body(sheet.cell(line, column["name"]), row["name"], fill=GROUP_FILL).alignment = LEFT
+            _body(sheet.cell(line, column["resource"]), row["resource"])
+            _body(sheet.cell(line, column["cpu"]), row["cpu_pct"])
+            _body(sheet.cell(line, column["mem"]), row["mem_pct"])
+            _body(sheet.cell(line, column["vm"]), row["vm_count"], bold=True)
+            _body(sheet.cell(line, column["disk"]), row["disk_pct"])
             if row["is_new"]:
                 # 전월이 없는 통합기. 0 으로 적으면 '줄었다' 로 읽힌다.
-                for column in range(9, 13):
-                    _body(sheet.cell(line, column), fill=NEW_FILL)
-                sheet.cell(line, 9).value = "신규 생성 통합기"
+                for index in range(column["old_cpu"], column["old_disk"] + 1):
+                    _body(sheet.cell(line, index), fill=NEW_FILL)
+                sheet.cell(line, column["old_cpu"]).value = "신규 생성 통합기"
             else:
-                _body(sheet.cell(line, 9), row["old_cpu_pct"])
-                _body(sheet.cell(line, 10), row["old_mem_pct"])
-                _body(sheet.cell(line, 11), row["old_vm_count"])
-                _body(sheet.cell(line, 12), row["old_disk_pct"])
+                _body(sheet.cell(line, column["old_cpu"]), row["old_cpu_pct"])
+                _body(sheet.cell(line, column["old_mem"]), row["old_mem_pct"])
+                _body(sheet.cell(line, column["old_vm"]), row["old_vm_count"])
+                _body(sheet.cell(line, column["old_disk"]), row["old_disk_pct"])
             line += 1
 
-        self._merge_blocks(sheet, rows, column=2, key=lambda r: r["location"])
+        self._merge_blocks(sheet, rows, column=column["location"], key=lambda r: r["location"])
+        if "cluster" in column:
+            # 같은 클러스터의 통합기는 한 덩어리로 묶어 읽는다.
+            self._merge_blocks(sheet, rows, column=column["cluster"],
+                               key=lambda r: f"{r['location']}|{r['cluster_label']}")
         # 디스크는 묶음 단위로 한 번만 적는다. 같은 데이터스토어를 쓰는 통합기끼리.
-        for column in (8, 12):
+        for name in ("disk", "old_disk"):
+            index = column[name]
             self._merge_blocks(
-                sheet, rows, column=column,
+                sheet, rows, column=index,
                 key=lambda r: f"{r['location']}|{r['disk_signature']}",
-                skip=lambda r: column == 12 and r["is_new"],
+                skip=lambda r, name=name: name == "old_disk" and r["is_new"],
             )
         # 새로 붙인 통합기의 전월 칸은 한 덩어리로 묶어 '신규' 라고 적는다.
-        self._merge_new_block(sheet, rows)
+        self._merge_new_block(sheet, rows, first=column["old_cpu"], last=column["old_disk"])
 
         total = line
-        _body(sheet.cell(total, 2), "계", bold=True, fill=HEAD_FILL)
-        _body(sheet.cell(total, 3), f"통합기 {len(rows):,}개", bold=True, fill=HEAD_FILL)
-        _body(sheet.cell(total, 4), None, fill=HEAD_FILL)
-        _body(sheet.cell(total, 5), None, fill=HEAD_FILL)
-        _body(sheet.cell(total, 6), None, fill=HEAD_FILL)
-        _body(sheet.cell(total, 7), sum(r["vm_count"] for r in rows), bold=True, fill=HEAD_FILL)
-        _body(sheet.cell(total, 8), None, fill=HEAD_FILL)
+        _body(sheet.cell(total, column["location"]), "계", bold=True, fill=HEAD_FILL)
+        if "cluster" in column:
+            _body(sheet.cell(total, column["cluster"]), None, fill=HEAD_FILL)
+        _body(sheet.cell(total, column["name"]), f"통합기 {len(rows):,}개",
+              bold=True, fill=HEAD_FILL)
+        for name in ("resource", "cpu", "mem", "disk", "old_cpu", "old_mem", "old_disk"):
+            _body(sheet.cell(total, column[name]), None, fill=HEAD_FILL)
+        _body(sheet.cell(total, column["vm"]), sum(r["vm_count"] for r in rows),
+              bold=True, fill=HEAD_FILL)
         old_total = sum(r["old_vm_count"] or 0 for r in rows if r["old_vm_count"] is not None)
-        for column in (9, 10, 12):
-            _body(sheet.cell(total, column), None, fill=HEAD_FILL)
-        _body(sheet.cell(total, 11), old_total, bold=True, fill=HEAD_FILL)
+        _body(sheet.cell(total, column["old_vm"]), old_total, bold=True, fill=HEAD_FILL)
 
         self._write_cluster_changes(sheet, data, rows, start=total + 3)
         _fit(sheet)
-        sheet.freeze_panes = sheet.cell(FIRST_DATA_ROW, 4).coordinate
+        sheet.freeze_panes = sheet.cell(FIRST_DATA_ROW, column["resource"]).coordinate
 
     @staticmethod
     def _merge_blocks(sheet: Any, rows: list[dict[str, Any]], *, column: int,
@@ -442,7 +644,7 @@ class MonthlyReportService:
                               end_row=FIRST_DATA_ROW + len(rows) - 1, end_column=column)
 
     @staticmethod
-    def _merge_new_block(sheet: Any, rows: list[dict[str, Any]]) -> None:
+    def _merge_new_block(sheet: Any, rows: list[dict[str, Any]], *, first: int, last: int) -> None:
         indexes = [index for index, row in enumerate(rows) if row["is_new"]]
         if len(indexes) < 2:
             return
@@ -452,8 +654,8 @@ class MonthlyReportService:
             if current is not None and current == previous + 1:
                 continue
             if previous > start:
-                sheet.merge_cells(start_row=FIRST_DATA_ROW + start, start_column=9,
-                                  end_row=FIRST_DATA_ROW + previous, end_column=12)
+                sheet.merge_cells(start_row=FIRST_DATA_ROW + start, start_column=first,
+                                  end_row=FIRST_DATA_ROW + previous, end_column=last)
             if current is not None:
                 start = current
 
@@ -539,15 +741,16 @@ class MonthlyReportService:
         title.font = Font(bold=True, size=16)
         title.alignment = CENTER
 
-        by_cluster: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        # 줄 단위와 같은 열쇠로 묶는다. 첫 시트가 ESXi 단위면 VM 도 ESXi 로 모은다.
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for row in usage.get("vms") or []:
-            key = f"{row.get('vcenter_id') or ''}|{row.get('cluster_name') or ''}"
-            by_cluster[key].append(row)
+            grouped[self._row_key(row)].append(row)
 
         line = 4
         for row in rows:
-            key = f"{row['vcenter_id'] or ''}|{row['cluster_name'] or ''}"
-            members = sorted(by_cluster.get(key, []), key=lambda r: str(r.get("vm_name") or ""))
+            key = self._row_key(row["cluster"])
+            # VM 이름도 자연 정렬이다. vm2 가 vm10 보다 앞에 와야 읽힌다.
+            members = sorted(grouped.get(key, []), key=lambda r: _natural(r.get("vm_name")))
             sheet.merge_cells(start_row=line, start_column=2, end_row=line, end_column=8)
             header = sheet.cell(line, 2, self._detail_title(row, len(members)))
             header.font = Font(bold=True, size=11)

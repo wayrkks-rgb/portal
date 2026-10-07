@@ -23,6 +23,7 @@ from ..services import (
     ReconciliationService, ServerStatusService, VMResourceUsageExportService, present_all,
 )
 from ..services.asset_scope import AssetScope
+from ..services.monthly_report_service import SORT_FIELDS
 from ..services.change_presenter import attach_identity
 from ..web_common import admin_required, login_required
 
@@ -221,15 +222,24 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
 
         시트 네 장: 통합서버자원사용현황(전월·당월), 통합기별 VM 상세,
         서버현황 대시보드(전체), 서버현황 대시보드(물리).
+
+        줄 단위(unit)와 정렬(sort)은 화면에서 고를 수 있다. 안 주면 설정값을
+        쓴다 -- 현장마다 '통합기' 가 가리키는 것과 보는 순서가 다르다.
         """
         try:
             base_day = _month_end(request.args.get("month"))
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         with manager.connect() as conn:
-            service = MonthlyReportService(
-                cfg, AssetRepository(conn), include_all=_include_all()
-            )
+            try:
+                service = MonthlyReportService(
+                    cfg, AssetRepository(conn), include_all=_include_all(),
+                    unit=request.args.get("unit") or None,
+                    sort=request.args.get("sort") or None,
+                )
+            except ValueError as exc:
+                # 모르는 단위·정렬 기준은 조용히 버리지 않고 화면에 알린다.
+                return jsonify({"error": str(exc)}), 400
             workbook = service.build(base_day)
             target = cfg.resolve("data/export/monthly_report")
             target.mkdir(parents=True, exist_ok=True)
@@ -237,6 +247,21 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
             workbook.save(path)
             workbook.close()
         return send_file(path, as_attachment=True, download_name=path.name)
+
+    @bp.route("/api/asset-sync/monthly-report/options")
+    @login_required
+    def monthly_report_options() -> Any:
+        """줄 단위와 정렬로 고를 수 있는 것. 화면이 이 값으로 선택을 만든다."""
+        with manager.connect() as conn:
+            service = MonthlyReportService(cfg, AssetRepository(conn))
+        return jsonify({
+            "units": [
+                {"id": "ESXI", "name": "통합기(ESXi) 단위"},
+                {"id": "CLUSTER", "name": "클러스터 단위"},
+            ],
+            "sort_fields": [{"id": key, "name": name} for key, name in SORT_FIELDS.items()],
+            "current": service.describe(),
+        })
 
     @bp.route("/api/asset-sync/server-status/sections")
     @login_required

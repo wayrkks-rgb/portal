@@ -8,6 +8,23 @@
     <div class="flex gap-2 items-center">
       <input class="form-input" type="month" id="monthly-month" style="width:150px" onchange="loadMonthlyCheck()">
       <button class="btn btn-secondary btn-sm" onclick="loadMonthlyCheck()">새로고침</button>
+      <select class="form-select" id="monthly-report-unit" style="width:140px"
+              title="보고서의 줄 단위">
+        <option value="">기본 단위</option>
+        <option value="ESXI">통합기(ESXi) 단위</option>
+        <option value="CLUSTER">클러스터 단위</option>
+      </select>
+      <select class="form-select" id="monthly-report-sort" style="width:190px"
+              title="보고서의 줄 정렬 기준">
+        <option value="">기본 정렬</option>
+        <option value="location,cluster,name">위치 → 클러스터 → 이름</option>
+        <option value="location,cluster,host">위치 → 클러스터 → 호스트명·IP</option>
+        <option value="service,cluster,host">업무명 → 클러스터 → 호스트명</option>
+        <option value="name">이름만</option>
+        <option value="host">호스트명·IP 만</option>
+        <option value="-vm_count">VM 대수 많은 순</option>
+        <option value="-cores">CPU Core 큰 순</option>
+      </select>
       <button class="btn btn-primary btn-sm" onclick="exportMonthlyReport()"
               title="보고자료에 그대로 붙일 장표 4장">월간 보고서</button>
       <button class="btn btn-secondary btn-sm" onclick="exportMonthly('all')">원본 Excel</button>
