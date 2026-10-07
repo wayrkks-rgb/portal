@@ -215,6 +215,130 @@ async function excludeOneAsset(cmId, hostname) {
   else loadMonthlyCheck();
 }
 
+// ── 확인이 필요한 서버 (VM 제외 ↔ 서버현황) ────────────────────────────
+// VM 을 전원 꺼짐 등으로 자원 집계에서 뺐는데 같은 서버가 서버현황에는 자산으로
+// 남아 있으면 둘 중 하나가 틀렸다. 어느 쪽을 고칠지는 사람이 정한다.
+let crossCheckData = null;
+
+function renderCrossCheckAgain() {
+  const table = document.getElementById('crosscheck-table');
+  if (!table || !crossCheckData) return;
+  const term = ((document.getElementById('crosscheck-search') || {}).value || '')
+    .trim().toLowerCase();
+  const all = crossCheckData.items || [];
+  const shown = term ? all.filter(item => [
+    item.hostname, item.primary_ip, item.service_name, item.cm_id,
+    item.vm_name, item.esxi_host, item.cluster_name,
+  ].some(v => String(v || '').toLowerCase().includes(term))) : all;
+
+  table.className = 'table-sticky';
+  table.innerHTML = `<thead><tr>
+    <th>판정</th><th>호스트명 · IP</th><th>업무명</th><th>구분</th>
+    <th>ITSM</th><th>vCenter · VM</th><th>전원</th><th>해야 할 일</th><th></th>
+  </tr></thead><tbody>${
+    shown.length ? shown.map(item => {
+      const mark = item.review ? '⚠️' : '';
+      const cls = item.review ? 'text-warning' : 'text-muted';
+      return `<tr>
+        <td class="${cls}"><strong>${mark} ${syncEscape(item.verdict_label)}</strong></td>
+        <td><strong>${syncEscape(item.hostname || '(호스트명 없음)')}</strong>
+          <div class="text-xs text-muted mono">${syncEscape(item.primary_ip || '-')}</div></td>
+        <td>${syncEscape(item.service_name || '-')}</td>
+        <td>${syncEscape(item.kind || '-')}
+          <div class="text-xs text-muted">${syncEscape(item.location || '')}</div></td>
+        <td class="text-xs">${item.asset_included === null ? '<span class="text-muted">없음</span>'
+          : item.asset_included ? '<span class="text-success">자산</span>'
+          : `<span class="text-error">제외</span><div class="text-xs text-muted">${syncEscape(item.asset_reason_label || item.asset_reason || '')}</div>`}
+          ${item.cm_id ? `<div class="text-xs text-muted mono">${syncEscape(item.cm_id)}</div>` : ''}</td>
+        <td class="text-xs">${item.vm_name
+          ? `${syncEscape(item.vm_name)}<div class="text-xs text-muted mono">${syncEscape(item.esxi_host || '')}</div>`
+          + (item.vm_included ? '' : `<div class="text-xs text-error">제외: ${syncEscape(item.vm_reason_label || item.vm_reason || '')}</div>`)
+          : '<span class="text-muted">VM 없음</span>'}</td>
+        <td class="text-xs">${item.power_state
+          ? `<span class="${item.powered_off ? 'text-error' : ''}">${syncEscape(item.power_state)}</span>`
+          : '-'}</td>
+        <td class="text-xs">${syncEscape(item.action || '-')}</td>
+        <td>${item.cm_id && item.review
+          ? `<button class="btn btn-secondary btn-sm"
+               onclick="excludeOneAsset('${syncEscape(item.cm_id)}','${syncEscape(item.hostname || '')}')"
+               title="자산에서 빼기">제외</button>`
+          : ''}</td>
+      </tr>`;
+    }).join('')
+      : `<tr><td colspan="9" style="text-align:center" class="text-muted">${
+        all.length ? '검색 결과가 없습니다.' : '✅ 어긋난 서버가 없습니다.'
+      }</td></tr>`
+  }</tbody>`;
+
+  const counts = document.getElementById('crosscheck-counts');
+  if (counts) {
+    const entries = Object.entries(crossCheckData.counts || {})
+      .filter(([, item]) => item.count)
+      .sort((a, b) => Number(b[1].review) - Number(a[1].review) || b[1].count - a[1].count);
+    counts.innerHTML = entries.map(([, item]) =>
+      `<span class="badge ${item.review ? 'badge-yellow' : 'badge-blue'}">`
+      + `${syncEscape(item.label)} ${Number(item.count).toLocaleString()}</span>`).join('');
+  }
+
+  const basis = document.getElementById('crosscheck-basis');
+  if (basis) {
+    const asOf = crossCheckData.as_of || {};
+    const summary = crossCheckData.summary || {};
+    basis.textContent = `ITSM ${asOf.itsm || '-'} · vCenter ${asOf.vcenter || '-'} 기준`
+      + ` · 확인 필요 ${Number(summary.review || 0).toLocaleString()}건`
+      + (term ? ` · ${shown.length.toLocaleString()}건 표시` : '')
+      + (crossCheckData.truncated ? ' · 일부만 표시' : '');
+  }
+}
+
+async function loadCrossCheck() {
+  const alertEl = document.getElementById('crosscheck-alert');
+  if (!alertEl) return;
+  const all = (document.getElementById('crosscheck-all') || {}).checked;
+  alertEl.innerHTML = '<div class="alert alert-info"><span class="loading"></span> 교차 점검 중...</div>';
+  try {
+    crossCheckData = await apiFetch('/api/asset-sync/scope-crosscheck'
+      + (all ? '?review=all' : ''));
+  } catch (error) {
+    alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(error.message)}</div>`;
+    return;
+  }
+  if (crossCheckData.status === 'NO_SNAPSHOT') {
+    alertEl.innerHTML = `<div class="alert alert-warning">⚠️ ${syncEscape(crossCheckData.message)}</div>`;
+    crossCheckData = null;
+    return;
+  }
+  const review = Number((crossCheckData.summary || {}).review || 0);
+  alertEl.innerHTML = review
+    ? `<div class="alert alert-warning">⚠️ 확인이 필요한 서버 <strong>${review.toLocaleString()}대</strong>.`
+      + ' VM 과 서버현황의 판단이 어긋납니다.</div>'
+    : '<div class="alert alert-success">✅ VM 제외와 서버현황이 서로 맞습니다.</div>';
+  renderCrossCheckAgain();
+}
+
+async function exportCrossCheck() {
+  const alertEl = document.getElementById('crosscheck-alert');
+  const all = (document.getElementById('crosscheck-all') || {}).checked;
+  const response = await fetch('/api/asset-sync/scope-crosscheck/export'
+    + (all ? '?review=all' : ''));
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(data.error || 'HTTP ' + response.status)}</div>`;
+    return;
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const match = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+  link.href = url;
+  link.download = match ? decodeURIComponent(match[1]) : '제외교차점검.xlsx';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 // ── 대수 맞춤 ───────────────────────────────────────────────────────────
 // "대수가 안 맞는다" 에는 두 가지가 섞여 있다. 같아야 하는데 다른 것(버그)과
 // 달라야 정상인 것(ITSM 자산 vs vCenter VM). 표만 보면 가릴 수 없으므로
@@ -521,6 +645,8 @@ async function loadMonthlyCheck() {
   // 대수가 서로 맞는지 따로 확인한다. 표를 다 그린 뒤라 느려도 화면이 안 막힌다.
   loadCountAudit(month);
   loadMonthlyReportOptions();
+  // VM 제외와 서버현황이 어긋난 서버. 서버현황을 다 그린 뒤라 느려도 안 막힌다.
+  loadCrossCheck();
 
   // 기준을 드러낸다. 대수가 ITSM 과 다를 때 어느 쪽이 틀렸는지 따질 수 있어야 한다.
   const criteria = res.criteria;

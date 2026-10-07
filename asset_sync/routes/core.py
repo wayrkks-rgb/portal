@@ -20,7 +20,8 @@ from ..services import (
     DashboardService, ExportService,
     IntegratedDashboardService, PeriodService, ReconciliationExceptionService,
     MONTHLY_SECTIONS, MonthlyCheckExportService, MonthlyReportService,
-    ReconciliationService, ServerStatusService, VMResourceUsageExportService, present_all,
+    ReconciliationService, ScopeCrossCheckService, ServerStatusService,
+    VMResourceUsageExportService, present_all,
 )
 from ..services.asset_scope import AssetScope
 from ..services.monthly_report_service import SORT_FIELDS
@@ -246,6 +247,41 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
             path = target / service.file_name(base_day)
             workbook.save(path)
             workbook.close()
+        return send_file(path, as_attachment=True, download_name=path.name)
+
+    @bp.route("/api/asset-sync/scope-crosscheck")
+    @login_required
+    def scope_crosscheck() -> Any:
+        """VM 제외와 서버현황이 서로 맞는지 본다.
+
+        VM 을 전원 꺼짐 등으로 자원 집계에서 뺐는데 같은 서버가 ITSM 서버현황에는
+        자산으로 남아 있으면 확인이 필요하다. 반대 방향도 같이 본다.
+        """
+        only_review = str(request.args.get("review") or "").strip().lower() not in {"0", "false", "all"}
+        limit = min(int(request.args.get("limit", 2000)), 20000)
+        with manager.connect() as conn:
+            result = ScopeCrossCheckService(cfg, AssetRepository(conn)).check()
+        if only_review:
+            result["items"] = [item for item in result["items"] if item.get("review")]
+        result["truncated"] = len(result["items"]) > limit
+        result["items"] = result["items"][:limit]
+        return jsonify(result)
+
+    @bp.route("/api/asset-sync/scope-crosscheck/export")
+    @login_required
+    def scope_crosscheck_export() -> Any:
+        """교차 점검 결과를 엑셀로. 받아서 담당자에게 돌릴 목록이다."""
+        only_review = str(request.args.get("review") or "").strip().lower() not in {"0", "false", "all"}
+        with manager.connect() as conn:
+            result = ScopeCrossCheckService(cfg, AssetRepository(conn)).check()
+        if result["status"] != "SUCCESS":
+            return jsonify({"error": result.get("message") or "견줄 자료가 없습니다."}), 400
+        items = [item for item in result["items"] if item.get("review")] if only_review \
+            else result["items"]
+        target = cfg.resolve("data/export/crosscheck")
+        target.mkdir(parents=True, exist_ok=True)
+        path = target / f"제외교차점검_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        ScopeCrossCheckService.write_xlsx(result, items, path)
         return send_file(path, as_attachment=True, download_name=path.name)
 
     @bp.route("/api/asset-sync/monthly-report/options")

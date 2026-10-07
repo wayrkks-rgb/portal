@@ -16,6 +16,7 @@ from .period_service import PeriodService
 from .override_service import OverrideService
 from .quality_service import DataQualityService
 from .reconciliation_service import ReconciliationService
+from .scope_crosscheck_service import ScopeCrossCheckService
 from .server_status_service import ServerStatusService
 from .snapshot_service import SnapshotService
 from .sync_service import ChangeSyncService
@@ -26,5 +27,5 @@ __all__ = [
     "DataQualityService", "ReconciliationService", "SnapshotService", "ChangeSyncService", "DailyComparisonService",
     "IntegratedDashboardService", "ReconciliationExceptionService", "VMResourceUsageExportService",
     "ServerStatusService", "MonthlyCheckExportService", "MONTHLY_SECTIONS",
-    "CountAuditService", "MonthlyReportService",
+    "CountAuditService", "MonthlyReportService", "ScopeCrossCheckService",
 ]

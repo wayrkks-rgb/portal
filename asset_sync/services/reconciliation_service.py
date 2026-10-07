@@ -7,6 +7,7 @@ from typing import Any
 
 from ..config import AppConfig
 from ..repositories import AssetRepository
+from . import asset_matching
 from .override_service import OverrideService
 
 
@@ -42,48 +43,23 @@ class ReconciliationService:
             and not (self.config.rvtools.get("exclude_srm_placeholders", True) and bool(rec.get("srm_placeholder")))
         }
         identity_map = self.repo.identity_maps()
-        by_uuid = {str(rec.get("vm_uuid") or ""): key for key, rec in rv.items() if rec.get("vm_uuid")}
-        host_index: dict[str, set[str]] = defaultdict(set)
-        ip_index: dict[str, set[str]] = defaultdict(set)
-        vm_name_index: dict[str, set[str]] = defaultdict(set)
-        for key, rec in rv.items():
-            if rec.get("normalized_hostname"):
-                host_index[str(rec["normalized_hostname"])].add(key)
-            for ip in rec.get("ip_addresses", []):
-                ip_index[str(ip)].add(key)
-            if rec.get("vm_name"):
-                vm_name_index[str(rec["vm_name"]).strip().lower()].add(key)
+        # 짝짓기 규칙은 ``asset_matching`` 한 곳에만 둔다. 교차 점검도 같은 것을
+        # 쓰므로 한쪽은 짝을 찾고 다른 쪽은 못 찾는 일이 없다.
+        index = asset_matching.build_index(rv)
+        allow_vm_name = bool(self.config.matching.get("allow_vm_name_auto_match", False))
 
         matched_rv: set[str] = set()
         results: list[dict[str, Any]] = []
         created_at = datetime.now().isoformat()
         for cm_id, asset in itsm.items():
-            candidates: set[str] = set()
-            method = None
-            score = 0
-            mapped_uuid = identity_map.get(cm_id)
-            if mapped_uuid and mapped_uuid in by_uuid:
-                candidates = {by_uuid[mapped_uuid]}
-                method, score = "IDENTITY_MAP", 100
-            else:
-                host = asset.get("normalized_hostname")
-                ips = set(asset.get("ip_addresses", []))
-                host_candidates = set(host_index.get(str(host), set())) if host else set()
-                ip_candidates = set().union(*(ip_index.get(str(ip), set()) for ip in ips)) if ips else set()
-                both = host_candidates & ip_candidates
-                if both:
-                    candidates, method, score = both, "IP_HOSTNAME", 95
-                elif host_candidates:
-                    candidates, method, score = host_candidates, "HOSTNAME", 80
-                elif ip_candidates:
-                    candidates, method, score = ip_candidates, "IP", 70
-                elif self.config.matching.get("allow_vm_name_auto_match", False) and host:
-                    candidates, method, score = set(vm_name_index.get(str(host).lower(), set())), "VM_NAME", 50
-
-            if len(candidates) > 1:
+            match = asset_matching.find(
+                cm_id, asset, index, identity_map=identity_map, allow_vm_name=allow_vm_name
+            )
+            method, score = match.method, match.score
+            if match.ambiguous:
                 results.append(self._result(cm_id, None, "AMBIGUOUS", method, score, [], "복수 후보", created_at))
                 continue
-            if not candidates:
+            if not match.key:
                 status_code = asset.get("status_code")
                 if failed_scopes:
                     reason = "일부 vCenter 수집 실패로 미매칭을 확정하지 않음"
@@ -92,7 +68,7 @@ class ReconciliationService:
                     reason = "대기 자산 미매칭" if status_code == "CMSTA050" else "운영 자산 미매칭"
                     results.append(self._result(cm_id, None, "ITSM_ONLY", None, 0, [], reason, created_at))
                 continue
-            rv_key = next(iter(candidates))
+            rv_key = match.key
             matched_rv.add(rv_key)
             vm = rv[rv_key]
             if (

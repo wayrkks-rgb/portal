@@ -160,6 +160,36 @@
 
       <div class="card">
         <div class="flex justify-between items-center mb-4">
+          <div class="card-title" style="margin-bottom:0"><span class="icon">🔎</span> 확인이 필요한 서버 (VM 제외 ↔ 서버현황)</div>
+          <div class="flex gap-2 items-center">
+            <div class="text-xs text-muted" id="crosscheck-basis"></div>
+            <label class="text-xs flex items-center gap-2">
+              <input type="checkbox" id="crosscheck-all" onchange="loadCrossCheck()">
+              맞는 것까지 전부
+            </label>
+            <input class="form-input" id="crosscheck-search" style="width:200px"
+                   placeholder="호스트명·IP·업무명 검색" oninput="renderCrossCheckAgain()">
+            <button class="btn btn-secondary btn-sm" onclick="exportCrossCheck()">Excel</button>
+          </div>
+        </div>
+        <div class="text-xs text-muted mb-4">
+          <strong>VM 은 자원 집계에서 뺐는데 서버현황에는 자산으로 남아 있는 서버</strong>를 찾습니다.
+          둘 중 하나가 틀린 것이니 어느 쪽을 고칠지 결정해야 합니다.
+          <div style="margin-top:4px">
+            반대 방향(ITSM 은 미사용인데 VM 은 켜져 돌고 있음)과,
+            전원이 꺼진 채 자산으로 세고 있는 서버도 같이 올립니다.
+            양쪽 모두 뺀 것은 정리가 끝난 것이므로 올리지 않습니다.
+          </div>
+        </div>
+        <div id="crosscheck-alert"></div>
+        <div class="flex gap-2 items-center mb-4" id="crosscheck-counts"></div>
+        <div class="table-wrap" style="max-height:460px;overflow:auto">
+          <table id="crosscheck-table"></table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="flex justify-between items-center mb-4">
           <div class="card-title" style="margin-bottom:0"><span class="icon">🗄️</span> 서버현황 (전체 서버)</div>
           <button class="btn btn-secondary btn-sm" onclick="exportMonthly('server_all')">Excel</button>
           <div class="text-xs text-muted" id="monthly-server-basis"></div>
