@@ -325,3 +325,158 @@ def test_the_host_vm_count_always_matches_the_vm_list(tmp_path: Path) -> None:
     assert sum(h["vm_count"] for h in result["hosts"]) == len(result["vms"])
     # 클러스터 합계도 같은 수를 써야 한다.
     assert sum(c["vm_count"] for c in result["clusters"]) == len(result["vms"])
+
+
+# ── 기간 집계: 같은 대상이 두 줄로 갈라지면 안 된다 ────────────────────
+#
+# 집계 열쇠에 **바뀌는 값**(클러스터·업무명·VM 이름)이 들어 있으면, 달 중간에
+# 그것이 바뀐 순간 같은 장비가 두 줄로 갈라진다. 대수와 할당량이 그만큼 부풀려
+# 지고, 월간 보고서의 통합기별 VM 대수가 실제 ESXi 와 달라진다. 실제로 그랬다.
+
+
+def _run_on(conn, day: str) -> int:
+    return int(conn.execute(
+        "INSERT INTO resource_usage_run(period_start, period_end, started_at, status)"
+        " VALUES(?, ?, ?, 'SUCCESS')", (day, day, day),
+    ).lastrowid)
+
+
+def _host_on(conn, run: int, day: str, esxi: str, *, cluster: str = "CL1",
+             service: str = "업무A", cores: int = 64) -> None:
+    conn.execute(
+        "INSERT INTO host_resource_usage_daily(run_id, stat_date, vcenter_id, service_name,"
+        " cluster_name, esxi_host, vm_count, allocated_cpu_cores, allocated_memory_mb,"
+        " cpu_max_pct, cpu_avg_pct, mem_max_pct, mem_avg_pct, sample_count, collection_status,"
+        " raw_json, created_at) VALUES(?,?,'VC1',?,?,?, 0, ?,?, 80,40,70,35, 12, 'SUCCESS','{}',?)",
+        (run, day, service, cluster, esxi, cores, 512 * GB, day),
+    )
+
+
+def _vm_on(conn, run: int, day: str, *, uuid: str, name: str, esxi: str,
+           cluster: str = "CL1", service: str = "업무A") -> None:
+    conn.execute(
+        "INSERT INTO vm_resource_usage_daily(run_id, stat_date, vcenter_snapshot_id, asset_key,"
+        " vcenter_id, service_name, cluster_name, esxi_host, vm_uuid, vm_name, power_state,"
+        " allocated_cpu_cores, allocated_memory_mb, provisioned_disk_mb, used_disk_mb,"
+        " cpu_max_pct, cpu_avg_pct, mem_max_pct, mem_avg_pct, sample_count, inventory_status,"
+        " collection_status, raw_json, created_at)"
+        " VALUES(?,?,NULL,?, 'VC1',?,?,?,?,?, 'poweredOn', 4, ?, ?, ?, 40,20,60,30, 12,"
+        " 'CURRENT','SUCCESS','{}',?)",
+        (run, day, uuid, service, cluster, esxi, uuid, name, 16 * GB,
+         100 * GB, 40 * GB, day),
+    )
+
+
+def test_a_host_that_moved_cluster_stays_one_row(tmp_path: Path) -> None:
+    """ESXi 가 달 중간에 클러스터를 옮겨도 한 대다. 두 줄이면 대수가 두 배가 된다."""
+    cfg, manager = _service(tmp_path)
+    with manager.connect() as conn:
+        early = _run_on(conn, "2026-09-01")
+        _host_on(conn, early, "2026-09-01", "esxi-01", cluster="CL1")
+        for index in range(3):
+            _vm_on(conn, early, "2026-09-01", uuid=f"u{index}", name=f"vm-{index}",
+                   esxi="esxi-01", cluster="CL1")
+        late = _run_on(conn, "2026-09-20")
+        _host_on(conn, late, "2026-09-20", "esxi-01", cluster="CL2")
+        for index in range(3):
+            _vm_on(conn, late, "2026-09-20", uuid=f"u{index}", name=f"vm-{index}",
+                   esxi="esxi-01", cluster="CL2")
+        conn.commit()
+        result = VMResourceUsageExportService(cfg, AssetRepository(conn)).summary(
+            "2026-09-01", "2026-09-30")
+
+    assert len(result["hosts"]) == 1, [h["cluster_name"] for h in result["hosts"]]
+    host = result["hosts"][0]
+    assert host["vm_count"] == 3
+    assert host["cluster_name"] == "CL2", "마지막 날의 클러스터가 지금 모습이다"
+    assert host["day_count"] == 2, "며칠치를 접었는지 남긴다"
+    assert len(result["vms"]) == 3
+    assert sum(h["vm_count"] for h in result["hosts"]) == len(result["vms"])
+
+
+def test_a_renamed_vm_stays_one_row(tmp_path: Path) -> None:
+    """이름을 고친 VM 이 두 줄로 갈라지면 대수와 할당량이 다 부풀려진다."""
+    cfg, manager = _service(tmp_path)
+    with manager.connect() as conn:
+        early = _run_on(conn, "2026-09-01")
+        _host_on(conn, early, "2026-09-01", "esxi-01")
+        _vm_on(conn, early, "2026-09-01", uuid="u-a", name="old-name", esxi="esxi-01")
+        late = _run_on(conn, "2026-09-20")
+        _host_on(conn, late, "2026-09-20", "esxi-01")
+        _vm_on(conn, late, "2026-09-20", uuid="u-a", name="new-name", esxi="esxi-01")
+        conn.commit()
+        result = VMResourceUsageExportService(cfg, AssetRepository(conn)).summary(
+            "2026-09-01", "2026-09-30")
+
+    assert len(result["vms"]) == 1
+    assert result["vms"][0]["vm_name"] == "new-name", "마지막 날의 이름을 쓴다"
+    assert result["hosts"][0]["vm_count"] == 1
+    # 할당량도 한 번만 세야 한다. 두 줄이면 CPU 8, 메모리 32GB 가 된다.
+    assert result["hosts"][0]["assigned_cpu_cores"] == 4
+    assert result["hosts"][0]["assigned_memory_gb"] == 16
+
+
+def test_a_changed_service_name_does_not_split_anything(tmp_path: Path) -> None:
+    """업무명(표시명)을 고치면 호스트와 VM 이 모두 갈라지고 있었다."""
+    cfg, manager = _service(tmp_path)
+    with manager.connect() as conn:
+        early = _run_on(conn, "2026-09-01")
+        _host_on(conn, early, "2026-09-01", "esxi-01", service="업무A")
+        _vm_on(conn, early, "2026-09-01", uuid="u-a", name="vm-a", esxi="esxi-01",
+               service="업무A")
+        late = _run_on(conn, "2026-09-20")
+        _host_on(conn, late, "2026-09-20", "esxi-01", service="업무B")
+        _vm_on(conn, late, "2026-09-20", uuid="u-a", name="vm-a", esxi="esxi-01",
+               service="업무B")
+        conn.commit()
+        result = VMResourceUsageExportService(cfg, AssetRepository(conn)).summary(
+            "2026-09-01", "2026-09-30")
+
+    assert len(result["hosts"]) == 1
+    assert len(result["vms"]) == 1
+    assert result["hosts"][0]["service_name"] == "업무B"
+    assert result["vms"][0]["service_name"] == "업무B"
+    assert len(result["clusters"]) == 1
+
+
+def test_a_vm_without_a_uuid_falls_back_to_its_name(tmp_path: Path) -> None:
+    """UUID 를 못 읽은 VM 도 하루에 한 대로 세야 한다."""
+    cfg, manager = _service(tmp_path)
+    with manager.connect() as conn:
+        for day in ("2026-09-01", "2026-09-20"):
+            run = _run_on(conn, day)
+            _host_on(conn, run, day, "esxi-01")
+            conn.execute(
+                "INSERT INTO vm_resource_usage_daily(run_id, stat_date, vcenter_id, service_name,"
+                " cluster_name, esxi_host, vm_name, power_state, allocated_cpu_cores,"
+                " allocated_memory_mb, sample_count, inventory_status, collection_status,"
+                " raw_json, created_at)"
+                " VALUES(?,?,'VC1','업무A','CL1','esxi-01','nouuid-vm','poweredOn',4,?,12,"
+                " 'CURRENT','SUCCESS','{}',?)",
+                (run, day, 16 * GB, day),
+            )
+        conn.commit()
+        result = VMResourceUsageExportService(cfg, AssetRepository(conn)).summary(
+            "2026-09-01", "2026-09-30")
+    assert len(result["vms"]) == 1
+    assert result["hosts"][0]["vm_count"] == 1
+
+
+def test_two_hosts_with_the_same_name_in_different_vcenters_stay_apart(tmp_path: Path) -> None:
+    """vCenter 가 다르면 이름이 같아도 다른 장비다. 합치면 대수가 줄어든다."""
+    cfg, manager = _service(tmp_path)
+    with manager.connect() as conn:
+        run = _run_on(conn, STAT_DATE)
+        _host_on(conn, run, STAT_DATE, "esxi-01")
+        conn.execute(
+            "INSERT INTO host_resource_usage_daily(run_id, stat_date, vcenter_id, service_name,"
+            " cluster_name, esxi_host, vm_count, allocated_cpu_cores, allocated_memory_mb,"
+            " sample_count, collection_status, raw_json, created_at)"
+            " VALUES(?,?,'VC2','업무B','CL9','esxi-01', 0, 64, ?, 12, 'SUCCESS','{}',?)",
+            (run, STAT_DATE, 512 * GB, STAT_DATE),
+        )
+        conn.commit()
+        result = VMResourceUsageExportService(cfg, AssetRepository(conn)).summary(
+            STAT_DATE, STAT_DATE)
+    assert len(result["hosts"]) == 2
+    assert {h["vcenter_id"] for h in result["hosts"]} == {"VC1", "VC2"}

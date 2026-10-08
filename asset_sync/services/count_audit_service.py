@@ -182,11 +182,22 @@ class CountAuditService:
                 str(run["period_start"] or run["period_end"]), str(run["period_end"])
             )
             hosts = usage.get("hosts") or []
+            vm_rows = usage.get("vms") or []
+            # 같은 대상이 두 줄로 갈라지면 대수와 할당량이 부풀려진다. 기간 집계가
+            # 바뀌는 값(클러스터·이름·업무명)으로 묶으면 그렇게 된다.
+            #
+            # 세는 방법이 집계와 같으면 검사가 무의미하다 -- 늘 서로 맞는다.
+            # 그래서 **원본 표에서 직접** 서로 다른 대수를 센다.
+            expected = self._distinct_from_db(
+                str(run["period_start"] or run["period_end"]), str(run["period_end"])
+            )
             counts["resource_usage"] = {
                 "host_rows": len(hosts),
+                "distinct_hosts": expected["hosts"],
+                "distinct_vms": expected["vms"],
                 # 통합기 표가 더해 보여주는 VM 대수와 아래 VM 목록 줄 수.
                 "host_vm_total": sum(int(h.get("vm_count") or 0) for h in hosts),
-                "vm_rows": len(usage.get("vms") or []),
+                "vm_rows": len(vm_rows),
                 "cluster_rows": len(usage.get("clusters") or []),
                 "datastore_rows": len(usage.get("datastores") or []),
                 "excluded_rows": int((usage.get("scope") or {}).get("excluded_rows", 0)),
@@ -197,6 +208,31 @@ class CountAuditService:
                 ),
             }
         return counts
+
+    def _distinct_from_db(self, start: str, end: str) -> dict[str, int]:
+        """원본 표에서 서로 다른 ESXi·VM 대수를 센다.
+
+        집계 결과를 집계와 같은 방법으로 다시 세면 늘 맞아떨어진다. 그러면 검사가
+        아니다. 여기서는 저장된 행을 직접 보고, 가장 단순한 기준으로 센다.
+        ESXi 는 (vCenter, 호스트명), VM 은 UUID 가 있으면 UUID, 없으면 이름이다.
+        """
+        hosts = self.repo.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM ("
+            " SELECT DISTINCT vcenter_id, esxi_host FROM host_resource_usage_daily"
+            " WHERE stat_date>=? AND stat_date<=?)",
+            (start, end),
+        ).fetchone()
+        vms = self.repo.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM ("
+            " SELECT DISTINCT vcenter_id,"
+            "        CASE WHEN vm_uuid IS NOT NULL AND vm_uuid<>'' THEN vm_uuid ELSE vm_name END"
+            "   FROM vm_resource_usage_daily WHERE stat_date>=? AND stat_date<=?)",
+            (start, end),
+        ).fetchone()
+        return {
+            "hosts": int(hosts["cnt"] if hosts else 0),
+            "vms": int(vms["cnt"] if vms else 0),
+        }
 
     # ── 견주기 ──────────────────────────────────────────────────────────
     def _checks(self, sources: dict[str, Any], counts: dict[str, Any]) -> list[dict[str, Any]]:
@@ -230,6 +266,14 @@ class CountAuditService:
             self._same(add, "통합기 표 VM 합 = VM 목록 줄 수",
                        usage["host_vm_total"] + usage["vms_without_host"], usage["vm_rows"],
                        "통합기별 VM 대수의 합과 VM 목록 줄 수")
+            # 같은 ESXi·VM 이 두 줄로 갈라지면 대수와 할당량이 부풀려진다.
+            # 기간 집계가 바뀌는 값(클러스터·이름·업무명)으로 묶으면 그렇게 된다.
+            self._same(add, "통합기 줄 수 = 실제 ESXi 대수",
+                       usage["host_rows"], usage["distinct_hosts"],
+                       "통합기 줄 수와 서로 다른 ESXi 대수")
+            self._same(add, "VM 줄 수 = 실제 VM 대수",
+                       usage["vm_rows"], usage["distinct_vms"],
+                       "VM 목록 줄 수와 서로 다른 VM 대수")
             if usage["vms_without_host"]:
                 add("소속 통합기 없는 VM", INFO,
                     f"ESXi 가 비어 있는 VM {usage['vms_without_host']:,}대가 있습니다."

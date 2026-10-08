@@ -253,3 +253,56 @@ def test_a_fresh_reconciliation_reads_as_ok(portal) -> None:
         conn.commit()
     named = {c["name"]: c for c in audit(config, manager)["checks"]}
     assert named["정합성 기준 스냅샷"]["verdict"] == OK
+
+
+def test_the_audit_catches_a_duplicated_vm_row(portal, monkeypatch) -> None:
+    """같은 VM 이 두 줄로 갈라지면 대수가 부풀려진다. 감사가 잡아야 한다.
+
+    예전 기간 집계는 VM 이름·업무명으로 묶어서, 이름을 고친 VM 이 두 줄이 됐다.
+    그때 통합기 표의 합과 VM 목록 줄 수는 **둘 다 4** 라 서로 맞았으므로, 기존
+    검사만으로는 알 수 없었다.
+    """
+    config, manager = portal
+    seed_itsm(manager, BASE_DAY, [asset("CM001")])
+    seed_vcenter(manager, BASE_DAY, [vm("vc01", 1)])
+    day = BASE_DAY.isoformat()
+    with manager.connect() as conn:
+        run = int(conn.execute(
+            "INSERT INTO resource_usage_run(period_start, period_end, started_at, status)"
+            " VALUES(?, ?, ?, 'SUCCESS')", (day, day, day)).lastrowid)
+        conn.execute(
+            "INSERT INTO host_resource_usage_daily(run_id, stat_date, vcenter_id, service_name,"
+            " cluster_name, esxi_host, vm_count, allocated_cpu_cores, allocated_memory_mb,"
+            " sample_count, collection_status, raw_json, created_at)"
+            " VALUES(?,?,'VC1','업무A','CL1','esxi-01', 2, 64, 524288, 12, 'SUCCESS','{}',?)",
+            (run, day, day))
+        # 같은 UUID 가 이름만 다르게 두 줄. 집계가 이름으로 묶으면 2대가 된다.
+        for name in ("old-name", "new-name"):
+            conn.execute(
+                "INSERT INTO vm_resource_usage_daily(run_id, stat_date, vcenter_id, service_name,"
+                " cluster_name, esxi_host, vm_uuid, vm_name, power_state, allocated_cpu_cores,"
+                " allocated_memory_mb, sample_count, inventory_status, collection_status,"
+                " raw_json, created_at)"
+                " VALUES(?,?,'VC1','업무A','CL1','esxi-01','u-a',?, 'poweredOn', 4, 16384, 12,"
+                " 'CURRENT','SUCCESS','{}',?)",
+                (run, day, name, day))
+        conn.commit()
+
+    # 지금 코드는 UUID 로 묶으므로 한 줄로 접힌다.
+    named = {check["name"]: check for check in audit(config, manager)["checks"]}
+    assert named["VM 줄 수 = 실제 VM 대수"]["verdict"] == OK
+    assert named["통합기 줄 수 = 실제 ESXi 대수"]["verdict"] == OK
+
+    # 집계가 다시 이름으로 묶게 되면(되돌아가면) 감사가 MISMATCH 로 잡는다.
+    # 집계가 다시 이름으로 묶게 되면(되돌아가면) 감사가 MISMATCH 로 잡는다.
+    # 감사는 원본 표를 직접 세므로, 집계만 바뀌면 어긋남이 드러난다.
+    from asset_sync.services.resource_usage_service import VMResourceUsageExportService
+
+    monkeypatch.setattr(
+        VMResourceUsageExportService, "vm_identity",
+        staticmethod(lambda row: (str(row.get("vcenter_id") or ""), str(row.get("vm_name") or ""))),
+    )
+    result = audit(config, manager)
+    broken = next(c for c in result["checks"] if c["name"] == "VM 줄 수 = 실제 VM 대수")
+    assert broken["verdict"] == MISMATCH, "이름으로 묶으면 두 줄이 되는데 감사가 못 잡는다"
+    assert "2 vs 1" in broken["message"], broken["message"]

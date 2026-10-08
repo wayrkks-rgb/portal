@@ -5,7 +5,7 @@ import json
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
@@ -471,8 +471,8 @@ class VMResourceUsageExportService:
         # 쌓여 있는 행도 지금 기준으로 다시 걸러야 한다. 이 변경 전에 수집한
         # 행에는 vCLS 가 들어 있고, 나중에 수동으로 뺀 VM 도 반영되어야 한다.
         vm_rows, dropped = self._apply_scope(vm_rows)
-        hosts = self._aggregate(host_rows, ["vcenter_id", "service_name", "cluster_name", "esxi_host"], host=True)
-        vms = self._aggregate(vm_rows, ["vcenter_id", "service_name", "vm_uuid", "vm_name"], host=False)
+        hosts = self._aggregate(host_rows, host=True)
+        vms = self._aggregate(vm_rows, host=False)
         # 데이터스토어는 ESXi 여럿이 함께 쓴다. esxi_host 로 걸러낼 수 없으므로
         # 그 조건은 빼고 vCenter·클러스터만 본다.
         datastores = self._datastores(start_day, end_day, vcenter_id, cluster_name)
@@ -882,14 +882,51 @@ class VMResourceUsageExportService:
         count = self.repo.replace_resource_usage(target_date, normalized)
         return {"status": "SUCCESS", "stat_date": target_date, "count": count, "source": path.name}
 
-    def _aggregate(self, rows: list[dict[str, Any]], keys: list[str], *, host: bool) -> list[dict[str, Any]]:
-        grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+    @staticmethod
+    def host_identity(row: Mapping[str, Any]) -> tuple[str, str]:
+        """ESXi 한 대를 가리키는 것. vCenter 와 호스트 이름뿐이다.
+
+        클러스터·업무명은 **바뀐다**. 그것을 열쇠에 넣으면 달 중간에 호스트가
+        클러스터를 옮기는 순간 같은 장비가 두 줄로 갈라지고, 대수가 양쪽에 모두
+        들어가 두 배로 센다. 실제로 그랬다.
+        """
+        return (str(row.get("vcenter_id") or ""), str(row.get("esxi_host") or ""))
+
+    @staticmethod
+    def vm_identity(row: Mapping[str, Any]) -> tuple[str, str]:
+        """VM 한 대를 가리키는 것. UUID 가 있으면 그것이 유일하다.
+
+        VM 이름과 업무명은 바뀐다. 이름을 열쇠에 넣으면 이름을 고친 VM 이 두 줄로
+        갈라져 대수와 할당량이 부풀려진다. UUID 가 없을 때만 이름으로 떨어진다.
+        """
+        vcenter = str(row.get("vcenter_id") or "")
+        for field in ("vm_uuid", "asset_key", "vm_name"):
+            value = str(row.get(field) or "").strip()
+            if value:
+                return (vcenter, value)
+        return (vcenter, "")
+
+    def _aggregate(self, rows: list[dict[str, Any]], *, host: bool) -> list[dict[str, Any]]:
+        """기간 안의 여러 날을 대상 하나로 접는다.
+
+        묶는 열쇠는 **변하지 않는 것**만 쓴다. 바뀌는 값(클러스터·업무명·VM 이름)은
+        마지막 날의 값을 그 대상의 지금 모습으로 삼는다.
+        """
+        identity = self.host_identity if host else self.vm_identity
+        grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         for row in rows:
-            grouped[tuple(row.get(k) for k in keys)].append(row)
+            grouped[identity(row)].append(row)
         result: list[dict[str, Any]] = []
-        for key, group in grouped.items():
+        for (vcenter_id, _key), group in grouped.items():
             latest = sorted(group, key=lambda r: (r.get("stat_date") or "", r.get("id") or 0))[-1]
-            item = {name: value for name, value in zip(keys, key)}
+            item: dict[str, Any] = {
+                "vcenter_id": vcenter_id or None,
+                # 바뀌는 값은 마지막 날의 것을 쓴다. 그게 지금 모습이다.
+                "service_name": latest.get("service_name"),
+                "vm_uuid": latest.get("vm_uuid"),
+                "vm_name": latest.get("vm_name"),
+                "asset_key": latest.get("asset_key"),
+            }
             item.update({
                 "cluster_name": latest.get("cluster_name"),
                 "esxi_host": latest.get("esxi_host"),
@@ -913,9 +950,13 @@ class VMResourceUsageExportService:
                 "mem_avg_pct": self._weighted_avg(group, "mem_avg_pct"),
                 "sample_count": sum(int(r.get("sample_count") or 0) for r in group),
                 "latest_stat_date": latest.get("stat_date"),
+                # 며칠치를 접은 것인지. 대수가 이상할 때 따져볼 수 있어야 한다.
+                "day_count": len({str(r.get("stat_date") or "") for r in group}),
             })
             result.append(item)
-        result.sort(key=lambda r: tuple(str(r.get(k) or "") for k in keys))
+        order = (["service_name", "cluster_name", "esxi_host"] if host
+                 else ["service_name", "esxi_host", "vm_name"])
+        result.sort(key=lambda r: tuple(str(r.get(k) or "") for k in order))
         return result
 
     def _vm_configuration_changes(self, start_day: date, end_day: date, vcenter_id: str | None, esxi_host: str | None) -> list[dict[str, Any]]:

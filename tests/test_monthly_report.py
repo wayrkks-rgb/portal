@@ -703,3 +703,89 @@ def test_the_screen_shows_what_the_default_is() -> None:
         assert f"'{element_id}'" in code, f"{element_id} 를 스크립트가 안 찾는다"
     assert "/api/asset-sync/monthly-report/options" in code
     assert "loadMonthlyReportOptions" in code
+
+
+# ── 상세 시트의 대수가 실제 ESXi 와 같아야 한다 ────────────────────────
+
+
+def test_the_detail_sheet_count_matches_the_real_esxi_after_a_month_of_churn(portal) -> None:
+    """달 중간에 변화가 있어도 통합기별 VM 대수가 실제와 같아야 한다.
+
+    예전 기간 집계는 클러스터·업무명·VM 이름으로 묶었다. 그래서 달 중간에
+    ESXi 가 클러스터를 옮기거나 VM 이름이 바뀌면 같은 대상이 두 줄로 갈라져
+    상세 시트의 대수가 실제 ESXi 와 달라졌다. 실제로 그랬다.
+    """
+    config, manager = portal
+    seed_itsm(manager, BASE_DAY, [asset("CM001")])
+
+    def run_on(conn, day: str) -> int:
+        return int(conn.execute(
+            "INSERT INTO resource_usage_run(period_start, period_end, started_at, status)"
+            " VALUES(?, ?, ?, 'SUCCESS')", (day, day, day)).lastrowid)
+
+    def host_on(conn, run: int, day: str, esxi: str, cluster: str) -> None:
+        conn.execute(
+            "INSERT INTO host_resource_usage_daily(run_id, stat_date, vcenter_id, service_name,"
+            " cluster_name, esxi_host, vm_count, allocated_cpu_cores, allocated_memory_mb,"
+            " cpu_max_pct, cpu_avg_pct, mem_max_pct, mem_avg_pct, sample_count,"
+            " collection_status, raw_json, created_at)"
+            " VALUES(?,?,'VC1','업무A',?,?, 0, 64, ?, 80,40,70,35, 12, 'SUCCESS','{}',?)",
+            (run, day, cluster, esxi, 448 * GB, day))
+
+    def vm_on(conn, run: int, day: str, uuid: str, name: str, esxi: str, cluster: str) -> None:
+        conn.execute(
+            "INSERT INTO vm_resource_usage_daily(run_id, stat_date, vcenter_snapshot_id,"
+            " asset_key, vcenter_id, service_name, cluster_name, esxi_host, vm_uuid, vm_name,"
+            " power_state, allocated_cpu_cores, allocated_memory_mb, cpu_max_pct, cpu_avg_pct,"
+            " mem_max_pct, mem_avg_pct, sample_count, inventory_status, collection_status,"
+            " raw_json, created_at)"
+            " VALUES(?,?,NULL,?, 'VC1','업무A',?,?,?,?, 'poweredOn', 4, ?, 40,20,60,30, 12,"
+            " 'CURRENT','SUCCESS','{}',?)",
+            (run, day, uuid, cluster, esxi, uuid, name, 16 * GB, day))
+
+    # 실제로는 ESXi 2대, VM 7대. 달 중간에 세 가지가 바뀐다.
+    #   esxi-02 가 CL1 → CL2 로 이동 · vm-u3 이름 변경 · u5 가 esxi-01 → esxi-02 로 이동
+    plan = {
+        "2026-09-01": [("esxi-01", "CL1", ["u1", "u2", "u3", "u4", "u5"]),
+                       ("esxi-02", "CL1", ["u6", "u7"])],
+        "2026-09-20": [("esxi-01", "CL1", ["u1", "u2", "u3", "u4"]),
+                       ("esxi-02", "CL2", ["u6", "u7", "u5"])],
+    }
+    names = {"2026-09-01": {"u3": "vm-03-old"}, "2026-09-20": {"u3": "vm-03-new"}}
+    with manager.connect() as conn:
+        for day, hosts in plan.items():
+            run = run_on(conn, day)
+            for esxi, cluster, uuids in hosts:
+                host_on(conn, run, day, esxi, cluster)
+                for uuid in uuids:
+                    vm_on(conn, run, day, uuid, names[day].get(uuid, f"vm-{uuid}"), esxi, cluster)
+        conn.commit()
+
+    book = saved(config, build(config, manager))
+    first, detail = book["통합서버자원사용현황"], book["통합서버자원사용현황(상세)"]
+
+    rows = []
+    for row in range(5, first.max_row + 1):
+        if first.cell(row, 2).value == "계":
+            total = first.cell(row, 8).value
+            break
+        if first.cell(row, 4).value:
+            rows.append((first.cell(row, 3).value, first.cell(row, 4).value, first.cell(row, 8).value))
+    assert len(rows) == 2, f"ESXi 2대인데 {len(rows)}줄입니다: {rows}"
+    assert [r[2] for r in rows] == [4, 3], rows
+    assert total == 7
+    # 마지막 날의 클러스터가 지금 모습이다.
+    assert [r[0] for r in rows] == ["CL1", "CL2"], rows
+
+    titles = [str(detail.cell(row, 2).value) for row in range(1, detail.max_row + 1)
+              if detail.cell(row, 2).value and "가상서버 운영" in str(detail.cell(row, 2).value)]
+    assert len(titles) == 2, titles
+    assert "4개 가상서버 운영" in titles[0] and "3개 가상서버 운영" in titles[1]
+
+    # 제목의 대수와 실제 줄 수가 같아야 한다. 중복이 있으면 여기서 드러난다.
+    lines = [str(detail.cell(row, 2).value) for row in range(1, detail.max_row + 1)
+             if detail.cell(row, 2).value and str(detail.cell(row, 2).value).startswith("vm-")]
+    assert len(lines) == 7, lines
+    assert len(set(lines)) == 7, f"같은 VM 이 두 번 나옵니다: {lines}"
+    # 이름을 고친 VM 은 새 이름으로 한 번만 나온다.
+    assert "vm-03-new" in lines and "vm-03-old" not in lines
