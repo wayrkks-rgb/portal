@@ -16,7 +16,8 @@ from ..config import AppConfig
 from ..db.manager import DatabaseManager
 from ..repositories import AssetRepository
 from ..services import (
-    AutomatedReportService, ChangeSyncService, CountAuditService, DailyComparisonService,
+    AutomatedReportService, ChangeDigestService, ChangeSyncService, CountAuditService,
+    DailyComparisonService,
     DashboardService, ExportService,
     IntegratedDashboardService, PeriodService, ReconciliationExceptionService,
     MONTHLY_SECTIONS, MonthlyCheckExportService, MonthlyReportService,
@@ -247,6 +248,63 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
             path = target / service.file_name(base_day)
             workbook.save(path)
             workbook.close()
+        return send_file(path, as_attachment=True, download_name=path.name)
+
+    @bp.route("/api/asset-sync/change-digest")
+    @login_required
+    def change_digest() -> Any:
+        """증감 현황을 서버 한 대 = 한 줄로. vCenter 변경은 ITSM 반영 여부까지.
+
+        한 자산의 변경이 묶음 이벤트와 항목별 이벤트로 흩어져 같은 서버가 여러 줄로
+        나오던 것을 접는다. 0 에서 빈 값으로 바뀐 것처럼 뜻 없는 변경은 기본으로
+        숨기고 건수만 적는다.
+        """
+        start = request.args.get("start")
+        end = request.args.get("end")
+        if not start or not end:
+            return jsonify({"error": "start 와 end 가 필요합니다."}), 400
+        source = request.args.get("source")
+        trivial = str(request.args.get("trivial") or "").strip().lower() in {"1", "true", "all"}
+        pending = str(request.args.get("pending") or "").strip().lower() in {"1", "true"}
+        with manager.connect() as conn:
+            service = ChangeDigestService(cfg, AssetRepository(conn), scope_for(conn))
+            result = service.digest(
+                start, end,
+                source=(source.upper() if source else None),
+                include_trivial=trivial,
+            )
+        if pending:
+            from ..services.change_digest_service import NOT_REFLECTED
+
+            result["rows"] = [r for r in result["rows"] if r.get("reflection") == NOT_REFLECTED]
+        limit = min(int(request.args.get("limit", 2000)), 20000)
+        result["truncated"] = len(result["rows"]) > limit
+        result["rows"] = result["rows"][:limit]
+        return jsonify(result)
+
+    @bp.route("/api/asset-sync/change-digest/export")
+    @login_required
+    def change_digest_export() -> Any:
+        """증감 현황을 엑셀로. ITSM 담당자에게 넘길 반영 목록이기도 하다."""
+        start = request.args.get("start")
+        end = request.args.get("end")
+        if not start or not end:
+            return jsonify({"error": "start 와 end 가 필요합니다."}), 400
+        source = request.args.get("source")
+        pending = str(request.args.get("pending") or "").strip().lower() in {"1", "true"}
+        with manager.connect() as conn:
+            service = ChangeDigestService(cfg, AssetRepository(conn), scope_for(conn))
+            result = service.digest(start, end, source=(source.upper() if source else None))
+        rows = result["rows"]
+        if pending:
+            from ..services.change_digest_service import NOT_REFLECTED
+
+            rows = [r for r in rows if r.get("reflection") == NOT_REFLECTED]
+        target = cfg.resolve("data/export/change_digest")
+        target.mkdir(parents=True, exist_ok=True)
+        prefix = "ITSM반영필요" if pending else "증감현황"
+        path = target / f"{prefix}_{start[:10]}_{end[:10]}.xlsx"
+        ChangeDigestService.write_xlsx(result, rows, path)
         return send_file(path, as_attachment=True, download_name=path.name)
 
     @bp.route("/api/asset-sync/scope-crosscheck")

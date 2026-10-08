@@ -311,6 +311,140 @@ function changeField(row){
   return label?escapeHtml(label):'<span class="text-muted">-</span>';
 }
 
+// ── 증감 현황 (서버 한 대 = 한 줄) ───────────────────────────────────
+// 증감 현황에서 알아야 할 것은 둘뿐이다. 어떤 서버가 바뀌었나, 그리고 vCenter
+// 변경이 ITSM 에도 반영됐나. 한 자산의 변경을 한 줄로 접고, vCenter 줄에는
+// 반영 여부를 붙인다.
+const DIGEST_KIND_CLASS = {
+  CREATED: 'text-success', REMOVED: 'text-error',
+  STATUS: 'text-warning', CHANGED: '',
+};
+const DIGEST_REFLECTION_CLASS = {
+  REFLECTED: 'text-success', NOT_REFLECTED: 'text-error',
+  NO_ASSET: 'text-warning', NOT_CHECKED: 'text-muted',
+};
+
+function digestFields(row) {
+  if (!row.fields || !row.fields.length) {
+    return row.trivial_count
+      ? `<span class="text-muted">뜻 있는 변경 없음 (경미 ${row.trivial_count}건)</span>`
+      : `<span class="text-muted">${syncEscape(row.kind_label)}</span>`;
+  }
+  return row.fields.map(item =>
+    `<div><span class="text-muted">${syncEscape(item.label)}</span> `
+    + `${syncEscape(item.old)} <strong>→</strong> ${syncEscape(item.new)}</div>`).join('')
+    + (row.trivial_count
+      ? `<div class="text-xs text-muted">경미 ${row.trivial_count}건 숨김</div>` : '');
+}
+
+function digestReflection(row) {
+  if (!row.reflection) return '<span class="text-muted">-</span>';
+  const cls = DIGEST_REFLECTION_CLASS[row.reflection] || '';
+  return `<span class="${cls}"><strong>${syncEscape(row.reflection_label)}</strong></span>`
+    + (row.reflection_note ? `<div class="text-xs text-muted">${syncEscape(row.reflection_note)}</div>` : '')
+    + (row.itsm_action ? `<div class="text-xs text-warning">→ ${syncEscape(row.itsm_action)}</div>` : '');
+}
+
+// rows 를 그대로 받아 그린다. 걸러내기는 부르는 쪽이 한다.
+function renderChangeDigest(tableId, rows, options) {
+  const table = document.getElementById(tableId);
+  if (!table) return;
+  const opts = options || {};
+  table.className = 'table-sticky';
+  table.innerHTML = `<thead><tr>
+    <th>일시</th><th>구분</th><th>서버</th><th>자산번호</th>
+    <th>바뀐 내용</th><th>ITSM 반영</th>
+  </tr></thead><tbody>${
+    rows.length ? rows.map(row => `<tr>
+      <td class="text-xs">${syncEscape(String(row.detected_at || '').slice(0, 16).replace('T', ' '))}
+        <div class="text-xs text-muted">${row.source === 'ITSM' ? 'ITSM' : 'vCenter'}</div></td>
+      <td class="${DIGEST_KIND_CLASS[row.kind] || ''}"><strong>${syncEscape(row.kind_label)}</strong></td>
+      <td><strong>${syncEscape(row.label || '-')}</strong>
+        <div class="text-xs text-muted">${syncEscape([row.hostname, row.primary_ip].filter(Boolean).join(' · ') || '-')}</div>
+        ${row.esxi_host ? `<div class="text-xs text-muted mono">${syncEscape(row.esxi_host)}</div>` : ''}</td>
+      <td class="text-xs mono">${syncEscape(row.asset_key || '-')}
+        ${row.itsm_cm_id && row.itsm_cm_id !== row.asset_key
+          ? `<div class="text-xs text-muted">ITSM ${syncEscape(row.itsm_cm_id)}</div>` : ''}</td>
+      <td class="text-xs">${digestFields(row)}</td>
+      <td class="text-xs">${digestReflection(row)}</td>
+    </tr>`).join('')
+      : `<tr><td colspan="6" style="text-align:center" class="text-muted">${
+        syncEscape(opts.empty || '이 기간에 바뀐 서버가 없습니다.')}</td></tr>`
+  }</tbody>`;
+}
+
+// ITSM 에 아직 반영 안 된 것이 있으면 표 위에 띄운다. 표 안에 섞어 두면
+// 스크롤 아래로 묻힌다 -- 묻히면 반영도 안 된다. 눌러서 그것만 볼 수 있게 한다.
+function renderDigestPendingNotice(holderId, digest, options) {
+  const holder = document.getElementById(holderId);
+  if (!holder) return;
+  const opts = options || {};
+  const pending = Number(((digest || {}).summary || {}).itsm_pending || 0);
+  if (!pending) { holder.innerHTML = ''; return; }
+  const rows = ((digest || {}).rows || []).filter(r => r.reflection === 'NOT_REFLECTED');
+  const actions = {};
+  rows.forEach(r => { if (r.itsm_action) actions[r.itsm_action] = (actions[r.itsm_action] || 0) + 1; });
+  const breakdown = Object.keys(actions).sort()
+    .map(key => `${syncEscape(key)} ${actions[key]}건`).join(' · ');
+  holder.innerHTML = `<div class="alert alert-warning">
+    <div class="flex justify-between items-center gap-2">
+      <div>
+        <strong>ITSM 에 반영이 안 된 변경 ${pending.toLocaleString()}건</strong>
+        <div class="text-xs">vCenter 에서는 바뀌었는데 ITSM 자산 정보는 그대로입니다.
+          ${breakdown ? '해야 할 일: ' + breakdown : ''}</div>
+      </div>
+      <div class="flex gap-2">
+        ${opts.onShow ? `<button class="btn btn-secondary btn-sm" onclick="${opts.onShow}">미반영만 보기</button>` : ''}
+        ${opts.onExport ? `<button class="btn btn-primary btn-sm" onclick="${opts.onExport}">반영 목록 내려받기</button>` : ''}
+      </div>
+    </div></div>`;
+}
+
+// 화면이 고른 조건대로 걸러낸다. 분류·출처·검색·ITSM 미반영만.
+function filterDigestRows(rows, filter) {
+  const want = filter || {};
+  const term = String(want.q || '').trim().toLowerCase();
+  return (rows || []).filter(row => {
+    if (want.kind && want.kind !== 'all' && row.kind !== want.kind) return false;
+    if (want.source && row.source !== want.source) return false;
+    if (want.pending && row.reflection !== 'NOT_REFLECTED') return false;
+    if (!term) return true;
+    const hay = [row.label, row.hostname, row.primary_ip, row.asset_key, row.esxi_host,
+                 row.summary, row.itsm_cm_id, row.reflection_note];
+    return hay.some(v => String(v || '').toLowerCase().includes(term));
+  });
+}
+
+async function loadChangeDigest(start, end, source) {
+  const query = new URLSearchParams({start, end});
+  if (source) query.set('source', source);
+  return apiFetch('/api/asset-sync/change-digest?' + query);
+}
+
+async function exportChangeDigest(start, end, options) {
+  const opts = options || {};
+  const query = new URLSearchParams({start, end});
+  if (opts.source) query.set('source', opts.source);
+  if (opts.pending) query.set('pending', '1');
+  const response = await fetch('/api/asset-sync/change-digest/export?' + query);
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    return {ok: false, error: data.error || `HTTP ${response.status}`};
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const match = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+  link.href = url;
+  link.download = match ? decodeURIComponent(match[1]) : '증감현황.xlsx';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  return {ok: true};
+}
+
 // ── 수집 상태 알림 ───────────────────────────────────────────────────
 // 통합기 일부가 실패하면 VM 대수는 줄어든다. 그걸 모르면 화면만 보고 "VM 이
 // 삭제됐다" 고 읽는다. 어느 통합기가 빠졌는지 일간·주간·월간에서 같은 모양으로

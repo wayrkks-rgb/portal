@@ -1,3 +1,4 @@
+from .change_digest_service import ChangeDigestService
 from .change_presenter import present_all
 from .display_name_service import DisplayNameError, DisplayNameService, SCOPES as DISPLAY_NAME_SCOPES
 from .collection_service import CollectionService
@@ -28,4 +29,5 @@ __all__ = [
     "IntegratedDashboardService", "ReconciliationExceptionService", "VMResourceUsageExportService",
     "ServerStatusService", "MonthlyCheckExportService", "MONTHLY_SECTIONS",
     "CountAuditService", "MonthlyReportService", "ScopeCrossCheckService",
+    "ChangeDigestService",
 ]

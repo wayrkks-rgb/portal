@@ -31,9 +31,14 @@
     </div>
 
     <div class="card">
-      <div class="flex justify-between items-center mb-4">
-        <div class="card-title" style="margin-bottom:0"><span class="icon">📄</span> 주간 변경 내역</div>
-        <div class="flex gap-2 items-center">
+      <div class="flex justify-between items-center mb-4" style="flex-wrap:wrap;gap:8px">
+        <div class="card-title" style="margin-bottom:0;white-space:nowrap">
+          <span class="icon">📄</span> 주간 변경 내역 (서버 단위)</div>
+        <div class="flex gap-2 items-center" style="flex-wrap:wrap">
+          <label class="text-xs flex items-center gap-2">
+            <input type="checkbox" id="weekly-detail-pending" onchange="renderWeeklyDetail()">
+            ITSM 미반영만
+          </label>
           <select class="form-select" id="weekly-detail-filter" style="width:150px" onchange="renderWeeklyDetail()">
             <option value="all">전체</option>
             <option value="created">신규 생성</option>
@@ -47,12 +52,18 @@
           </select>
           <input class="form-input" id="weekly-detail-search" style="width:180px" placeholder="자산·항목 검색"
                  oninput="renderWeeklyDetail()">
+          <button class="btn btn-secondary btn-sm" onclick="exportWeeklyDigest()">Excel</button>
         </div>
       </div>
+      <div class="text-xs text-muted mb-4">
+        한 서버의 변경을 <strong>한 줄</strong>로 묶었습니다. vCenter 변경에는
+        <strong>ITSM 에 반영됐는지</strong>를 지금 ITSM 값과 견주어 적습니다.
+        0 에서 빈 값으로 바뀐 것처럼 뜻 없는 변경은 건수만 적고 접어 둡니다.
+      </div>
+      <div id="weekly-digest-pending-notice"></div>
       <div id="weekly-detail-basis" class="text-xs text-muted mb-4"></div>
       <div class="table-wrap" style="max-height:460px;overflow:auto">
-        <table><thead><tr><th>일시</th><th>출처</th><th>분류</th><th>업무명</th><th>호스트명 · IP</th><th>자산번호</th><th>항목</th><th>이전</th><th>현재</th></tr></thead>
-        <tbody id="weekly-detail-body"></tbody></table>
+        <table id="weekly-digest-table"></table>
       </div>
     </div>
 

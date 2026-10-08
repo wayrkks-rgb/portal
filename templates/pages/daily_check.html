@@ -19,10 +19,51 @@
       <div class="stat-card"><div class="stat-value" id="daily-idc-dr">-</div><div class="stat-label">IDC / DR</div></div>
     </div>
 
+    <div class="card">
+      <div class="flex justify-between items-center mb-4" style="flex-wrap:wrap;gap:8px">
+        <div class="card-title" style="margin-bottom:0;white-space:nowrap">
+          <span class="icon">📄</span> 변경된 서버 (서버 단위)</div>
+        <div class="flex gap-2 items-center" style="flex-wrap:wrap">
+          <button class="btn btn-secondary btn-sm" onclick="shiftDailyDigest(-1)">◀ 어제</button>
+          <input class="form-input" type="date" id="daily-digest-date" style="width:150px"
+                 onchange="loadDailyDigest(this.value)">
+          <button class="btn btn-secondary btn-sm" onclick="shiftDailyDigest(1)">다음날 ▶</button>
+          <label class="text-xs flex items-center gap-2">
+            <input type="checkbox" id="daily-digest-pending" onchange="renderDailyDigest()">
+            ITSM 미반영만
+          </label>
+          <select class="form-select" id="daily-digest-filter" style="width:140px" onchange="renderDailyDigest()">
+            <option value="all">전체</option>
+            <option value="created">신규 생성</option>
+            <option value="removed">삭제</option>
+            <option value="changed">자원·정보 변경</option>
+          </select>
+          <select class="form-select" id="daily-digest-source" style="width:120px" onchange="renderDailyDigest()">
+            <option value="">출처 전체</option>
+            <option value="ITSM">ITSM</option>
+            <option value="RVTOOLS">vCenter</option>
+          </select>
+          <input class="form-input" id="daily-digest-search" style="width:160px" placeholder="서버·항목 검색"
+                 oninput="renderDailyDigest()">
+          <button class="btn btn-secondary btn-sm" onclick="exportDailyDigest()">Excel</button>
+        </div>
+      </div>
+      <div class="text-xs text-muted mb-4">
+        한 서버의 하루치 변경을 <strong>한 줄</strong>로 묶었습니다. vCenter 변경에는
+        <strong>ITSM 에 반영됐는지</strong>를 지금 ITSM 값과 견주어 적습니다.
+        0 에서 빈 값으로 바뀐 것처럼 뜻 없는 변경은 건수만 적고 접어 둡니다.
+      </div>
+      <div id="daily-digest-pending-notice"></div>
+      <div id="daily-digest-basis" class="text-xs text-muted mb-4"></div>
+      <div class="table-wrap" style="max-height:460px;overflow:auto">
+        <table id="daily-digest-table"></table>
+      </div>
+    </div>
+
     <div class="grid-2">
       <div class="card">
         <div class="flex justify-between items-center mb-4">
-          <div class="card-title" style="margin-bottom:0"><span class="icon">🗄️</span> ITSM 자산 변동</div>
+          <div class="card-title" style="margin-bottom:0"><span class="icon">🗄️</span> ITSM 자산 변동 (건수)</div>
           <div id="daily-itsm-badges" class="flex gap-2"></div>
         </div>
         <div id="daily-itsm-basis" class="text-xs text-muted mb-4"></div>
@@ -34,7 +75,7 @@
 
       <div class="card">
         <div class="flex justify-between items-center mb-4">
-          <div class="card-title" style="margin-bottom:0"><span class="icon">🛰️</span> vCenter VM 구성·할당 자원 변경</div>
+          <div class="card-title" style="margin-bottom:0"><span class="icon">🛰️</span> vCenter VM 구성·할당 자원 변경 (건수)</div>
           <div id="daily-vcenter-badges" class="flex gap-2"></div>
         </div>
         <div id="daily-vcenter-basis" class="text-xs text-muted mb-4"></div>

@@ -22,7 +22,125 @@ async function loadDailyCheck() {
   } catch (error) {
     alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(error.message)}</div>`;
   }
+  // 위 두 표는 건수를 센다. 어떤 서버가 바뀌었는지는 아래 묶은 표에서 본다.
+  loadDailyDigest();
 }
+
+// ── 일간 증감 현황 (서버 한 대 = 한 줄) ──
+// 묶기와 ITSM 반영 판정은 서버가 한다(/api/asset-sync/change-digest).
+let dailyDigest = null;
+let dailyDigestDate = null;          // 'YYYY-MM-DD'
+let dailyDigestFallback = null;      // 오늘 대신 보여 준 날
+
+function todayDate() { return localDate(new Date()); }
+
+function shiftDailyDigest(step) {
+  const base = new Date(`${dailyDigestDate || todayDate()}T00:00:00`);
+  base.setDate(base.getDate() + step);
+  loadDailyDigest(localDate(base));
+}
+
+async function loadDailyDigest(day) {
+  const table = document.getElementById('daily-digest-table');
+  if (!table) return;
+  const basis = document.getElementById('daily-digest-basis');
+  const picked = day || dailyDigestDate || todayDate();
+  const input = document.getElementById('daily-digest-date');
+  dailyDigestDate = picked;
+  dailyDigestFallback = null;
+  if (input) input.value = picked;
+  if (basis) basis.innerHTML = '<span class="loading"></span> 변경된 서버를 묶는 중...';
+
+  let digest = await loadChangeDigest(`${picked}T00:00:00`, `${picked}T23:59:59`)
+    .catch(error => ({error: error.message}));
+  // 오늘인데 아직 비어 있으면 가장 최근 변경일로 물러난다. 배치는 밤에 돌고
+  // 사람은 아침에 본다 -- 빈 화면만 보여주면 배치가 죽은 것처럼 보인다.
+  if (digest && !digest.error && !(digest.rows || []).length && picked === todayDate()) {
+    const from = new Date(`${picked}T00:00:00`);
+    from.setDate(from.getDate() - 14);
+    const wide = await loadChangeDigest(`${localDate(from)}T00:00:00`, `${picked}T23:59:59`)
+      .catch(() => null);
+    const latest = latestDigestDay(wide);
+    if (latest && latest !== picked) {
+      dailyDigestFallback = picked;
+      dailyDigestDate = latest;
+      if (input) input.value = latest;
+      digest = await loadChangeDigest(`${latest}T00:00:00`, `${latest}T23:59:59`)
+        .catch(error => ({error: error.message}));
+    }
+  }
+  dailyDigest = digest;
+  renderDailyDigest();
+}
+
+// 받아 둔 묶음에서 변경이 있는 가장 최근 날짜를 고른다.
+function latestDigestDay(digest) {
+  const days = ((digest && digest.rows) || [])
+    .map(row => String(row.day || '').slice(0, 10)).filter(Boolean).sort();
+  return days.length ? days[days.length - 1] : null;
+}
+
+function renderDailyDigest() {
+  const table = document.getElementById('daily-digest-table');
+  const basis = document.getElementById('daily-digest-basis');
+  if (!table) return;
+  if (dailyDigest && dailyDigest.error) {
+    renderChangeDigest('daily-digest-table', [], {empty: '변경 내역을 불러오지 못했습니다.'});
+    if (basis) basis.textContent = dailyDigest.error;
+    return;
+  }
+  const rows = (dailyDigest && dailyDigest.rows) || [];
+  const bucket = (document.getElementById('daily-digest-filter') || {}).value || 'all';
+  const kind = {created: 'CREATED', removed: 'REMOVED', changed: 'CHANGED'}[bucket] || 'all';
+  const shown = filterDigestRows(rows, {
+    kind,
+    source: (document.getElementById('daily-digest-source') || {}).value,
+    q: (document.getElementById('daily-digest-search') || {}).value,
+    pending: (document.getElementById('daily-digest-pending') || {}).checked,
+  });
+  renderChangeDigest('daily-digest-table', shown, {empty: '조건에 맞는 변경이 없습니다.'});
+  renderDigestPendingNotice('daily-digest-pending-notice', dailyDigest,
+    {onShow: 'showDailyPending()', onExport: 'exportDailyPending()'});
+
+  if (basis) {
+    const summary = (dailyDigest && dailyDigest.summary) || {};
+    const note = dailyDigestFallback
+      ? `${dailyDigestFallback} 에는 아직 변경이 없어 가장 최근 변경일 ${dailyDigestDate} 을 보여줍니다. `
+      : '';
+    basis.textContent = note + (rows.length
+      ? `${dailyDigestDate} · 서버 ${Number(summary.servers || 0).toLocaleString()}대`
+        + ` · 줄 ${rows.length.toLocaleString()}개 (표시 ${shown.length.toLocaleString()})`
+        + (summary.itsm_pending ? ` · ITSM 미반영 ${Number(summary.itsm_pending).toLocaleString()}건` : '')
+        + (summary.trivial_hidden ? ` · 경미 ${Number(summary.trivial_hidden).toLocaleString()}건 숨김` : '')
+      : `${dailyDigestDate} 에 바뀐 서버가 없습니다.`);
+  }
+}
+
+// 미반영만 보기 -- 걸러내기를 사람이 다시 맞추지 않게 한다.
+function showDailyPending() {
+  const box = document.getElementById('daily-digest-pending');
+  const kind = document.getElementById('daily-digest-filter');
+  const source = document.getElementById('daily-digest-source');
+  if (box) box.checked = true;
+  if (kind) kind.value = 'all';
+  if (source) source.value = '';
+  renderDailyDigest();
+}
+
+async function exportDailyDigest(pendingOnly) {
+  const alertEl = document.getElementById('daily-check-alert');
+  const day = dailyDigestDate || todayDate();
+  const pending = pendingOnly === undefined
+    ? (document.getElementById('daily-digest-pending') || {}).checked
+    : pendingOnly;
+  const result = await exportChangeDigest(`${day}T00:00:00`, `${day}T23:59:59`, {pending});
+  if (!result.ok && alertEl) {
+    alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(result.error)}</div>`;
+  }
+}
+
+// ITSM 담당자에게 넘길 목록. 미반영만 담긴 파일이 떨어진다.
+function exportDailyPending() { return exportDailyDigest(true); }
 
 function renderDailyComposition(summary) {
   const status = summary.asset_status || {};
@@ -96,7 +214,12 @@ function renderDailyChanges(key, result) {
     + ` → ${result.current.snapshot_date} (${Number(records.current || 0).toLocaleString()}건),`
     + ` 순증감 ${Number(records.net || 0).toLocaleString()}`;
 
-  const events = result.events || [];
+  // 묶음 이벤트(ITSM_ASSET_UPDATED)는 늘 항목별 이벤트와 함께 쌓인다. 둘을 다
+  // 그리면 한 자산이 "자산 정보 변경" 한 줄 + 항목별 여러 줄로 나와 중복처럼
+  // 보인다. 묶음은 버린다 -- 버려도 잃는 것이 없다.
+  const events = (result.events || []).filter(row => row.event_type !== 'ITSM_ASSET_UPDATED');
+  const folded = (result.events || []).length - events.length;
+  if (folded && basis) basis.textContent += `, 묶음 ${folded}건 접음`;
   body.innerHTML = events.length ? events.map(row => `<tr>
     <td>${syncBadge(row.category || row.event_type)}</td>
     <td><strong>${syncEscape(row.service_name || row.asset_label || row.asset_key)}</strong>
@@ -147,7 +270,15 @@ async function loadWeeklyCheck() {
   });
   let rows;
   try {
-    rows = await apiFetch('/api/asset-sync/changes?' + query);
+    // 통계·차트는 원본 이벤트로, 내역표는 서버 단위로 접은 것으로 그린다.
+    // 두 번 받는 대신 한 번에 받아 둔다.
+    const [raw, folded] = await Promise.all([
+      apiFetch('/api/asset-sync/changes?' + query),
+      loadChangeDigest(`${localDate(monday)}T00:00:00`, `${localDate(sunday)}T23:59:59`)
+        .catch(() => null),
+    ]);
+    rows = raw;
+    weeklyDigest = folded;
   } catch (error) {
     alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(error.message)}</div>`;
     return;
@@ -182,47 +313,69 @@ function filterWeekly(bucket) {
   const select = document.getElementById('weekly-detail-filter');
   if (select) select.value = bucket;
   renderWeeklyDetail();
-  document.getElementById('weekly-detail-body').closest('.card').scrollIntoView({behavior: 'smooth', block: 'start'});
+  const table = document.getElementById('weekly-digest-table');
+  const card = table && table.closest('.card');
+  if (card) card.scrollIntoView({behavior: 'smooth', block: 'start'});
 }
 
 const WEEKLY_MAX_ROWS = 1000;
 
+// 서버 한 대 = 한 줄. 분류·출처·검색·ITSM 미반영으로 걸러낸다.
+// 묶기와 반영 판정은 서버가 한다 -- 화면마다 따로 세면 또 어긋난다.
+let weeklyDigest = null;
+
 function renderWeeklyDetail() {
-  const body = document.getElementById('weekly-detail-body');
-  if (!body) return;
+  const table = document.getElementById('weekly-digest-table');
+  const basis = document.getElementById('weekly-detail-basis');
+  if (!table) return;
+  const rows = (weeklyDigest && weeklyDigest.rows) || [];
   const bucket = document.getElementById('weekly-detail-filter').value;
-  const source = document.getElementById('weekly-detail-source').value;
-  const term = (document.getElementById('weekly-detail-search').value || '').trim().toLowerCase();
-
-  const matched = weeklyRows.filter(row => {
-    if (bucket !== 'all' && weeklyBucket(row) !== bucket) return false;
-    if (bucket === 'all' && weeklyBucket(row) === 'other') return false;
-    if (source && row.source !== source) return false;
-    if (!term) return true;
-    return [row.asset_key, row.service_name, row.hostname, row.primary_ip,
-            row.field_label, row.field_name, row.old_display, row.new_display]
-      .some(value => String(value ?? '').toLowerCase().includes(term));
+  const kind = {created: 'CREATED', removed: 'REMOVED', changed: 'CHANGED'}[bucket] || 'all';
+  const shown = filterDigestRows(rows, {
+    kind,
+    source: document.getElementById('weekly-detail-source').value,
+    q: document.getElementById('weekly-detail-search').value,
+    pending: (document.getElementById('weekly-detail-pending') || {}).checked,
   });
+  renderChangeDigest('weekly-digest-table', shown, {empty: '조건에 맞는 변경이 없습니다.'});
+  renderDigestPendingNotice('weekly-digest-pending-notice', weeklyDigest,
+    {onShow: 'showWeeklyPending()', onExport: 'exportWeeklyPending()'});
 
-  const shown = matched.slice(0, WEEKLY_MAX_ROWS);
-  document.getElementById('weekly-detail-basis').textContent = matched.length
-    ? `${matched.length.toLocaleString()}건` + (matched.length > shown.length
-        ? ` 중 최근 ${shown.length.toLocaleString()}건 표시 (검색으로 좁히세요)` : '')
-    : '조건에 맞는 변경이 없습니다.';
-
-  // 자산코드만 있으면 어느 서버인지 알 수 없다. 업무명·호스트명·IP 를 함께 적는다.
-  body.innerHTML = shown.length ? shown.map(row => `<tr>
-    <td class="text-xs">${syncEscape(String(row.detected_at || '').replace('T', ' ').slice(0, 19))}</td>
-    <td>${syncBadge(row.source === 'RVTOOLS' ? 'vCenter' : (row.source || '-'))}</td>
-    <td>${syncBadge(row.category || row.event_type)}</td>
-    <td><strong>${syncEscape(row.service_name || row.asset_label || '-')}</strong></td>
-    <td>${syncEscape(row.hostname || '-')}<div class="text-xs text-muted mono">${syncEscape(row.primary_ip || '')}</div></td>
-    <td class="mono text-xs">${syncEscape(row.asset_key)}</td>
-    <td>${changeField(row)}</td>
-    <td>${changeCell(row, 'old')}</td>
-    <td>${changeCell(row, 'new')}</td></tr>`).join('')
-    : '<tr><td colspan="9" style="text-align:center" class="text-muted">조건에 맞는 변경이 없습니다.</td></tr>';
+  if (basis) {
+    const summary = (weeklyDigest && weeklyDigest.summary) || {};
+    basis.textContent = rows.length
+      ? `서버 ${Number(summary.servers || 0).toLocaleString()}대 · 줄 ${rows.length.toLocaleString()}개`
+        + ` (표시 ${shown.length.toLocaleString()})`
+        + (summary.itsm_pending ? ` · ITSM 미반영 ${Number(summary.itsm_pending).toLocaleString()}건` : '')
+        + (summary.trivial_hidden ? ` · 경미 ${Number(summary.trivial_hidden).toLocaleString()}건 숨김` : '')
+      : '이 주에 바뀐 서버가 없습니다.';
+  }
 }
+
+function showWeeklyPending() {
+  const box = document.getElementById('weekly-detail-pending');
+  const kind = document.getElementById('weekly-detail-filter');
+  const source = document.getElementById('weekly-detail-source');
+  if (box) box.checked = true;
+  if (kind) kind.value = 'all';
+  if (source) source.value = '';
+  renderWeeklyDetail();
+}
+
+async function exportWeeklyDigest(pendingOnly) {
+  const alertEl = document.getElementById('weekly-alert');
+  const {monday, sunday} = weekRange(weeklyOffset);
+  const pending = pendingOnly === undefined
+    ? (document.getElementById('weekly-detail-pending') || {}).checked
+    : pendingOnly;
+  const result = await exportChangeDigest(
+    `${localDate(monday)}T00:00:00`, `${localDate(sunday)}T23:59:59`, {pending});
+  if (!result.ok) {
+    alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(result.error)}</div>`;
+  }
+}
+
+function exportWeeklyPending() { return exportWeeklyDigest(true); }
 
 function renderWeekly(rows, monday) {
   weeklyRows = rows;
