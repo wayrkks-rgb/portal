@@ -274,10 +274,19 @@ def test_the_script_takes_vm_disk_from_the_bulk_view() -> None:
 
 
 def test_the_script_does_not_add_another_round_trip() -> None:
-    """Get-View 호출이 늘면 통합기마다 수십 초가 더 걸린다."""
+    """Get-View 호출이 늘면 통합기마다 수십 초가 더 걸린다.
+
+    HostSystem 은 예외다. Get-VMHost 가 Inventory Service 때문에 막혔을 때만
+    도는 폴백이라 평소 경로에서는 왕복이 늘지 않는다.
+    """
     text = code_only()
     calls = re.findall(r"Get-View -Server \$viServer -ViewType (\w+)", text)
-    assert sorted(calls) == ["ClusterComputeResource", "Datastore", "VirtualMachine"], calls
+    assert sorted(calls) == ["ClusterComputeResource", "Datastore", "HostSystem",
+                             "VirtualMachine"], calls
+    # HostSystem 은 폴백 안에서만 불러야 한다. 평소에도 돌면 왕복이 하나 는다.
+    index = text.index("ViewType HostSystem")
+    branch = text[max(0, index - 300):index]
+    assert "if ($hostFallback)" in branch, "HostSystem 이 폴백 밖에서 돌고 있다"
 
 
 def test_the_screens_show_both_numbers() -> None:

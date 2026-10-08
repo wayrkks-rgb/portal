@@ -12,6 +12,24 @@ function Require-Env([string]$Name) {
     if ([string]::IsNullOrWhiteSpace($value)) { throw "Required environment variable is missing: $Name" }
     return $value
 }
+# 바이트를 MB 로. **Int64 로 돌려준다.**
+#
+# [int] 는 Int32 다. 2,147,483,647 을 넘으면 "값이 너무 크거나 작아 Int32 형식에
+# 맞지 않습니다" 로 스크립트 전체가 죽는다. 디스크는 그 한계를 쉽게 넘는다 --
+# 데이터스토어 용량, 특히 씬 프로비저닝 합계(Uncommitted)가 그렇다. 통합기 한 대
+# 때문에 그 vCenter 전체 수집을 잃을 이유가 없다.
+function To-Mb($Bytes) {
+    if ($null -eq $Bytes) { return $null }
+    try {
+        $value = [double]$Bytes
+    } catch {
+        return $null
+    }
+    if ([double]::IsNaN($value) -or [double]::IsInfinity($value)) { return $null }
+    if ($value -lt 0) { return $null }
+    return [long][math]::Round($value / 1MB, 0)
+}
+
 function Usage-Summary($Values) {
     $values = @($Values)
     if ($values.Count -eq 0) {
@@ -95,24 +113,60 @@ try {
     }
     Mark 'topology'
 
-    $hostEntities = @(Get-VMHost -Server $viServer -ErrorAction Stop | Sort-Object Name)
+    # PowerCLI 의 Get-VMHost 는 태깅 때문에 Inventory Service(/invsvc) 에 붙으려
+    # 한다. 그 서비스가 막혀 있으면 호스트 목록조차 못 받고 vCenter 하나가 통째로
+    # 빠진다. 그때는 vSphere API 만 쓰는 Get-View 로 떨어진다 -- 사용률(Get-Stat)은
+    # 포기하되 용량·VM 대수·디스크는 그대로 남는다. 없는 것보다 낫다.
+    $hostEntities = @()
+    $hostFallback = $false
+    try {
+        $hostEntities = @(Get-VMHost -Server $viServer -ErrorAction Stop | Sort-Object Name)
+    } catch {
+        $hostFallback = $true
+        $reason = [string]$_.Exception.Message -replace '\s+', ' '
+        if ($reason.Length -gt 200) { $reason = $reason.Substring(0, 200) }
+        Write-Output ("HOST_FALLBACK=" + $reason)
+    }
+
+    # 두 경로가 같은 모양을 내놓게 한다. 아래 코드는 어느 쪽인지 몰라도 된다.
+    $hostInfo = @()
+    if ($hostFallback) {
+        foreach ($view in Get-View -Server $viServer -ViewType HostSystem -Property Name, Hardware.CpuInfo.NumCpuCores, Hardware.MemorySize) {
+            $hostInfo += [pscustomobject]@{
+                Id = $view.MoRef.ToString()
+                Name = $view.Name
+                Cores = [int]$view.Hardware.CpuInfo.NumCpuCores
+                MemoryMb = (To-Mb $view.Hardware.MemorySize)
+            }
+        }
+    } else {
+        foreach ($vmHost in $hostEntities) {
+            $hostInfo += [pscustomobject]@{
+                Id = $vmHost.Id
+                Name = $vmHost.Name
+                Cores = [int]$vmHost.NumCpu
+                MemoryMb = (To-Mb ([double]$vmHost.MemoryTotalGB * 1GB))
+            }
+        }
+    }
+
     $hostStats = @{}
-    if ($hostEntities.Count -gt 0) {
+    if (-not $hostFallback -and $hostEntities.Count -gt 0) {
         $hostStats = Group-Stats (Get-Stat -Entity $hostEntities -Server $viServer -Start $start -Finish $finish -IntervalMins $intervalMins -Stat 'cpu.usage.average', 'mem.usage.average' -ErrorAction SilentlyContinue)
     }
     Mark 'host-stats'
 
     $hostRows = @()
-    foreach ($vmHost in $hostEntities) {
-        $cpu = Usage-Summary (Stat-Values $hostStats $vmHost.Id 'cpu.usage.average')
-        $mem = Usage-Summary (Stat-Values $hostStats $vmHost.Id 'mem.usage.average')
+    foreach ($item in $hostInfo) {
+        $cpu = Usage-Summary (Stat-Values $hostStats $item.Id 'cpu.usage.average')
+        $mem = Usage-Summary (Stat-Values $hostStats $item.Id 'mem.usage.average')
         $hostRows += [pscustomobject][ordered]@{
             vcenter_id = $vcenterId
             service_name = $vcenterName
-            cluster_name = if ($hostCluster.ContainsKey($vmHost.Id)) { $hostCluster[$vmHost.Id] } else { $null }
-            esxi_host = $vmHost.Name
-            allocated_cpu_cores = [int]$vmHost.NumCpu
-            allocated_memory_mb = [int][math]::Round([double]$vmHost.MemoryTotalGB * 1024, 0)
+            cluster_name = if ($hostCluster.ContainsKey($item.Id)) { $hostCluster[$item.Id] } else { $null }
+            esxi_host = $item.Name
+            allocated_cpu_cores = $item.Cores
+            allocated_memory_mb = $item.MemoryMb
             cpu_max_pct = $cpu.Max
             cpu_avg_pct = $cpu.Avg
             mem_max_pct = $mem.Max
@@ -122,7 +176,7 @@ try {
     }
 
     $hostNameById = @{}
-    foreach ($vmHost in $hostEntities) { $hostNameById[$vmHost.Id] = $vmHost.Name }
+    foreach ($item in $hostInfo) { $hostNameById[$item.Id] = $item.Name }
 
     # 데이터스토어. 디스크는 '쓴 양' 과 '나눠준 양' 이 다르다. 씬 프로비저닝이면
     # 나눠준 양이 용량을 넘을 수 있고(과할당), 그때는 VM 이 실제로 채우는 순간
@@ -135,6 +189,9 @@ try {
     # 요약으로 이미 계산해 두므로 VM 을 하나하나 더하지 않는다.
     $datastoreRows = @()
     foreach ($view in Get-View -Server $viServer -ViewType Datastore -Property Name, Summary, Host) {
+      # 데이터스토어 하나가 이상해도 나머지는 건진다. 한 건 때문에 vCenter
+      # 전체 수집을 잃지 않는다.
+      try {
         $summary = $view.Summary
         if ($null -eq $summary) { continue }
         $mountedHosts = @()
@@ -158,14 +215,19 @@ try {
             datastore_name = $view.Name
             datastore_type = [string]$summary.Type
             accessible = [bool]$summary.Accessible
-            capacity_mb = [int][math]::Round($capacity / 1MB, 0)
-            free_mb = [int][math]::Round($free / 1MB, 0)
-            used_mb = [int][math]::Round($usedBytes / 1MB, 0)
-            provisioned_mb = [int][math]::Round(($usedBytes + $uncommitted) / 1MB, 0)
+            capacity_mb = (To-Mb $capacity)
+            free_mb = (To-Mb $free)
+            used_mb = (To-Mb $usedBytes)
+            provisioned_mb = (To-Mb ($usedBytes + $uncommitted))
             host_count = @($mountedHosts).Count
             host_names = @($mountedHosts | Sort-Object -Unique)
             cluster_names = $mountedClusters
         }
+      } catch {
+        $reason = [string]$_.Exception.Message -replace '\s+', ' '
+        if ($reason.Length -gt 160) { $reason = $reason.Substring(0, 160) }
+        Write-Output ("DATASTORE_SKIP=" + $view.Name + " : " + $reason)
+      }
     }
     Mark 'datastore'
 
@@ -173,7 +235,7 @@ try {
     # $vm.VMHost 나 $vm.ProvisionedSpaceGB 를 읽으면 VM 하나당 별도 호출이
     # 나가므로 건드리지 않는다. Summary.Storage 에 이미 다 들어 있다.
     $vmMeta = @{}
-    foreach ($view in Get-View -Server $viServer -ViewType VirtualMachine -Property Name, Config.Template, Config.InstanceUuid, Runtime.Host, Summary.Storage) {
+    foreach ($view in Get-View -Server $viServer -ViewType VirtualMachine -Property Name, Config.Template, Config.InstanceUuid, Runtime.Host, Summary.Storage, Runtime.PowerState, Config.Hardware.NumCPU, Config.Hardware.MemoryMB) {
         $hostRef = $null
         if ($null -ne $view.Runtime -and $null -ne $view.Runtime.Host) { $hostRef = $view.Runtime.Host.ToString() }
         $committed = 0
@@ -186,29 +248,56 @@ try {
             $provisioned = $committed + [double]$storage.Uncommitted
         }
         $vmMeta[$view.MoRef.ToString()] = @{
+            Name = $view.Name
             Template = [bool]$view.Config.Template
             InstanceUuid = $view.Config.InstanceUuid
             HostId = $hostRef
-            UsedDiskMb = [int][math]::Round($committed / 1MB, 0)
-            ProvisionedDiskMb = [int][math]::Round($provisioned / 1MB, 0)
+            PowerState = [string]$view.Runtime.PowerState
+            Cores = [int]$view.Config.Hardware.NumCPU
+            MemoryMb = [long]$view.Config.Hardware.MemoryMB
+            UsedDiskMb = (To-Mb $committed)
+            ProvisionedDiskMb = (To-Mb $provisioned)
         }
     }
     Mark 'vm-meta'
 
-    $vmEntities = @(Get-VM -Server $viServer -ErrorAction Stop | Sort-Object Name)
-    $poweredOn = @($vmEntities | Where-Object { [string]$_.PowerState -eq 'PoweredOn' })
+    # Get-VM 도 호스트와 같은 이유(Inventory Service)로 막힐 수 있다. 막히면
+    # 위에서 이미 받아 둔 Get-View 결과만으로 줄을 만든다 -- 사용률만 빠진다.
+    $vmEntities = @()
+    $vmFallback = $hostFallback
+    if (-not $vmFallback) {
+        try {
+            $vmEntities = @(Get-VM -Server $viServer -ErrorAction Stop | Sort-Object Name)
+        } catch {
+            $vmFallback = $true
+            $reason = [string]$_.Exception.Message -replace '\s+', ' '
+            if ($reason.Length -gt 200) { $reason = $reason.Substring(0, 200) }
+            Write-Output ("VM_FALLBACK=" + $reason)
+        }
+    }
     $vmStats = @{}
-    if ($poweredOn.Count -gt 0) {
-        $vmStats = Group-Stats (Get-Stat -Entity $poweredOn -Server $viServer -Start $start -Finish $finish -IntervalMins $intervalMins -Stat 'cpu.usage.average', 'mem.usage.average' -ErrorAction SilentlyContinue)
+    if (-not $vmFallback) {
+        $poweredOn = @($vmEntities | Where-Object { [string]$_.PowerState -eq 'PoweredOn' })
+        if ($poweredOn.Count -gt 0) {
+            $vmStats = Group-Stats (Get-Stat -Entity $poweredOn -Server $viServer -Start $start -Finish $finish -IntervalMins $intervalMins -Stat 'cpu.usage.average', 'mem.usage.average' -ErrorAction SilentlyContinue)
+        }
     }
     Mark 'vm-stats'
 
+    # 두 경로를 같은 모양(키, 메타)으로 맞춘다.
+    $vmKeys = @()
+    if ($vmFallback) {
+        $vmKeys = @($vmMeta.Keys | Sort-Object { $vmMeta[$_].Name })
+    } else {
+        $vmKeys = @($vmEntities | ForEach-Object { $_.Id })
+    }
+
     $vmRows = @()
-    foreach ($vm in $vmEntities) {
-        $meta = $vmMeta[$vm.Id]
+    foreach ($vmKey in $vmKeys) {
+        $meta = $vmMeta[$vmKey]
         if ($null -ne $meta -and $meta.Template) { continue }
-        $cpu = Usage-Summary (Stat-Values $vmStats $vm.Id 'cpu.usage.average')
-        $mem = Usage-Summary (Stat-Values $vmStats $vm.Id 'mem.usage.average')
+        $cpu = Usage-Summary (Stat-Values $vmStats $vmKey 'cpu.usage.average')
+        $mem = Usage-Summary (Stat-Values $vmStats $vmKey 'mem.usage.average')
         $hostId = $null
         if ($null -ne $meta) { $hostId = $meta.HostId }
         $vmRows += [pscustomobject][ordered]@{
@@ -217,10 +306,10 @@ try {
             cluster_name = if ($hostId -and $hostCluster.ContainsKey($hostId)) { $hostCluster[$hostId] } else { $null }
             esxi_host = $(if ($null -ne $hostId -and $hostNameById.ContainsKey($hostId)) { $hostNameById[$hostId] } else { $null })
             vm_uuid = $(if ($null -ne $meta) { $meta.InstanceUuid } else { $null })
-            vm_name = $vm.Name
-            power_state = [string]$vm.PowerState
-            allocated_cpu_cores = [int]$vm.NumCpu
-            allocated_memory_mb = [int]$vm.MemoryMB
+            vm_name = $(if ($null -ne $meta) { $meta.Name } else { $null })
+            power_state = $(if ($null -ne $meta) { $meta.PowerState } else { $null })
+            allocated_cpu_cores = $(if ($null -ne $meta) { $meta.Cores } else { $null })
+            allocated_memory_mb = $(if ($null -ne $meta) { $meta.MemoryMb } else { $null })
             provisioned_disk_mb = $(if ($null -ne $meta) { $meta.ProvisionedDiskMb } else { $null })
             used_disk_mb = $(if ($null -ne $meta) { $meta.UsedDiskMb } else { $null })
             cpu_max_pct = $cpu.Max

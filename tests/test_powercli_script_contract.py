@@ -174,3 +174,50 @@ def test_the_single_vcenter_path_still_works():
     text = code_only(INVENTORY)
     assert "$OutputPath" in text
     assert "Read-Target 'VCENTER_'" in text, "예전 환경변수 이름을 그대로 받아야 한다"
+
+
+# ── 한 건의 이상이 vCenter 전체 수집을 잃게 하면 안 된다 ──────────────
+
+
+def test_bytes_are_never_cast_to_int32():
+    """디스크 용량은 Int32(21억) 를 쉽게 넘는다.
+
+    [int] 로 받으면 "값이 너무 크거나 작아 Int32 형식에 맞지 않습니다" 로
+    스크립트 전체가 죽고, 그 vCenter 의 자원사용률이 통째로 빈다. 실제로 그랬다.
+    """
+    code = code_only(RESOURCE)
+    assert "function To-Mb" in code, "바이트→MB 변환을 한 곳에 모아야 한다"
+    assert "[long][math]::Round" in code, "MB 는 Int64 로 받아야 한다"
+    overflow = re.findall(r"\[int\]\[math\]::Round\([^\n]*1MB", code)
+    assert not overflow, f"바이트를 Int32 로 받는 곳이 있습니다: {overflow}"
+    # 바이트에서 온 칸은 모두 To-Mb 를 거친다.
+    for field in ("capacity_mb", "free_mb", "used_mb", "provisioned_mb",
+                  "UsedDiskMb", "ProvisionedDiskMb", "allocated_memory_mb"):
+        line = next((l for l in code.splitlines() if l.strip().startswith(field)), None)
+        assert line is not None, f"{field} 가 없다"
+        assert "To-Mb" in line or "$item.MemoryMb" in line or "$meta.MemoryMb" in line, line
+
+
+def test_the_script_survives_an_unreachable_inventory_service():
+    """PowerCLI 의 Get-VMHost 는 태깅 때문에 Inventory Service 에 붙으려 한다.
+
+    그 서비스가 막힌 vCenter 에서는 호스트 목록조차 못 받아 통째로 빠졌다.
+    vSphere API 만 쓰는 Get-View 로 떨어질 길이 있어야 한다.
+    """
+    code = code_only(RESOURCE)
+    assert "hostFallback" in code and "vmFallback" in code
+    assert "ViewType HostSystem" in code, "호스트를 Get-View 로도 받을 수 있어야 한다"
+    # 떨어진 사실을 로그에 남겨야 원인을 안다.
+    assert "HOST_FALLBACK=" in code and "VM_FALLBACK=" in code
+    # Get-VMHost 와 Get-VM 은 try 로 감싸야 한다. -ErrorAction Stop 만으로는 죽는다.
+    for call in ("Get-VMHost -Server", "Get-VM -Server"):
+        index = code.index(call)
+        before = code[max(0, index - 400):index]
+        assert "try {" in before, f"{call} 이 try 로 감싸여 있지 않다"
+
+
+def test_one_bad_datastore_does_not_lose_the_rest():
+    code = code_only(RESOURCE)
+    block = code[code.index("ViewType Datastore"):code.index("Mark 'datastore'")]
+    assert "try {" in block and "catch" in block
+    assert "DATASTORE_SKIP=" in block, "건너뛴 데이터스토어를 로그로 남겨야 한다"
