@@ -162,7 +162,13 @@ class CountAuditService:
                 "eosl_all": int(eosl["all"]["total"]),
                 "eosl_physical": int(eosl["physical"]["total"]),
                 "by_reason": status["scope"].get("by_reason", {}),
+                # 전월 말 대비 증감. 아래에서 일일 증감과 맞대어 본다.
+                "delta_all": (
+                    int(status["all"]["delta"]["계"]["소계"])
+                    if status["all"].get("delta") else None
+                ),
             }
+        counts["daily_changes"] = self._daily_change_effect(base_day)
         rv = sources.get("vcenter")
         if rv:
             scope = AssetScope.load(self.config, self.repo, include_all=self.include_all)
@@ -235,6 +241,42 @@ class CountAuditService:
         }
 
     # ── 견주기 ──────────────────────────────────────────────────────────
+    def _daily_change_effect(self, base_day: date) -> dict[str, Any] | None:
+        """이번 달 일일 증감이 서버 대수를 얼마나 움직였나.
+
+        "일일보고에 뜬 추가·삭제가 월간보고에 안 보인다" 를 가리려면, 일간에서
+        센 것과 월간 대수를 **같은 자리**에서 견줘야 한다. 둘이 다른 것은 대개
+        버그가 아니라 자산으로 세지 않는 대상이 섞인 것인데, 그 말을 어디서도
+        안 하니 숫자가 틀린 것처럼 보였다.
+        """
+        from .change_digest_service import ChangeDigestService
+
+        start = base_day.replace(day=1).isoformat()
+        end = (base_day + timedelta(days=1)).isoformat()
+        try:
+            result = ChangeDigestService(self.config, self.repo).digest(start, end)
+        except Exception:                      # 증감을 못 읽어도 감사는 계속한다
+            return None
+        summary = result["summary"]
+        neutral = [
+            {
+                "label": row.get("label"),
+                "kind": row.get("kind_label"),
+                "note": row.get("count_note"),
+            }
+            for row in result["rows"] if not int(row.get("count_effect") or 0)
+        ]
+        return {
+            "start": start,
+            "end": end,
+            "rows": int(summary["rows"]),
+            "added": int(summary["count_added"]),
+            "removed": int(summary["count_removed"]),
+            "neutral": int(summary["count_neutral"]),
+            "net": int(summary["count_net"]),
+            "neutral_items": neutral[:50],
+        }
+
     def _checks(self, sources: dict[str, Any], counts: dict[str, Any]) -> list[dict[str, Any]]:
         checks: list[dict[str, Any]] = []
 
@@ -260,6 +302,33 @@ class CountAuditService:
             self._same(add, "자산 + 제외 = ITSM 전체",
                        itsm["selected"] + itsm["excluded"], itsm["loaded"],
                        "자산 대수 + 제외 대수와 ITSM 스냅샷 건수")
+
+        # 일간에서 본 증감이 월간 대수에 그대로 들어왔나. 일·주·월은 한 몸이어야
+        # 한다 -- 다르면 왜 다른지가 숫자 옆에 있어야 한다.
+        daily = counts.get("daily_changes")
+        if daily and itsm and itsm.get("delta_all") is not None:
+            monthly, from_daily = int(itsm["delta_all"]), int(daily["net"])
+            detail = {
+                "monthly_delta": monthly, "daily_net": from_daily,
+                "added": daily["added"], "removed": daily["removed"],
+                "neutral": daily["neutral"], "neutral_items": daily["neutral_items"],
+            }
+            if monthly == from_daily:
+                add("월간 대수 = 이번 달 일일 증감", OK,
+                    f"전월 대비 {monthly:+,}대이고, 이번 달 일일 증감을 더해도 {from_daily:+,}대입니다."
+                    + (f" 대수와 무관한 변경 {daily['neutral']:,}건은 뺀 값입니다."
+                       if daily["neutral"] else ""),
+                    **detail)
+            else:
+                add("월간 대수 = 이번 달 일일 증감", MISMATCH,
+                    f"전월 대비 {monthly:+,}대인데 이번 달 일일 증감을 더하면 {from_daily:+,}대입니다."
+                    " 달 안에서 생겼다 사라진 서버가 있거나, 배치가 거른 날이 있는지 확인하세요.",
+                    **detail)
+        elif daily and daily["neutral"]:
+            add("대수에 안 잡히는 변경", INFO,
+                f"이번 달 변경 {daily['rows']:,}건 중 {daily['neutral']:,}건은 서버 대수를"
+                " 움직이지 않습니다(자산으로 세지 않는 대상이거나 vCenter 에만 생긴 VM).",
+                neutral_items=daily["neutral_items"])
 
         usage = counts.get("resource_usage")
         if usage:

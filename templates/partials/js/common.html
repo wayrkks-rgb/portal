@@ -324,17 +324,56 @@ const DIGEST_REFLECTION_CLASS = {
   NO_ASSET: 'text-warning', NOT_CHECKED: 'text-muted',
 };
 
+// 바뀐 항목을 출처별로 묶어 적는다. 한 줄 안에서 ITSM 쪽과 vCenter 쪽이
+// 구분돼야 "어디서 바뀐 건지" 를 다시 찾아보지 않는다.
+function digestFieldBlock(label, items) {
+  if (!items || !items.length) return '';
+  return `<div class="text-xs"><span class="text-muted">[${syncEscape(label)}]</span> `
+    + items.map(item =>
+        `${syncEscape(item.label)} ${syncEscape(item.old)} <strong>→</strong> ${syncEscape(item.new)}`)
+      .join(' · ') + '</div>';
+}
+
 function digestFields(row) {
-  if (!row.fields || !row.fields.length) {
+  const blocks = digestFieldBlock('ITSM', row.itsm_fields)
+    + digestFieldBlock('vCenter', row.vcenter_fields);
+  if (!blocks) {
     return row.trivial_count
       ? `<span class="text-muted">뜻 있는 변경 없음 (경미 ${row.trivial_count}건)</span>`
       : `<span class="text-muted">${syncEscape(row.kind_label)}</span>`;
   }
-  return row.fields.map(item =>
-    `<div><span class="text-muted">${syncEscape(item.label)}</span> `
-    + `${syncEscape(item.old)} <strong>→</strong> ${syncEscape(item.new)}</div>`).join('')
-    + (row.trivial_count
-      ? `<div class="text-xs text-muted">경미 ${row.trivial_count}건 숨김</div>` : '');
+  return blocks + (row.trivial_count
+    ? `<div class="text-xs text-muted">경미 ${row.trivial_count}건 숨김</div>` : '');
+}
+
+// 지금 값. 통합기 화면에 다시 들어가지 않아도 되도록 한 칸에 모은다.
+function digestFacts(row) {
+  const pair = (label, itsm, vm) => {
+    if (itsm == null && vm == null) return '';
+    const both = itsm != null && vm != null;
+    // 한쪽이 아예 없는 것은 '다르다' 가 아니다. 짝이 없을 뿐이라 경고하지 않는다.
+    const differs = both && Number(itsm) !== Number(vm);
+    const text = both && !differs ? Number(itsm).toLocaleString()
+      : `ITSM ${itsm == null ? '-' : Number(itsm).toLocaleString()}`
+        + ` / vC ${vm == null ? '-' : Number(vm).toLocaleString()}`;
+    return `<div class="text-xs${differs ? ' text-warning' : ''}">`
+      + `<span class="text-muted">${label}</span> ${text}</div>`;
+  };
+  const place = [row.vcenter_label, row.cluster_label, row.esxi_label].filter(Boolean).join(' · ');
+  return (place ? `<div class="text-xs mono">${syncEscape(place)}</div>` : '')
+    + (row.vm_name ? `<div class="text-xs text-muted">VM ${syncEscape(row.vm_name)}</div>` : '')
+    + pair('CPU', row.itsm_cpu, row.vm_cpu)
+    + pair('MEM(MB)', row.itsm_memory_mb, row.vm_memory_mb)
+    || '<span class="text-muted">-</span>';
+}
+
+// 이 변경이 서버 대수를 움직이나. 일간에서 본 것이 월간 대수에 왜 잡히고
+// 안 잡히는지를 여기서 밝힌다.
+function digestCount(row) {
+  const effect = Number(row.count_effect || 0);
+  const cls = effect > 0 ? 'text-success' : (effect < 0 ? 'text-error' : 'text-muted');
+  return `<span class="${cls}"><strong>${syncEscape(row.count_effect_label || '-')}</strong></span>`
+    + (row.count_note ? `<div class="text-xs text-muted">${syncEscape(row.count_note)}</div>` : '');
 }
 
 function digestReflection(row) {
@@ -352,23 +391,23 @@ function renderChangeDigest(tableId, rows, options) {
   const opts = options || {};
   table.className = 'table-sticky';
   table.innerHTML = `<thead><tr>
-    <th>일시</th><th>구분</th><th>서버</th><th>자산번호</th>
-    <th>바뀐 내용</th><th>ITSM 반영</th>
+    <th>일시</th><th>구분</th><th>서버</th><th>지금 값 · 통합기</th>
+    <th>바뀐 내용</th><th>ITSM 반영</th><th>서버 대수</th>
   </tr></thead><tbody>${
     rows.length ? rows.map(row => `<tr>
       <td class="text-xs">${syncEscape(String(row.detected_at || '').slice(0, 16).replace('T', ' '))}
-        <div class="text-xs text-muted">${row.source === 'ITSM' ? 'ITSM' : 'vCenter'}</div></td>
+        <div class="text-xs text-muted">${syncEscape((row.sources || []).map(
+          s => s === 'ITSM' ? 'ITSM' : 'vCenter').join(' + ') || '-')}</div></td>
       <td class="${DIGEST_KIND_CLASS[row.kind] || ''}"><strong>${syncEscape(row.kind_label)}</strong></td>
       <td><strong>${syncEscape(row.label || '-')}</strong>
         <div class="text-xs text-muted">${syncEscape([row.hostname, row.primary_ip].filter(Boolean).join(' · ') || '-')}</div>
-        ${row.esxi_host ? `<div class="text-xs text-muted mono">${syncEscape(row.esxi_host)}</div>` : ''}</td>
-      <td class="text-xs mono">${syncEscape(row.asset_key || '-')}
-        ${row.itsm_cm_id && row.itsm_cm_id !== row.asset_key
-          ? `<div class="text-xs text-muted">ITSM ${syncEscape(row.itsm_cm_id)}</div>` : ''}</td>
+        <div class="text-xs mono text-muted">${syncEscape(row.itsm_cm_id || row.vm_key || '-')}</div></td>
+      <td>${digestFacts(row)}</td>
       <td class="text-xs">${digestFields(row)}</td>
       <td class="text-xs">${digestReflection(row)}</td>
+      <td class="text-xs">${digestCount(row)}</td>
     </tr>`).join('')
-      : `<tr><td colspan="6" style="text-align:center" class="text-muted">${
+      : `<tr><td colspan="7" style="text-align:center" class="text-muted">${
         syncEscape(opts.empty || '이 기간에 바뀐 서버가 없습니다.')}</td></tr>`
   }</tbody>`;
 }
@@ -406,11 +445,15 @@ function filterDigestRows(rows, filter) {
   const term = String(want.q || '').trim().toLowerCase();
   return (rows || []).filter(row => {
     if (want.kind && want.kind !== 'all' && row.kind !== want.kind) return false;
-    if (want.source && row.source !== want.source) return false;
+    // 한 줄이 ITSM·vCenter 양쪽을 담으므로 '그 출처가 섞여 있는가' 로 본다.
+    if (want.source && !(row.sources || []).includes(want.source)) return false;
     if (want.pending && row.reflection !== 'NOT_REFLECTED') return false;
+    // 대수를 움직인 것만 보기. 월간 대수와 맞대어 볼 때 쓴다.
+    if (want.counting && !Number(row.count_effect || 0)) return false;
     if (!term) return true;
-    const hay = [row.label, row.hostname, row.primary_ip, row.asset_key, row.esxi_host,
-                 row.summary, row.itsm_cm_id, row.reflection_note];
+    const hay = [row.label, row.hostname, row.primary_ip, row.asset_key, row.vm_key,
+                 row.vm_name, row.esxi_host, row.esxi_label, row.cluster_label,
+                 row.vcenter_label, row.summary, row.itsm_cm_id, row.reflection_note];
     return hay.some(v => String(v || '').toLowerCase().includes(term));
   });
 }

@@ -111,9 +111,21 @@ function renderDailyDigest() {
       ? `${dailyDigestDate} · 서버 ${Number(summary.servers || 0).toLocaleString()}대`
         + ` · 줄 ${rows.length.toLocaleString()}개 (표시 ${shown.length.toLocaleString()})`
         + (summary.itsm_pending ? ` · ITSM 미반영 ${Number(summary.itsm_pending).toLocaleString()}건` : '')
+        + digestCountBasis(summary)
         + (summary.trivial_hidden ? ` · 경미 ${Number(summary.trivial_hidden).toLocaleString()}건 숨김` : '')
       : `${dailyDigestDate} 에 바뀐 서버가 없습니다.`);
   }
+}
+
+// 대수 효과 한 줄. 일간에서 본 증감이 월간 서버 대수에 얼마나 들어가는지를
+// 같은 자리에서 읽게 한다 -- 세 화면이 따로 노는 것처럼 보이던 지점이다.
+function digestCountBasis(summary) {
+  const added = Number(summary.count_added || 0), removed = Number(summary.count_removed || 0);
+  const neutral = Number(summary.count_neutral || 0), net = Number(summary.count_net || 0);
+  if (!added && !removed && !neutral) return '';
+  return ` · 서버 대수 ${net > 0 ? '+' : ''}${net.toLocaleString()}`
+    + ` (늘어남 ${added.toLocaleString()} · 줄어듦 ${removed.toLocaleString()}`
+    + `${neutral ? ` · 대수와 무관 ${neutral.toLocaleString()}` : ''})`;
 }
 
 // 미반영만 보기 -- 걸러내기를 사람이 다시 맞추지 않게 한다.
@@ -347,6 +359,7 @@ function renderWeeklyDetail() {
       ? `서버 ${Number(summary.servers || 0).toLocaleString()}대 · 줄 ${rows.length.toLocaleString()}개`
         + ` (표시 ${shown.length.toLocaleString()})`
         + (summary.itsm_pending ? ` · ITSM 미반영 ${Number(summary.itsm_pending).toLocaleString()}건` : '')
+        + digestCountBasis(summary)
         + (summary.trivial_hidden ? ` · 경미 ${Number(summary.trivial_hidden).toLocaleString()}건 숨김` : '')
       : '이 주에 바뀐 서버가 없습니다.';
   }

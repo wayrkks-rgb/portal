@@ -64,8 +64,30 @@ class DisplayNameService:
             for row in self.repo.display_names()
         }
 
-    def resolver(self) -> "NameResolver":
-        return NameResolver(self.lookup())
+    def resolver(self, config: Any = None) -> "NameResolver":
+        """업무명 해석기. 설정을 주면 연계 설정에 적은 표시명까지 함께 본다."""
+        return NameResolver(self.lookup(), self.config_names(config))
+
+    @staticmethod
+    def config_names(config: Any) -> dict[tuple[str, str], str]:
+        """연계 설정에 적어 둔 통합기 표시명. (scope, 키) → 이름.
+
+        통합기를 IP 로 등록하면 수집 결과에는 그 IP 가 vCenter 이름으로 들어간다.
+        연계 설정에서 표시명을 적어 두고도 화면에 IP 만 나오던 이유가 이것이다.
+        업무명을 따로 붙이지 않았으면 여기에 적은 이름을 쓴다.
+        """
+        if config is None:
+            return {}
+        entries = (getattr(config, "rvtools", None) or {}).get("vcenters") or []
+        names: dict[tuple[str, str], str] = {}
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            key = str(entry.get("id") or "").strip()
+            label = " ".join(str(entry.get("name") or "").split())
+            if key and label and key != label:
+                names[("VCENTER", key)] = label
+        return names
 
     # ── 쓰기 ────────────────────────────────────────────────────────────
     def save_many(self, items: Iterable[Mapping[str, Any]], updated_by: str) -> dict[str, Any]:
@@ -110,8 +132,14 @@ class NameResolver:
     사라진 것처럼 보인다.
     """
 
-    def __init__(self, mapping: Mapping[tuple[str, str, str], str]) -> None:
+    def __init__(
+        self,
+        mapping: Mapping[tuple[str, str, str], str],
+        fallback: Mapping[tuple[str, str], str] | None = None,
+    ) -> None:
         self._mapping = dict(mapping)
+        # 업무명을 안 붙인 대상에 쓸 차선책. 연계 설정에 적은 표시명이 여기 온다.
+        self._fallback = dict(fallback or {})
 
     def name(self, scope: str, object_key: Any, vcenter_id: Any = "") -> str:
         key = str(object_key or "")
@@ -123,7 +151,7 @@ class NameResolver:
         for candidate in ((scope, vc, key), (scope, "", key)):
             if candidate in self._mapping:
                 return self._mapping[candidate]
-        return key
+        return self._fallback.get((scope, key)) or key
 
     def named(self, scope: str, object_key: Any, vcenter_id: Any = "") -> bool:
         """업무명을 붙였는지. 화면에서 '미지정' 을 표시하는 데 쓴다."""

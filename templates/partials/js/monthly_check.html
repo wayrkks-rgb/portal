@@ -354,6 +354,19 @@ function toggleCountAudit() {
   if (button) button.textContent = detail.hidden ? '자세히' : '접기';
 }
 
+// 대수를 안 움직인 변경이 "어느 서버인지" 까지 보여준다. 건수만 주면 일간
+// 화면과 월간 대수가 왜 다른지 여전히 알 수 없다.
+function auditNeutralItems(check) {
+  const items = check.neutral_items || [];
+  if (!items.length) return '';
+  return `<details style="margin-top:4px"><summary class="text-muted" style="cursor:pointer">`
+    + `대수에 안 잡힌 변경 ${items.length.toLocaleString()}건 보기</summary>`
+    + `<div style="margin-top:4px">${items.map(item =>
+        `<div class="text-xs">· <strong>${syncEscape(item.label || '-')}</strong>`
+        + ` <span class="text-muted">${syncEscape(item.kind || '')}</span>`
+        + ` — ${syncEscape(item.note || '')}</div>`).join('')}</div></details>`;
+}
+
 function renderCountAudit(audit) {
   const verdictEl = document.getElementById('monthly-audit-verdict');
   if (!verdictEl) return;
@@ -378,7 +391,7 @@ function renderCountAudit(audit) {
       checks.map(c => `<tr>
         <td><strong>${syncEscape(c.name)}</strong></td>
         <td class="${AUDIT_CLASS[c.verdict] || ''}">${AUDIT_MARK[c.verdict] || ''} ${syncEscape(c.verdict)}</td>
-        <td class="text-xs">${syncEscape(c.message)}</td>
+        <td class="text-xs">${syncEscape(c.message)}${auditNeutralItems(c)}</td>
       </tr>`).join('') || '<tr><td colspan="3" style="text-align:center" class="text-muted">검사할 자료가 없습니다.</td></tr>'
     }</tbody>`;
   }

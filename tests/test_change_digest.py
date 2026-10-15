@@ -327,12 +327,12 @@ def test_a_vm_with_no_matching_asset_says_so(portal) -> None:
     assert "정합성 화면" in row["itsm_action"]
 
 
-def test_itsm_rows_are_not_judged_for_reflection(portal) -> None:
-    """ITSM 쪽 변경에 '반영 여부' 를 붙이면 뜻이 없다."""
+def test_itsm_only_rows_are_not_judged_for_reflection(portal) -> None:
+    """ITSM 쪽만 바뀐 줄에 '반영 여부' 를 붙이면 뜻이 없다."""
     config, manager = portal
     seed(manager, assets=[asset("CM001", hostname="a", ip="10.0.0.1", name="업무A")],
          events=[field_event("CM001", "CM_NAME", "x", "y")])
-    assert "reflection" not in digest(config, manager)["rows"][0]
+    assert digest(config, manager)["rows"][0]["reflection"] is None
 
 
 def test_the_pending_list_is_what_goes_to_the_itsm_owner(portal) -> None:
@@ -349,7 +349,9 @@ def test_the_pending_list_is_what_goes_to_the_itsm_owner(portal) -> None:
          ])
     with manager.connect() as conn:
         pending = ChangeDigestService(config, AssetRepository(conn)).pending_itsm(START, END)
-    assert [row["asset_key"] for row in pending] == ["u1"]
+    # u1 은 CM001 과 짝이 지어지므로 그 줄의 대표 키는 자산번호다.
+    assert [row["vm_key"] for row in pending] == ["u1"]
+    assert [row["itsm_cm_id"] for row in pending] == ["CM001"]
     assert digest(config, manager)["summary"]["itsm_pending"] == 1
 
 
@@ -369,8 +371,9 @@ def test_the_export_leads_with_the_server_and_what_to_do(portal, tmp_path: Path)
 
     sheet = load_workbook(path).active
     head = next(r for r in range(1, sheet.max_row + 1) if sheet.cell(r, 1).value == "일시")
-    labels = [sheet.cell(head, c).value for c in range(1, 14)]
-    for name in ("서버", "호스트명", "IP", "바뀐 내용", "ITSM 반영", "해야 할 일"):
+    labels = [sheet.cell(head, c).value for c in range(1, len(ChangeDigestService.EXPORT_COLUMNS) + 1)]
+    for name in ("서버", "호스트명", "IP", "바뀐 내용", "ITSM 반영", "해야 할 일",
+                 "통합기", "VM CPU", "ITSM CPU", "서버 대수"):
         assert name in labels, labels
     row = {label: sheet.cell(head + 1, index).value
            for index, label in enumerate(labels, start=1)}
@@ -435,10 +438,175 @@ def test_the_screen_gets_the_digest_over_http(web) -> None:
     # ITSM 미반영만 거르는 길도 서버가 안다. 화면마다 따로 세면 또 어긋난다.
     only = web.get(
         f"/api/asset-sync/change-digest?start={START}&end={END}&pending=1").get_json()
-    assert [r["asset_key"] for r in only["rows"]] == ["u1"]
+    assert [r["vm_key"] for r in only["rows"]] == ["u1"]
+    assert [r["itsm_cm_id"] for r in only["rows"]] == ["CM001"]
 
 
 def test_start_and_end_are_required(web) -> None:
     response = web.get("/api/asset-sync/change-digest")
     assert response.status_code == 400
     assert "start" in response.get_json()["error"]
+
+
+# ── 삭제도 ITSM 반영 여부를 본다 ───────────────────────────────────────
+
+
+def test_a_removed_vm_recovers_its_identity_from_the_event(portal) -> None:
+    """사라진 VM 은 지금 스냅샷에 없다. 이벤트에 남은 원본으로 누구였는지 찾는다.
+
+    이걸 못 하면 호스트명·IP 가 비어 ITSM 자산을 영영 못 찾고, 삭제는 늘
+    '반영됨' 으로 잘못 읽힌다.
+    """
+    config, manager = portal
+    gone = vm("u-gone", hostname="srv9", ip="10.0.0.9", name="GONE-VM")
+    seed(manager,
+         assets=[asset("CM900", hostname="srv9", ip="10.0.0.9", name="업무9")],
+         vms=[asset_free_vm()],
+         events=[{"source": "RVTOOLS", "asset_key": "u-gone", "event_type": "RV_REMOVED",
+                  "old_value": json.dumps(gone, ensure_ascii=False)}])
+    row = digest(config, manager)["rows"][0]
+    assert row["hostname"] == "srv9"
+    assert row["primary_ip"] == "10.0.0.9"
+    assert row["itsm_cm_id"] == "CM900"
+    # ITSM 자산이 아직 운영이므로 미반영이어야 한다.
+    assert row["reflection"] == NOT_REFLECTED
+    assert "미사용" in row["itsm_action"]
+
+
+def asset_free_vm() -> dict:
+    """삭제된 VM 말고 다른 VM 하나. 스냅샷이 비면 안 되므로 채워 둔다."""
+    return vm("u-other", hostname="other", ip="10.0.0.200", name="OTHER-VM")
+
+
+def test_a_removed_vm_already_disposed_in_itsm_is_reflected_not_guessed(portal) -> None:
+    config, manager = portal
+    gone = vm("u-gone", hostname="srv9", ip="10.0.0.9", name="GONE-VM")
+    seed(manager,
+         assets=[asset("CM900", hostname="srv9", ip="10.0.0.9", name="업무9",
+                       status="CMSTA060")],
+         vms=[asset_free_vm()],
+         events=[{"source": "RVTOOLS", "asset_key": "u-gone", "event_type": "RV_REMOVED",
+                  "old_value": json.dumps(gone, ensure_ascii=False)}])
+    row = digest(config, manager)["rows"][0]
+    assert row["itsm_cm_id"] == "CM900"
+    assert row["reflection"] == REFLECTED
+
+
+# ── 서버 한 대 = 한 줄 ─────────────────────────────────────────────────
+
+
+def test_itsm_and_vcenter_changes_of_one_server_share_a_row(portal) -> None:
+    """같은 서버가 출처별로 두 줄로 갈리면 안 된다."""
+    config, manager = portal
+    seed(manager,
+         assets=[asset("CM001", hostname="srv", ip="10.0.0.3", name="업무A", cpu=4)],
+         vms=[vm("u1", hostname="srv", ip="10.0.0.3", name="SRV-VM", cpu=8)],
+         events=[
+             field_event("CM001", "CM_NAME", "업무A", "업무B"),
+             {"source": "RVTOOLS", "asset_key": "u1", "event_type": "RV_CPU_CHANGED",
+              "field_name": "cpus", "old_value": "4", "new_value": "8"},
+         ])
+    result = digest(config, manager)
+    assert len(result["rows"]) == 1, result["rows"]
+    row = result["rows"][0]
+    assert sorted(row["sources"]) == ["ITSM", "RVTOOLS"]
+    assert row["itsm_cm_id"] == "CM001" and row["vm_key"] == "u1"
+    assert [f["label"] for f in row["itsm_fields"]] == ["자산명"]
+    assert [f["label"] for f in row["vcenter_fields"]] == ["vCPU"]
+    assert result["summary"]["servers"] == 1
+
+
+def test_a_row_carries_the_numbers_people_would_go_looking_for(portal) -> None:
+    """통합기 화면에 다시 들어가지 않아도 되도록 한 줄에 다 싣는다."""
+    config, manager = portal
+    seed(manager,
+         assets=[asset("CM001", hostname="srv", ip="10.0.0.3", name="업무A",
+                       cpu=4, memory_mb=8192)],
+         vms=[vm("u1", hostname="srv", ip="10.0.0.3", name="SRV-VM", cpu=8, memory_mb=16384)],
+         events=[{"source": "RVTOOLS", "asset_key": "u1", "event_type": "RV_CPU_CHANGED",
+                  "field_name": "cpus", "old_value": "4", "new_value": "8"}])
+    row = digest(config, manager)["rows"][0]
+    assert (row["hostname"], row["primary_ip"]) == ("srv", "10.0.0.3")
+    assert (row["itsm_cpu"], row["vm_cpu"]) == (4, 8)
+    assert (row["itsm_memory_mb"], row["vm_memory_mb"]) == (8192, 16384)
+    assert row["vm_name"] == "SRV-VM"
+    assert row["esxi_label"] == "esxi-01"
+    assert row["cluster_label"] == "CL1"
+    assert row["vcenter_label"] == "VC1"
+
+
+# ── 일·주·월이 한 몸으로 움직이나 ──────────────────────────────────────
+# 일간에서 '신규' 로 본 것이 월간 대수에는 안 잡히는 일이 있었다. 왜 그런지를
+# 줄마다 밝혀야 세 화면의 숫자가 어긋난 것처럼 보이지 않는다.
+
+
+def test_a_new_operating_asset_adds_one_to_the_server_count(portal) -> None:
+    config, manager = portal
+    seed(manager,
+         assets=[asset("CM001", hostname="srv", ip="10.0.0.3", name="업무A")],
+         events=[{"source": "ITSM", "asset_key": "CM001",
+                  "event_type": "ITSM_ASSET_CREATED",
+                  "new_value": json.dumps({"CM_ID": "CM001"}, ensure_ascii=False)}])
+    row = digest(config, manager)["rows"][0]
+    assert row["count_effect"] == 1
+    assert row["count_effect_label"] == "자산 +1"
+
+
+def test_a_new_asset_that_is_not_counted_says_so(portal) -> None:
+    """상태가 운영·대기가 아니면 자산으로 세지 않는다. 월간 대수가 안 움직이는
+    이유가 이것인데, 화면이 말을 안 해 주니 숫자가 틀린 것처럼 보였다."""
+    config, manager = portal
+    seed(manager,
+         assets=[asset("CM002", hostname="srv2", ip="10.0.0.4", name="업무B",
+                       status="CMSTA020")],
+         events=[{"source": "ITSM", "asset_key": "CM002",
+                  "event_type": "ITSM_ASSET_CREATED",
+                  "new_value": json.dumps({"CM_ID": "CM002"}, ensure_ascii=False)}])
+    row = digest(config, manager)["rows"][0]
+    assert row["count_effect"] == 0
+    assert "그대로" in row["count_note"]
+    assert "운영·대기" in row["count_note"]
+
+
+def test_a_status_move_out_of_service_takes_one_away(portal) -> None:
+    config, manager = portal
+    seed(manager,
+         assets=[asset("CM003", hostname="srv3", ip="10.0.0.5", name="업무C",
+                       status="CMSTA020")],
+         events=[{"source": "ITSM", "asset_key": "CM003",
+                  "event_type": "ITSM_STATUS_TO_UNUSED", "field_name": "CM_STA_CD",
+                  "old_value": "CMSTA010", "new_value": "CMSTA020"}])
+    row = digest(config, manager)["rows"][0]
+    assert row["count_effect"] == -1
+
+
+def test_a_vcenter_only_new_vm_does_not_move_the_server_count(portal) -> None:
+    """vCenter 에만 생긴 VM 은 ITSM 기준 대수를 바꾸지 않는다. 등록해야 잡힌다."""
+    config, manager = portal
+    seed(manager,
+         assets=[asset("CM001", hostname="other", ip="10.0.0.80", name="업무A")],
+         vms=[vm("u-new", hostname="brand", ip="10.0.0.90", name="NEW-VM")],
+         events=[{"source": "RVTOOLS", "asset_key": "u-new", "event_type": "RV_NEW",
+                  "new_value": json.dumps({"vm_name": "NEW-VM"}, ensure_ascii=False)}])
+    row = digest(config, manager)["rows"][0]
+    assert row["count_effect"] == 0
+    assert "등록해야" in row["count_note"]
+
+
+def test_the_summary_adds_up_the_count_effect(portal) -> None:
+    """월간 대수와 맞대어 볼 수 있도록 합계를 함께 준다."""
+    config, manager = portal
+    seed(manager,
+         assets=[asset("CM001", hostname="a", ip="10.0.0.1", name="업무A"),
+                 asset("CM002", hostname="b", ip="10.0.0.2", name="업무B",
+                       status="CMSTA020")],
+         events=[
+             {"source": "ITSM", "asset_key": "CM001", "event_type": "ITSM_ASSET_CREATED",
+              "new_value": json.dumps({"CM_ID": "CM001"}, ensure_ascii=False)},
+             {"source": "ITSM", "asset_key": "CM002", "event_type": "ITSM_ASSET_CREATED",
+              "new_value": json.dumps({"CM_ID": "CM002"}, ensure_ascii=False)},
+         ])
+    summary = digest(config, manager)["summary"]
+    assert summary["count_added"] == 1
+    assert summary["count_neutral"] == 1
+    assert summary["count_net"] == 1

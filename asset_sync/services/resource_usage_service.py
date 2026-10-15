@@ -779,7 +779,9 @@ class VMResourceUsageExportService:
 
         원래 이름은 지우지 않는다. vCenter 화면에서 찾을 때 필요하다.
         """
-        resolver = DisplayNameService(self.repo).resolver()
+        # 설정을 함께 넘긴다. 업무명을 안 붙인 통합기는 연계 설정에 적은 표시명으로
+        # 나와야 한다 -- 그러지 않으면 등록할 때 쓴 IP 가 그대로 보인다.
+        resolver = DisplayNameService(self.repo).resolver(self.config)
         for rows in row_groups:
             for row in rows:
                 vcenter = row.get("vcenter_id") or ""

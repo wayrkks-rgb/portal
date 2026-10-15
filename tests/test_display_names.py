@@ -234,3 +234,43 @@ def test_the_report_shows_the_business_name(tmp_path: Path) -> None:
     assert named["esxi_display_name"] == "Linux 통합기 #1"
     # 원래 이름은 지우지 않는다. vCenter 화면에서 찾을 때 필요하다.
     assert named["esxi_host"] == raw_esxi
+
+
+# ── 연계 설정에 적은 표시명 ────────────────────────────────────────────
+# 통합기를 IP 로 등록하면 수집 결과에 그 IP 가 vCenter 이름으로 들어간다.
+# 연계 설정에 표시명을 적어 두고도 화면에 IP 만 나오던 이유가 이것이다.
+
+
+def _config_with_vcenter(tmp_path, entries):
+    from asset_sync.config import AppConfig
+
+    config = AppConfig(root_dir=tmp_path)
+    config.rvtools = dict(config.rvtools or {}, vcenters=entries)
+    return config
+
+
+def test_the_name_typed_in_integration_settings_is_used(tmp_path) -> None:
+    from asset_sync.services.display_name_service import NameResolver, DisplayNameService
+
+    config = _config_with_vcenter(tmp_path, [{"id": "10.10.7.136", "name": "Linux 통합기 #1"}])
+    resolver = NameResolver({}, DisplayNameService.config_names(config))
+    assert resolver.name("VCENTER", "10.10.7.136") == "Linux 통합기 #1"
+
+
+def test_the_business_name_still_wins_over_the_settings_name(tmp_path) -> None:
+    from asset_sync.services.display_name_service import NameResolver, DisplayNameService
+
+    config = _config_with_vcenter(tmp_path, [{"id": "10.10.7.136", "name": "연계설정 이름"}])
+    resolver = NameResolver(
+        {("VCENTER", "10.10.7.136", "10.10.7.136"): "업무명"},
+        DisplayNameService.config_names(config),
+    )
+    assert resolver.name("VCENTER", "10.10.7.136", "10.10.7.136") == "업무명"
+
+
+def test_an_unnamed_vcenter_still_shows_its_own_key(tmp_path) -> None:
+    from asset_sync.services.display_name_service import NameResolver, DisplayNameService
+
+    config = _config_with_vcenter(tmp_path, [{"id": "vc_002", "name": ""}])
+    resolver = NameResolver({}, DisplayNameService.config_names(config))
+    assert resolver.name("VCENTER", "vc_002") == "vc_002"
