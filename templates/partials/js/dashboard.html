@@ -52,6 +52,8 @@ function renderAutomation(item, freshness){
 function renderAssetStatus(data){
   const category=data.category||{}, location=data.location||{};
   document.getElementById('dash-total').textContent=dashboardNumber(data.total);
+  const totalLabel=document.getElementById('dash-total-label');
+  if(totalLabel)totalLabel.textContent=assetBasisLabel(data);
   document.getElementById('dash-physical').textContent=dashboardNumber(category['물리']);
   document.getElementById('dash-logical').textContent=dashboardNumber(category['논리']);
   document.getElementById('dash-idc-dr').textContent=`${dashboardNumber(location.IDC)} / ${dashboardNumber(location.DR)}`;

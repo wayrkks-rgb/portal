@@ -41,7 +41,7 @@ function shiftDailyDigest(step) {
 }
 
 async function loadDailyDigest(day) {
-  const table = document.getElementById('daily-digest-table');
+  const table = document.getElementById('daily-digest-groups');
   if (!table) return;
   const basis = document.getElementById('daily-digest-basis');
   const picked = day || dailyDigestDate || todayDate();
@@ -81,11 +81,11 @@ function latestDigestDay(digest) {
 }
 
 function renderDailyDigest() {
-  const table = document.getElementById('daily-digest-table');
+  const table = document.getElementById('daily-digest-groups');
   const basis = document.getElementById('daily-digest-basis');
   if (!table) return;
   if (dailyDigest && dailyDigest.error) {
-    renderChangeDigest('daily-digest-table', [], {empty: '변경 내역을 불러오지 못했습니다.'});
+    renderChangeDigestGroups('daily-digest-groups', [], {empty: '변경 내역을 불러오지 못했습니다.'});
     if (basis) basis.textContent = dailyDigest.error;
     return;
   }
@@ -98,7 +98,7 @@ function renderDailyDigest() {
     q: (document.getElementById('daily-digest-search') || {}).value,
     pending: (document.getElementById('daily-digest-pending') || {}).checked,
   });
-  renderChangeDigest('daily-digest-table', shown, {empty: '조건에 맞는 변경이 없습니다.'});
+  renderChangeDigestGroups('daily-digest-groups', shown, {kind, empty: '없음'});
   renderDigestPendingNotice('daily-digest-pending-notice', dailyDigest,
     {onShow: 'showDailyPending()', onExport: 'exportDailyPending()'});
 
@@ -159,6 +159,8 @@ function renderDailyComposition(summary) {
   const category = status.category || {}, location = status.location || {};
   const physical = Number(category['물리'] || 0), logical = Number(category['논리'] || 0);
   document.getElementById('daily-total').textContent = dashboardNumber(status.total);
+  const totalLabel = document.getElementById('daily-total-label');
+  if (totalLabel) totalLabel.textContent = assetBasisLabel(status);
   document.getElementById('daily-physical').textContent = dashboardNumber(physical);
   document.getElementById('daily-logical').textContent = dashboardNumber(logical);
   document.getElementById('daily-idc-dr').textContent =
@@ -325,7 +327,7 @@ function filterWeekly(bucket) {
   const select = document.getElementById('weekly-detail-filter');
   if (select) select.value = bucket;
   renderWeeklyDetail();
-  const table = document.getElementById('weekly-digest-table');
+  const table = document.getElementById('weekly-digest-groups');
   const card = table && table.closest('.card');
   if (card) card.scrollIntoView({behavior: 'smooth', block: 'start'});
 }
@@ -337,7 +339,7 @@ const WEEKLY_MAX_ROWS = 1000;
 let weeklyDigest = null;
 
 function renderWeeklyDetail() {
-  const table = document.getElementById('weekly-digest-table');
+  const table = document.getElementById('weekly-digest-groups');
   const basis = document.getElementById('weekly-detail-basis');
   if (!table) return;
   const rows = (weeklyDigest && weeklyDigest.rows) || [];
@@ -349,7 +351,7 @@ function renderWeeklyDetail() {
     q: document.getElementById('weekly-detail-search').value,
     pending: (document.getElementById('weekly-detail-pending') || {}).checked,
   });
-  renderChangeDigest('weekly-digest-table', shown, {empty: '조건에 맞는 변경이 없습니다.'});
+  renderChangeDigestGroups('weekly-digest-groups', shown, {kind, empty: '없음'});
   renderDigestPendingNotice('weekly-digest-pending-notice', weeklyDigest,
     {onShow: 'showWeeklyPending()', onExport: 'exportWeeklyPending()'});
 
@@ -392,15 +394,26 @@ function exportWeeklyPending() { return exportWeeklyDigest(true); }
 
 function renderWeekly(rows, monday) {
   weeklyRows = rows;
-  const created = rows.filter(r => WEEKLY_CREATED.includes(r.event_type)).length;
-  const removed = rows.filter(r => WEEKLY_REMOVED.includes(r.event_type)).length;
-  // 필드 변경만 센다. 묶음 이벤트(ITSM_ASSET_UPDATED)는 중복이므로 뺀다.
-  const changed = rows.filter(r => r.field_name && r.event_type !== 'ITSM_ASSET_UPDATED').length;
+  // 카드 숫자는 아래 묶음 표와 같은 기준(서버 단위 · 운영 대수 기준 생성/삭제)으로
+  // 센다. 원본 이벤트 건수로 세면 한 서버가 여러 번 세이고, 미사용 → 운영 같은
+  // 상태 변경이 '변경' 으로 빠져 일간을 더한 값과 주간이 어긋난다.
+  const digestRows = (weeklyDigest && weeklyDigest.rows) || null;
+  let created, removed, changed, net;
+  if (digestRows) {
+    created = digestRows.filter(r => r.kind === 'CREATED').length;
+    removed = digestRows.filter(r => r.kind === 'REMOVED').length;
+    changed = digestRows.filter(r => r.kind === 'CHANGED').length;
+    net = Number(((weeklyDigest || {}).summary || {}).count_net || 0);
+  } else {
+    created = rows.filter(r => WEEKLY_CREATED.includes(r.event_type)).length;
+    removed = rows.filter(r => WEEKLY_REMOVED.includes(r.event_type)).length;
+    changed = rows.filter(r => r.field_name && r.event_type !== 'ITSM_ASSET_UPDATED').length;
+    net = created - removed;
+  }
 
   document.getElementById('weekly-created').textContent = created.toLocaleString();
   document.getElementById('weekly-removed').textContent = removed.toLocaleString();
   document.getElementById('weekly-changed').textContent = changed.toLocaleString();
-  const net = created - removed;
   document.getElementById('weekly-net').textContent = (net > 0 ? '+' : '') + net.toLocaleString();
 
   const labels = ['월','화','수','목','금','토','일'];

@@ -127,9 +127,11 @@ class AutomatedReportService:
             ).fetchone()
             count = 0
             if snapshot:
+                condition, codes = self.scope.status_sql()
                 count = int(self.repo.conn.execute(
-                    "SELECT COUNT(*) AS cnt FROM itsm_asset_snapshot WHERE snapshot_id=? AND status_code IN ('CMSTA010','CMSTA050') AND server_category_code=?",
-                    (snapshot["id"], PHYSICAL_CATEGORY),
+                    f"SELECT COUNT(*) AS cnt FROM itsm_asset_snapshot WHERE snapshot_id=? AND {condition}"
+                    " AND server_category_code=?",
+                    (snapshot["id"], *codes, PHYSICAL_CATEGORY),
                 ).fetchone()["cnt"])
             trend.append([month_start.strftime("%Y-%m"), count])
         self._style(trend)

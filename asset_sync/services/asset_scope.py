@@ -26,13 +26,59 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 
-from ..normalization.code_maps import PLACE
+from ..normalization.code_maps import ASSET_STATUS, PLACE
 from datetime import datetime
 from typing import Any, Iterable, Mapping
 
-#: 자산으로 셀 상태. 운영(CMSTA010) 과 대기(CMSTA050).
-#: 미사용(CMSTA020)·매각폐기(CMSTA060) 는 자산 대수에 넣지 않는다.
-ACTIVE_STATUS = ("CMSTA010", "CMSTA050")
+#: 자산으로 셀 상태의 **기본값**. 운영(CMSTA010) 만 센다.
+#:
+#: 예전에는 운영·대기를 함께 셌다. 기준을 운영만으로 바꾸면서 설정
+#: (server_status.active_status) 으로 고를 수 있게 했다 -- 보고 목적에 따라
+#: 대기를 함께 보거나 미사용만 따로 볼 일이 있다. 실제 기준은 늘 Criteria 에서
+#: 읽는다. 이 상수를 직접 쓰면 설정을 바꿔도 그 화면만 옛 기준으로 남는다.
+ACTIVE_STATUS = ("CMSTA010",)
+
+#: 화면에서 고르는 묶음. 순서가 곧 화면의 보기 순서다.
+BASIS_PRESETS: dict[str, tuple[str, ...]] = {
+    "OPERATING": ("CMSTA010",),
+    "OPERATING_STANDBY": ("CMSTA010", "CMSTA050"),
+    "UNUSED": ("CMSTA020",),
+}
+
+#: 고를 수 있는 상태코드. 코드표에 없는 값은 받지 않는다.
+STATUS_CODES: tuple[str, ...] = tuple(ASSET_STATUS)
+
+
+def basis_label(codes: Iterable[str]) -> str:
+    """집계 기준을 사람이 읽는 말로. ('CMSTA010','CMSTA050') → '운영·대기'."""
+    codes = [str(code).upper() for code in codes]
+    ordered = [code for code in STATUS_CODES if code in set(codes)]
+    extra = [code for code in codes if code not in STATUS_CODES]
+    names = [ASSET_STATUS.get(code, code) for code in ordered + extra]
+    return "·".join(names) or "(없음)"
+
+
+def basis_preset(codes: Iterable[str]) -> str:
+    """고른 상태코드가 어느 묶음과 같은가. 어느 것과도 다르면 CUSTOM."""
+    wanted = set(codes)
+    for name, preset in BASIS_PRESETS.items():
+        if set(preset) == wanted:
+            return name
+    return "CUSTOM"
+
+
+def normalize_basis(codes: Any) -> tuple[str, ...]:
+    """설정·화면에서 온 값을 코드표 순서로 정리한다. 하나도 없으면 거부한다."""
+    if isinstance(codes, str):
+        codes = [part for part in codes.replace(";", ",").split(",")]
+    picked = {str(code or "").strip().upper() for code in (codes or [])}
+    picked.discard("")
+    unknown = sorted(picked - set(STATUS_CODES))
+    if unknown:
+        raise ValueError(f"알 수 없는 상태코드입니다: {', '.join(unknown)}")
+    if not picked:
+        raise ValueError("자산으로 셀 상태를 하나 이상 고르세요.")
+    return tuple(code for code in STATUS_CODES if code in picked)
 
 PHYSICAL_CATEGORY = "CMSVRCATCD010"
 LOGICAL_CATEGORY = "CMSVRCATCD020"
@@ -72,7 +118,8 @@ DEFAULT_SYSTEM_VM_PATTERNS = ("vCLS", "NSX-Edge-", "vSphere-Cluster-Srvc", "stCt
 
 #: 제외 사유 코드. 화면 문구와 함께 쓴다.
 REASON_LABELS = {
-    "STATUS": "상태가 운영·대기가 아님",
+    # 기본 문구. 실제 화면은 AssetScope.reason_label 로 지금 기준을 넣어 보여준다.
+    "STATUS": "상태가 집계 기준(운영)이 아님",
     "EMPTY": "OS·OS버전·EOSL 이 모두 비어 있음",
     "MANUAL": "수동 제외",
     "SYSTEM_VM": "vSphere 가 스스로 만드는 VM",
@@ -168,15 +215,24 @@ def criteria_from(config: Any) -> Criteria:
             str(n).upper() for n in
             (section.get("exclude_when_all_empty") or DEFAULT_EXCLUDE_WHEN_ALL_EMPTY)
         ),
-        active_status=tuple(
-            str(c).upper() for c in (section.get("active_status") or ACTIVE_STATUS)
-        ),
+        active_status=_configured_basis(section.get("active_status")),
         os_groups=os_groups,
         system_vm_patterns=tuple(
             str(token) for token in
             (section.get("system_vm_patterns") or DEFAULT_SYSTEM_VM_PATTERNS)
         ),
     )
+
+
+def _configured_basis(value: Any) -> tuple[str, ...]:
+    """설정의 집계 기준. 값이 잘못돼 있어도 화면이 죽지 않게 기본값으로 물러난다."""
+    if not value:
+        return ACTIVE_STATUS
+    try:
+        return normalize_basis(value)
+    except ValueError as exc:
+        LOGGER.warning("server_status.active_status 값이 잘못돼 기본값(운영)을 씁니다: %s", exc)
+        return ACTIVE_STATUS
 
 
 # ── 판정 ────────────────────────────────────────────────────────────────
@@ -313,6 +369,41 @@ class AssetScope:
     def rule_for(self, source: str, key: str) -> dict[str, Any] | None:
         return self.rules.get((str(source).upper(), str(key)))
 
+    # ── 집계 기준 ────────────────────────────────────────────────────────
+    @property
+    def basis_codes(self) -> tuple[str, ...]:
+        return tuple(self.criteria.active_status)
+
+    @property
+    def basis_label(self) -> str:
+        """지금 자산으로 세는 상태. 화면 머리말에 '기준: 운영' 처럼 쓴다."""
+        return basis_label(self.criteria.active_status)
+
+    def basis(self) -> dict[str, Any]:
+        """화면이 기준을 그대로 보여 줄 수 있도록 한 벌로 돌려준다."""
+        return {
+            "codes": list(self.basis_codes),
+            "label": self.basis_label,
+            "preset": basis_preset(self.basis_codes),
+        }
+
+    def counts_status(self, status: Any) -> bool:
+        """이 상태코드가 지금 기준으로 자산에 들어가는가."""
+        return str(status or "").upper() in self.criteria.active_status
+
+    def status_sql(self, column: str = "status_code") -> tuple[str, list[str]]:
+        """SQL 로 바로 세는 곳에 쓰는 조건. 상수를 SQL 에 박으면 설정을 따라오지 않는다."""
+        codes = list(self.basis_codes)
+        return f"{column} IN ({','.join('?' * len(codes))})", codes
+
+    def reason_label(self, reason: str | None) -> str:
+        """제외 사유를 지금 기준에 맞춰 적는다. STATUS 는 기준이 바뀌면 문구도 바뀐다."""
+        if not reason:
+            return ""
+        if reason == "STATUS":
+            return f"상태가 집계 기준({self.basis_label})이 아님"
+        return REASON_LABELS.get(reason, reason)
+
     def decide_itsm(self, record: Mapping[str, Any]) -> Decision:
         rule = self.rule_for("ITSM", itsm_key(record))
         if rule and str(rule.get("mode")) == "INCLUDE":
@@ -367,7 +458,7 @@ class AssetScope:
             "srm_placeholder": bool(record.get("srm_placeholder")),
             "included": decision.included,
             "exclude_reason": decision.reason,
-            "exclude_label": REASON_LABELS.get(decision.reason, ""),
+            "exclude_label": self.reason_label(decision.reason),
             "manual": decision.manual,
             "manual_note": decision.note,
             "raw": dict(record.get("raw") or {}),
@@ -403,7 +494,7 @@ class AssetScope:
             "selected": selected,
             "excluded": sum(reasons.values()),
             "by_reason": {
-                code: {"label": REASON_LABELS.get(code, code), "count": count}
+                code: {"label": self.reason_label(code), "count": count}
                 for code, count in reasons.items()
             },
             "include_all": self.include_all,
@@ -434,7 +525,7 @@ class AssetScope:
             "eosl_year": parse_year(eosl_value),
             "included": decision.included,
             "exclude_reason": decision.reason,
-            "exclude_label": REASON_LABELS.get(decision.reason, ""),
+            "exclude_label": self.reason_label(decision.reason),
             "manual": decision.manual,
             "manual_note": decision.note,
         }
@@ -478,11 +569,12 @@ class AssetScope:
             "selected": selected,
             "excluded": sum(reasons.values()),
             "by_reason": {
-                code: {"label": REASON_LABELS.get(code, code), "count": count}
+                code: {"label": self.reason_label(code), "count": count}
                 for code, count in reasons.items()
             },
             "include_all": self.include_all,
             "criteria": self.criteria.public(),
+            "basis": self.basis(),
         }
 
 

@@ -34,3 +34,24 @@ def test_itsm_status_and_field_changes(tmp_path: Path) -> None:
         assert "ITSM_STATUS_TO_UNUSED" in types
         assert "ITSM_IP_CHANGED" in types
         assert "ITSM_CPU_CHANGED" in types
+
+
+def test_status_is_compared_even_if_settings_leave_it_out(tmp_path: Path) -> None:
+    """대기 → 운영은 '운영' 기준에서 대수를 +1 한다. 추적 항목에서 상태를 빼거나
+    무시하도록 설정해도 비교는 돼야 한다 -- 안 그러면 월간 대수만 늘고 일간엔 안 잡힌다."""
+    cfg = config(tmp_path)
+    cfg.itsm = dict(cfg.itsm, tracked_fields=["CM_HOSTNAME"], ignore_fields=["CM_STA_CD"])
+    manager = SQLiteManager(cfg.database_path); manager.initialize()
+    t1 = datetime(2026, 7, 1, 1); t2 = t1 + timedelta(days=1)
+    row = {"CM_ID": "CM0002-1", "CM_HOSTNAME": "APP02", "CM_IP": "10.0.0.5", "CM_CPU_CORE_CNT": 4,
+           "CM_MEMORY": 16, "CM_SVR_CAT_CD": "CMSVRCATCD020", "CM_OS": "CMCIOSCD010"}
+    with manager.connect() as conn:
+        repo = AssetRepository(conn); svc = SnapshotService(cfg, repo)
+        for stamp, status in ((t1, "CMSTA050"), (t2, "CMSTA010")):
+            run = repo.start_collection_run("ITSM", stamp.isoformat())
+            normalized, _ = svc.normalize_itsm([dict(row, CM_STA_CD=status)])
+            snap = svc.save_itsm_snapshot(run, normalized, stamp)
+            repo.finish_collection_run(run, "SUCCESS", 1, stamp.isoformat(), ["ALL"])
+        events = DiffService(cfg, repo).compare_itsm(snap)["events"]
+    moves = [(e["old_value"], e["new_value"]) for e in events if e["field_name"] == "CM_STA_CD"]
+    assert ("CMSTA050", "CMSTA010") in moves

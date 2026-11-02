@@ -87,10 +87,11 @@ DIGEST_SCREENS = {
 }
 
 
-def test_both_check_screens_have_the_digest_table() -> None:
+def test_both_check_screens_have_the_digest_groups() -> None:
+    """[생성] · [변경] · [삭제] 로 묶어 그리는 자리. 두 화면에 똑같이 있어야 한다."""
     for page, prefix in DIGEST_SCREENS.items():
         text = (TEMPLATES / "pages" / f"{page}.html").read_text(encoding="utf-8")
-        assert f'id="{prefix}-table"' in text, f"{page} 에 묶음 표가 없습니다"
+        assert f'id="{prefix}-groups"' in text, f"{page} 에 묶음 자리가 없습니다"
 
 
 def test_digest_controls_exist_on_both_screens() -> None:
@@ -111,12 +112,24 @@ def test_digest_renderer_is_shared() -> None:
     """두 화면이 각자 표를 그리면 또 어긋난다. 그리는 곳은 하나여야 한다."""
     common = (TEMPLATES / "partials" / "js" / "common.html").read_text(encoding="utf-8")
     checks = (TEMPLATES / "partials" / "js" / "checks.html").read_text(encoding="utf-8")
-    for name in ("renderChangeDigest", "filterDigestRows", "loadChangeDigest",
-                 "exportChangeDigest"):
+    for name in ("renderChangeDigest", "renderChangeDigestGroups", "filterDigestRows",
+                 "loadChangeDigest", "exportChangeDigest"):
         assert f"function {name}" in common, f"{name} 은 공용 스크립트에 있어야 합니다"
         assert f"function {name}" not in checks, f"{name} 을 화면 스크립트가 또 만들었습니다"
-    for table in ("daily-digest-table", "weekly-digest-table"):
-        assert f"renderChangeDigest('{table}'" in checks, f"{table} 을 공용 renderer 로 안 그립니다"
+    for holder in ("daily-digest-groups", "weekly-digest-groups"):
+        assert f"renderChangeDigestGroups('{holder}'" in checks, f"{holder} 을 공용 renderer 로 안 그립니다"
+
+
+def test_sections_are_in_the_report_order() -> None:
+    """보고 형식 그대로 [생성] → [변경] → [삭제] 순서다."""
+    common = (TEMPLATES / "partials" / "js" / "common.html").read_text(encoding="utf-8")
+    assert "[['CREATED', '생성'], ['CHANGED', '변경'], ['REMOVED', '삭제']]" in common
+
+
+def test_no_screen_hard_codes_operating_and_standby() -> None:
+    """집계 기준은 설정에서 고른다. 화면에 '운영·대기' 를 박아 두면 기준을 바꿔도 남는다."""
+    for path in (TEMPLATES / "pages" / "daily_check.html", TEMPLATES / "main.html"):
+        assert "ITSM 운영·대기 전체" not in path.read_text(encoding="utf-8"), path.name
 
 
 #: 스크립트가 문자열로 넘기는 핸들러. ``{onShow: 'showDailyPending()'}`` 처럼

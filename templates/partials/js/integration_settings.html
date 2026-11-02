@@ -791,6 +791,7 @@ async function loadIntegrationSettings(showMessage=false){
     default_bypass_ssl_check:Boolean(vc.default_bypass_ssl_check)
   };
   document.getElementById('int-schedule-enabled').value=String(res.scheduler.enabled!==false);
+  renderAssetBasis(res.asset_basis);
   document.getElementById('int-schedule-time').value=res.scheduler.daily_time||'07:00';
   document.getElementById('int-schedule-name').value=res.scheduler.task_name||'AssetDailyCollection';
   loadScheduleStatus();
@@ -918,7 +919,7 @@ async function saveRuntimeSettings(){
   // 설정 저장과 Windows 작업 갱신은 별개다. 갱신이 실패했으면 그대로 알린다.
   const task=res.scheduler?.task||{};
   const enabled=res.scheduler?.enabled!==false;
-  const details=[enabled?'일일 배치 사용 중입니다.':'일일 배치를 끘 상태입니다. 이 시각에 수집이 돌지 않습니다.'];
+  const details=[enabled?'일일 배치 사용 중입니다.':'일일 배치를 끈 상태입니다. 이 시각에 수집이 돌지 않습니다.'];
   if(task.error)details.push(`Windows 작업 갱신 실패: ${task.error} → scripts\\register_daily_task.bat 을 관리자 권한으로 실행하세요.`);
   else if(task.applied)details.push(task.action==='CREATED'?'Windows 작업을 새로 등록했습니다.':'Windows 작업 시각을 갱신했습니다.');
   setActionResult('runtime-action-result',{
@@ -930,6 +931,45 @@ async function saveRuntimeSettings(){
   });
   integrationToast('실행시간과 로그 설정을 저장했습니다.','success');
   loadScheduleStatus();
+  return true;
+}
+
+// ── 자산 집계 기준 ──
+// 어느 ITSM 상태를 자산으로 셀지. 저장하면 모든 화면의 대수가 다음 조회부터 바뀐다.
+function renderAssetBasis(basis){
+  if(!basis) return;
+  const preset = basis.preset || 'OPERATING';
+  document.querySelectorAll('input[name="basis-preset"]').forEach(r => { r.checked = r.value === preset; });
+  document.querySelectorAll('input[name="basis-code"]').forEach(c => { c.checked = (basis.codes || []).includes(c.value); });
+  toggleBasisCustom();
+  const now = document.getElementById('basis-current');
+  if(now) now.textContent = `지금 기준: ${basis.label} (${(basis.codes || []).join(', ')})`;
+}
+
+function toggleBasisCustom(){
+  const picked = document.querySelector('input[name="basis-preset"]:checked');
+  const custom = document.getElementById('basis-custom');
+  if(custom) custom.style.display = picked && picked.value === 'CUSTOM' ? 'flex' : 'none';
+}
+
+async function saveAssetBasis(){
+  const preset = (document.querySelector('input[name="basis-preset"]:checked') || {}).value || 'OPERATING';
+  const codes = [...document.querySelectorAll('input[name="basis-code"]:checked')].map(c => c.value);
+  setButtonBusy('btn-save-basis', true, '저장 중', '집계 기준 저장');
+  const res = await integrationFetch('/api/asset-sync/admin/settings/asset-basis', {
+    method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({preset, codes}),
+  });
+  setButtonBusy('btn-save-basis', false, '', '집계 기준 저장');
+  if(!res._ok || res.error){
+    setActionResult('basis-action-result', {state: 'error', title: '집계 기준 저장 실패',
+      summary: res.error || '저장 중 오류가 발생했습니다.', meta: [`HTTP ${res._httpStatus || 0}`]});
+    integrationToast(`집계 기준 저장 실패: ${res.error || '알 수 없는 오류'}`, 'error');
+    return false;
+  }
+  renderAssetBasis(res.asset_basis);
+  setActionResult('basis-action-result', {state: 'success', title: '집계 기준 저장 완료', summary: res.message,
+    details: ['여러 WAS 가 있으면 다른 WAS 는 각자 설정 파일을 읽으므로 거기서도 같은 값으로 저장하세요.']});
+  integrationToast(res.message, 'success');
   return true;
 }
 

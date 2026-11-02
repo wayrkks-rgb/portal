@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from asset_sync.config import AppConfig
 from asset_sync.db.sqlite_manager import SQLiteManager
 from asset_sync.repositories import AssetRepository
 from asset_sync.services.collection_service import CollectionService
+from asset_sync.services.asset_scope import AssetScope
 from asset_sync.services.exception_service import ReconciliationExceptionService
 from asset_sync.services.integrated_dashboard_service import IntegratedDashboardService
 
@@ -43,7 +45,13 @@ def test_dashboard_and_exception_projection(tmp_path: Path) -> None:
         repo = AssetRepository(conn)
         dashboard = IntegratedDashboardService(repo).summary()
         assert dashboard["automation"]["status"] == "SUCCESS"
-        assert dashboard["asset_status"]["total"] == 2
+        # 데모 자료는 운영 1 · 대기 1 · 미사용 1 이다. 기본 기준(운영만)이면 1대,
+        # 운영+대기로 바꾸면 2대다. 기준이 대수를 실제로 움직이는지 함께 본다.
+        assert dashboard["asset_status"]["total"] == 1
+        wider = AssetScope.load(
+            SimpleNamespace(server_status={"active_status": ["CMSTA010", "CMSTA050"]}), repo
+        )
+        assert IntegratedDashboardService(repo, wider).summary()["asset_status"]["total"] == 2
         assert dashboard["comparison"]["counts"]["RVTOOLS_ONLY"] == 1
         assert "vcenter_changes" in dashboard
         candidate = next(row for row in IntegratedDashboardService(repo).exception_candidates() if row["match_status"] == "RVTOOLS_ONLY")

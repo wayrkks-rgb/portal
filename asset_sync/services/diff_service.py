@@ -7,6 +7,7 @@ from typing import Any
 from ..config import AppConfig
 from ..repositories import AssetRepository
 from ..utils.hashing import canonical_json
+from .asset_scope import criteria_from
 
 
 class DiffService:
@@ -92,6 +93,12 @@ class DiffService:
                 tracked.append(required_field)
         ignored = set(self.config.itsm.get("ignore_fields", []))
         tracked = [f for f in tracked if f not in ignored]
+        # 자산으로 셀지 판정에 쓰는 항목은 설정과 상관없이 늘 비교한다. 빠지면
+        # 대기 → 운영처럼 대수를 움직이는 변경이 일간에는 안 잡히고 월간 대수만
+        # 늘어난다 -- 일 · 주 · 월이 어긋난다.
+        for decision_field in ("CM_STA_CD", *criteria_from(self.config).exclude_when_all_empty):
+            if decision_field not in tracked:
+                tracked.append(decision_field)
         event_map = {
             "CM_IP": "ITSM_IP_CHANGED", "CM_SUB_IP": "ITSM_IP_CHANGED", "CM_HOSTNAME": "ITSM_HOSTNAME_CHANGED",
             cpu_field: "ITSM_CPU_CHANGED", "CM_CPU_CNT": "ITSM_CPU_CHANGED", memory_field: "ITSM_MEMORY_CHANGED",

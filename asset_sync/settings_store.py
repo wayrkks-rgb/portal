@@ -251,12 +251,56 @@ class LocalSettingsStore:
                 "verify_tls": bool(cfg.hmc.get("verify_tls", False)),
                 "endpoints": [self._public_hmc(item) for item in cfg.hmc.get("endpoints", []) or []],
             },
+            # 자산으로 셀 ITSM 상태. 대시보드·일·주·월·EOSL 대수가 모두 이것을 따른다.
+            # vCenter VM 대수는 따르지 않는다(전원·수동 제외/포함 정책을 쓴다).
+            "asset_basis": self._public_basis(cfg),
             "files": {
                 "app_local_exists": self.app_local_path.exists(),
                 "vcenters_local_exists": self.vcenters_local_path.exists(),
                 "env_exists": self.env_path.exists(),
             },
         }
+
+    @staticmethod
+    def _public_basis(cfg: Any, codes: Any = None) -> dict[str, Any]:
+        from .normalization.code_maps import ASSET_STATUS
+        from .services import asset_scope
+
+        if codes is None:
+            codes = asset_scope.criteria_from(cfg).active_status
+        return {
+            "codes": list(codes),
+            "label": asset_scope.basis_label(codes),
+            "preset": asset_scope.basis_preset(codes),
+            "presets": {name: list(value) for name, value in asset_scope.BASIS_PRESETS.items()},
+            "statuses": [{"code": code, "label": ASSET_STATUS[code]} for code in asset_scope.STATUS_CODES],
+        }
+
+    def save_asset_basis(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """자산으로 셀 ITSM 상태를 저장한다. 묶음 이름 또는 상태코드 목록을 받는다.
+
+        저장하면 다음 조회부터 모든 화면의 대수가 이 기준으로 바뀐다. 증감의
+        생성·삭제 판정도 같은 기준으로 다시 읽히므로, 지난 기록도 새 기준으로 보인다.
+        """
+        from .services import asset_scope
+
+        preset = str(payload.get("preset") or "").strip().upper()
+        if preset and preset != "CUSTOM":
+            if preset not in asset_scope.BASIS_PRESETS:
+                raise SettingsValidationError(f"알 수 없는 묶음입니다: {preset}")
+            codes = asset_scope.BASIS_PRESETS[preset]
+        else:
+            try:
+                codes = asset_scope.normalize_basis(payload.get("codes"))
+            except ValueError as exc:
+                raise SettingsValidationError(str(exc)) from exc
+        local_yaml = _read_yaml_dict(self.app_local_path)
+        section = dict(local_yaml.get("server_status") or {})
+        section["active_status"] = list(codes)
+        local_yaml["server_status"] = section
+        _atomic_write(self.app_local_path, yaml.safe_dump(local_yaml, allow_unicode=True, sort_keys=False))
+        # 다시 읽지 않고 저장한 값으로 답한다. 설정 위치가 환경마다 달라도 어긋나지 않는다.
+        return self._public_basis(None, codes)
 
     @staticmethod
     def _public_hmc(item: dict[str, Any]) -> dict[str, Any]:

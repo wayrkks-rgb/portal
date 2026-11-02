@@ -373,6 +373,30 @@ def create_admin_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprin
             LOGGER.exception("Runtime settings save failed")
             return jsonify({"success": False, "stage": "SAVE", "error": f"실행 설정 저장 실패: {exc}"}), 500
 
+    @bp.route("/api/asset-sync/admin/settings/asset-basis", methods=["GET"])
+    @admin_required
+    def get_asset_basis() -> Any:
+        return jsonify(settings_store.public_settings()["asset_basis"])
+
+    @bp.route("/api/asset-sync/admin/settings/asset-basis", methods=["PUT"])
+    @admin_required
+    def save_asset_basis() -> Any:
+        """자산으로 셀 ITSM 상태를 바꾼다. 대시보드·일·주·월·EOSL 대수가 함께 바뀐다."""
+        try:
+            saved = settings_store.save_asset_basis(request.get_json(silent=True) or {})
+        except (SettingsValidationError, ValueError, TypeError) as exc:
+            return jsonify({"success": False, "stage": "VALIDATION", "error": str(exc)}), 400
+        except OSError as exc:
+            LOGGER.exception("Asset basis save failed")
+            return jsonify({"success": False, "stage": "SAVE", "error": f"집계 기준 저장 실패: {exc}"}), 500
+        # 화면들이 붙잡고 있는 설정에도 바로 넣는다. 재기동 없이 다음 조회부터 반영된다.
+        cfg.server_status = dict(cfg.server_status or {}, active_status=list(saved["codes"]))
+        return jsonify({
+            "success": True,
+            "message": f"자산 집계 기준을 '{saved['label']}' 으로 바꿨습니다. 다음 조회부터 모든 화면에 반영됩니다.",
+            "asset_basis": saved,
+        })
+
     def _oracle_error_stage(exc: Exception) -> str:
         message = str(exc).upper()
         if "ORACLEDB 패키지" in message or "NO MODULE NAMED" in message:

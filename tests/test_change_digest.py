@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from openpyxl import load_workbook
@@ -20,6 +21,7 @@ from openpyxl import load_workbook
 from asset_sync.config import AppConfig
 from asset_sync.db.manager import create_manager
 from asset_sync.repositories import AssetRepository
+from asset_sync.services.asset_scope import AssetScope
 from asset_sync.services.change_digest_service import (
     CHANGED,
     CREATED,
@@ -565,7 +567,10 @@ def test_a_new_asset_that_is_not_counted_says_so(portal) -> None:
     row = digest(config, manager)["rows"][0]
     assert row["count_effect"] == 0
     assert "그대로" in row["count_note"]
-    assert "운영·대기" in row["count_note"]
+    assert "집계 기준(운영)" in row["count_note"]
+    # 집계 밖으로 등록된 것은 운영 대수를 안 움직이므로 '생성' 이 아니라 '변경' 에 둔다.
+    assert row["kind"] == CHANGED
+    assert row["summary"].startswith("ITSM 신규 등록 · 집계 밖")
 
 
 def test_a_status_move_out_of_service_takes_one_away(portal) -> None:
@@ -590,7 +595,8 @@ def test_a_vcenter_only_new_vm_does_not_move_the_server_count(portal) -> None:
                   "new_value": json.dumps({"vm_name": "NEW-VM"}, ensure_ascii=False)}])
     row = digest(config, manager)["rows"][0]
     assert row["count_effect"] == 0
-    assert "등록해야" in row["count_note"]
+    assert "등록하는 날" in row["count_note"]
+    assert row["kind"] == CREATED            # vCenter 에는 새로 생긴 서버다
 
 
 def test_the_summary_adds_up_the_count_effect(portal) -> None:
@@ -610,3 +616,89 @@ def test_the_summary_adds_up_the_count_effect(portal) -> None:
     assert summary["count_added"] == 1
     assert summary["count_neutral"] == 1
     assert summary["count_net"] == 1
+
+
+# ── 생성 · 변경 · 삭제는 자산 대수 기준으로 가른다 ─────────────────────────
+# ITSM 상태가 미사용 → 운영이면 '변경' 이 아니라 생성, 운영 → 미사용·폐기면 삭제.
+# 전 · 후 값으로 자산 판정을 각각 돌려 보고 정한다.
+
+
+def status_event(key: str, old: str, new: str, event_type: str = "ITSM_STATUS_CHANGED") -> dict:
+    return {"source": "ITSM", "asset_key": key, "event_type": event_type,
+            "field_name": "CM_STA_CD", "old_value": old, "new_value": new}
+
+
+def digest_with(config, manager, codes) -> dict:
+    with manager.connect() as conn:
+        repo = AssetRepository(conn)
+        scope = AssetScope.load(SimpleNamespace(server_status={"active_status": codes}), repo)
+        return ChangeDigestService(config, repo, scope).digest(START, END)
+
+
+@pytest.mark.parametrize("old, new, kind, effect", [
+    ("CMSTA020", "CMSTA010", CREATED, 1),     # 미사용 → 운영
+    ("CMSTA010", "CMSTA020", REMOVED, -1),    # 운영 → 미사용
+    ("CMSTA010", "CMSTA060", REMOVED, -1),    # 운영 → 폐기
+    ("CMSTA050", "CMSTA010", CREATED, 1),     # 대기 → 운영 (기준: 운영)
+    ("CMSTA010", "CMSTA050", REMOVED, -1),    # 운영 → 대기 (기준: 운영)
+    ("CMSTA020", "CMSTA060", CHANGED, 0),     # 미사용 → 폐기: 둘 다 집계 밖
+])
+def test_a_status_move_is_judged_by_the_server_count(portal, old, new, kind, effect) -> None:
+    config, manager = portal
+    seed(manager, assets=[asset("CM001", hostname="a", ip="10.0.0.1", name="업무A", status=new)],
+         events=[status_event("CM001", old, new)])
+    row = digest(config, manager)["rows"][0]
+    assert (row["kind"], row["count_effect"]) == (kind, effect), row["count_note"]
+
+
+def test_changing_the_basis_rereads_the_same_history(portal) -> None:
+    """대기 → 운영은 '운영' 기준이면 생성, '운영+대기' 기준이면 그냥 변경이다."""
+    config, manager = portal
+    seed(manager, assets=[asset("CM001", hostname="a", ip="10.0.0.1", name="업무A")],
+         events=[status_event("CM001", "CMSTA050", "CMSTA010")])
+    operating = digest_with(config, manager, ["CMSTA010"])["rows"][0]
+    wider = digest_with(config, manager, ["CMSTA010", "CMSTA050"])["rows"][0]
+    assert (operating["kind"], operating["count_effect"]) == (CREATED, 1)
+    assert (wider["kind"], wider["count_effect"]) == (CHANGED, 0)
+    assert digest_with(config, manager, ["CMSTA010"])["basis"]["label"] == "운영"
+
+
+def test_a_status_change_logged_twice_shows_once(portal) -> None:
+    """상태 이벤트와 항목 이벤트가 같은 변경을 두 번 적는다. 한 번만 보여야 한다."""
+    config, manager = portal
+    seed(manager, assets=[asset("CM001", hostname="a", ip="10.0.0.1", name="업무A", status="CMSTA020")],
+         events=[status_event("CM001", "CMSTA010", "CMSTA020", "ITSM_STATUS_TO_UNUSED"),
+                 status_event("CM001", "CMSTA010", "CMSTA020")])
+    row = digest(config, manager)["rows"][0]
+    assert len(row["itsm_fields"]) == 1
+    assert row["kind"] == REMOVED
+
+
+def test_filling_in_empty_os_fields_brings_an_asset_in(portal) -> None:
+    """OS·EOSL 이 모두 비어 빠져 있던 자산에 값이 채워지면 대수에 들어온다(생성)."""
+    config, manager = portal
+    filled = asset("CM001", hostname="a", ip="10.0.0.1", name="업무A")
+    seed(manager, assets=[filled],
+         events=[field_event("CM001", "CM_OS", "", "CMCIOSCD010"),
+                 field_event("CM001", "CM_OS_VERSION", "", "8.6"),
+                 field_event("CM001", "CM_EOL_DT", "", "2030-12-31")])
+    row = digest(config, manager)["rows"][0]
+    assert (row["kind"], row["count_effect"]) == (CREATED, 1)
+
+
+def test_the_daily_sections_add_up_to_the_server_count(portal) -> None:
+    """ITSM 쪽 [생성] − [삭제] 건수가 곧 운영 대수 순증감이어야 한다."""
+    config, manager = portal
+    seed(manager,
+         assets=[asset("CM001", hostname="a", ip="10.0.0.1", name="A"),
+                 asset("CM002", hostname="b", ip="10.0.0.2", name="B", status="CMSTA020"),
+                 asset("CM003", hostname="c", ip="10.0.0.3", name="C")],
+         events=[status_event("CM001", "CMSTA020", "CMSTA010"),
+                 status_event("CM002", "CMSTA010", "CMSTA020"),
+                 field_event("CM003", "CM_NAME", "x", "C")])
+    result = digest(config, manager)
+    kinds = sorted(row["kind"] for row in result["rows"])
+    assert kinds == sorted([CREATED, REMOVED, CHANGED])
+    created = sum(1 for r in result["rows"] if r["kind"] == CREATED)
+    removed = sum(1 for r in result["rows"] if r["kind"] == REMOVED)
+    assert created - removed == result["summary"]["count_net"] == 0

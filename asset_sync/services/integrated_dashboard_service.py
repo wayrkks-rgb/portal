@@ -8,7 +8,6 @@ from typing import Any
 from ..normalization.code_maps import ASSET_STATUS, ENVIRONMENT, SERVER_CATEGORY
 from ..repositories import AssetRepository
 from .asset_scope import (
-    ACTIVE_STATUS as SCOPE_ACTIVE_STATUS,
     load_itsm_records,
     location as scope_location,
     LOGICAL_CATEGORY,
@@ -17,10 +16,6 @@ from .asset_scope import (
     AssetScope,
 )
 from .exception_service import ReconciliationExceptionService
-
-#: 예전 이름. 실제 판단은 AssetScope 가 한다.
-ACTIVE_STATUS = set(SCOPE_ACTIVE_STATUS)
-
 
 class IntegratedDashboardService:
     """Read-only dashboard projection built from persisted automatic collection results."""
@@ -93,9 +88,10 @@ class IntegratedDashboardService:
         for record in records:
             code = str(record.get("status_code") or "")
             label = f"{ASSET_STATUS.get(code, '알 수 없음')}({code or '없음'})"
-            (included if code in ACTIVE_STATUS else excluded)[label] += 1
+            # 상수가 아니라 지금 설정된 기준으로 가른다.
+            (included if self.scope.counts_status(code) else excluded)[label] += 1
         basis.update({
-            "counted_status_codes": sorted(ACTIVE_STATUS),
+            "counted_status_codes": list(self.scope.basis_codes),
             "included": dict(included),
             "excluded_status": dict(excluded),
             "category_codes": {"물리": PHYSICAL_CATEGORY, "논리": LOGICAL_CATEGORY},
@@ -409,10 +405,12 @@ class IntegratedDashboardService:
     def _logical_count(self, snapshot: Any) -> int:
         if not snapshot:
             return 0
+        condition, codes = self.scope.status_sql()
         return int(
             self.repo.conn.execute(
-                "SELECT COUNT(*) AS cnt FROM itsm_asset_snapshot WHERE snapshot_id=? AND status_code IN ('CMSTA010','CMSTA050') AND server_category_code=?",
-                (snapshot["id"], LOGICAL_CATEGORY),
+                f"SELECT COUNT(*) AS cnt FROM itsm_asset_snapshot WHERE snapshot_id=? AND {condition}"
+                " AND server_category_code=?",
+                (snapshot["id"], *codes, LOGICAL_CATEGORY),
             ).fetchone()["cnt"]
         )
 

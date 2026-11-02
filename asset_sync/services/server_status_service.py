@@ -123,7 +123,7 @@ class ServerStatusService:
     def describe_exclusion(self) -> str:
         fields = ", ".join(self.criteria.exclude_when_all_empty)
         return (
-            f"상태가 운영·대기가 아니거나({', '.join(self.criteria.active_status)}) "
+            f"상태가 집계 기준({self.scope.basis_label} · {', '.join(self.criteria.active_status)})이 아니거나 "
             f"{fields} 가 모두 비어 있거나, 수동으로 제외한 자산"
         )
 
@@ -133,6 +133,8 @@ class ServerStatusService:
         # 예전 화면이 eosl_field(단수) 를 읽는다. 실제로 쓰는 첫 후보를 준다.
         criteria["eosl_field"] = self.criteria.eosl_fields[0] if self.criteria.eosl_fields else ""
         criteria["include_all"] = self.include_all
+        # 화면 머리말에 '기준: 운영' 처럼 쓴다. 관리 → 연계 설정에서 고른 값이다.
+        criteria["basis"] = self.scope.basis()
         return criteria
 
     # ── 신규·삭제 상세 ──────────────────────────────────────────────────

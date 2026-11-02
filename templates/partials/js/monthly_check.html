@@ -663,7 +663,9 @@ async function loadMonthlyCheck() {
 
   // 기준을 드러낸다. 대수가 ITSM 과 다를 때 어느 쪽이 틀렸는지 따질 수 있어야 한다.
   const criteria = res.criteria;
+  const basis = (criteria && criteria.basis) || {};
   document.getElementById('monthly-server-basis').innerHTML =
+    (basis.label ? `<strong>자산 기준: ${syncEscape(basis.label)}</strong> · ` : '') +
     `${syncEscape(res.as_of)} 기준` +
     (res.previous_as_of ? ` · 전월 ${syncEscape(res.previous_as_of)} 대비 증감` : ' · 비교할 전월 없음') +
     ` · 집계 ${Number(res.counts.selected).toLocaleString()}건 / 제외 ${Number(res.counts.excluded).toLocaleString()}건`;

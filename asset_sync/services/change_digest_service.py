@@ -14,6 +14,12 @@
 
 반영 여부는 이벤트끼리 견주지 않는다. **지금 ITSM 값**과 견준다 -- 이벤트끼리
 견주면 ITSM 을 며칠 늦게 고친 경우를 미반영으로 잘못 읽는다.
+
+**생성 · 변경 · 삭제는 자산 대수 기준으로 가른다.** ITSM 상태가 미사용 → 운영처럼
+집계 기준 안으로 들어오면 '변경' 이 아니라 **생성**, 운영 → 미사용 · 폐기처럼 밖으로
+나가면 **삭제** 다. 이벤트 종류로 정하지 않고, 그 변경의 **전 · 후 값으로 자산
+판정을 각각 돌려 보고** 정한다. 그래서 관리 화면에서 집계 기준(운영 / 운영+대기 …)을
+바꾸면 지난 기록도 같은 기준으로 다시 읽힌다 -- 일 · 주 · 월이 늘 한 기준으로 움직인다.
 """
 
 from __future__ import annotations
@@ -23,7 +29,7 @@ from collections import defaultdict
 from typing import Any
 
 from . import asset_matching
-from .asset_scope import REASON_LABELS, AssetScope, load_itsm_records
+from .asset_scope import AssetScope, load_itsm_records
 from .change_presenter import present
 from .display_name_service import DisplayNameService
 
@@ -67,10 +73,6 @@ REFLECTION_LABELS = {
     NO_ASSET: "ITSM 자산 못 찾음",
     NOT_CHECKED: "대상 아님",
 }
-
-#: 상태코드상 자산으로 세는 것.
-ACTIVE_STATUS = {"CMSTA010", "CMSTA050"}
-
 
 def _is_empty(value: Any) -> bool:
     """값이 없다고 읽히는가. 숫자 칸의 0 과 빈 값은 둘 다 '모름' 이다."""
@@ -130,9 +132,8 @@ class ChangeDigestService:
             self._attach_identity(row, context)
             self._attach_reflection(row, context)
             self._attach_count_effect(row, context)
-            row.pop("_itsm_record", None)
-            row.pop("_vm_record", None)
-            row.pop("_payloads", None)
+            for internal in ("_itsm_record", "_vm_record", "_payloads", "_itsm_changes", "_seen"):
+                row.pop(internal, None)
         counts: dict[str, int] = defaultdict(int)
         for row in rows:
             counts[row["kind"]] += 1
@@ -140,6 +141,8 @@ class ChangeDigestService:
         effects = [int(r.get("count_effect") or 0) for r in rows]
         return {
             "period": {"start": start, "end": end},
+            # 무엇을 자산으로 셌는지. 생성·삭제 판정이 이 기준을 따른다.
+            "basis": self.scope.basis(),
             "rows": rows,
             "counts": {
                 kind: {"count": int(counts.get(kind, 0)), "label": label}
@@ -197,6 +200,10 @@ class ChangeDigestService:
                     "event_types": [], "sources": [],
                     "itsm_cm_id": None, "vm_key": None,
                     "_payloads": {},
+                    # ITSM 항목별 (변경 전 원값, 변경 후 원값). 자산 판정을 전·후로
+                    # 다시 돌릴 때 쓴다. 화면용 표시값이 아니라 원래 값이어야 한다.
+                    "_itsm_changes": {},
+                    "_seen": set(),
                 }
                 order.append(key)
             row = buckets[key]
@@ -217,9 +224,17 @@ class ChangeDigestService:
                 row["detected_at"] = event.get("detected_at")
             if event_type in WHOLE_RECORD_EVENTS:
                 continue
+            if source == "ITSM" and event.get("field_name"):
+                self._remember_change(row["_itsm_changes"], event)
             field = self._field(event)
             if field is None:
                 continue
+            # 상태 변경은 상태 이벤트(ITSM_STATUS_TO_UNUSED 등)와 항목 이벤트
+            # (CM_STA_CD) 로 두 번 쌓인다. 같은 항목 · 같은 값이면 한 번만 적는다.
+            seen = (source, field["name"], str(event.get("old_value")), str(event.get("new_value")))
+            if seen in row["_seen"]:
+                continue
+            row["_seen"].add(seen)
             (row["trivial"] if field["trivial"] else row["fields"]).append(field)
 
         rows: list[dict[str, Any]] = []
@@ -275,6 +290,20 @@ class ChangeDigestService:
         return f"ITSM:{cm_id}" if cm_id else f"VM:{asset_key}"
 
     @staticmethod
+    def _remember_change(changes: dict[str, list[Any]], event: dict[str, Any]) -> None:
+        """항목 하나의 그날 첫 '전' 값과 마지막 '후' 값. 이벤트는 최신순으로 온다."""
+        name = str(event.get("field_name"))
+        stamp = str(event.get("detected_at") or "")
+        held = changes.get(name)
+        if held is None:
+            changes[name] = [event.get("old_value"), event.get("new_value"), stamp, stamp]
+            return
+        if stamp < held[2]:
+            held[0], held[2] = event.get("old_value"), stamp
+        if stamp > held[3]:
+            held[1], held[3] = event.get("new_value"), stamp
+
+    @staticmethod
     def _rank(kind: str) -> int:
         return {CHANGED: 0, STATUS: 1, REMOVED: 2, CREATED: 3}.get(kind, 0)
 
@@ -309,7 +338,9 @@ class ChangeDigestService:
     @staticmethod
     def _summary(row: dict[str, Any]) -> str:
         parts: list[str] = []
-        if row["kind"] in {CREATED, REMOVED}:
+        if row.get("summary_prefix"):
+            parts.append(row["summary_prefix"])
+        elif row["kind"] in {CREATED, REMOVED}:
             parts.append(KIND_LABELS[row["kind"]])
         for item in row["fields"][:4]:
             parts.append(f"{item['label']} {item['old']} → {item['new']}")
@@ -450,23 +481,24 @@ class ChangeDigestService:
         """반영됐는지, 안 됐으면 무엇을 해야 하는지."""
         types = set(row.get("event_types") or [])
         status = str((asset or {}).get("status_code") or "")
+        basis = self.scope.basis_label
 
         if "RV_NEW" in types:
             if asset is None:
                 return (NOT_REFLECTED, "vCenter 에 새로 생긴 VM 인데 ITSM 에 자산이 없습니다.",
                         "ITSM 에 자산 등록")
-            if status not in ACTIVE_STATUS:
+            if not self.scope.counts_status(status):
                 return (NOT_REFLECTED,
-                        f"ITSM 자산은 있으나 상태가 운영·대기가 아닙니다({status}).",
+                        f"ITSM 자산은 있으나 상태가 집계 기준({basis})이 아닙니다({status}).",
                         "ITSM 상태를 운영으로")
-            return (REFLECTED, "ITSM 에 운영 자산으로 있습니다.", "")
+            return (REFLECTED, f"ITSM 에 집계 기준({basis}) 자산으로 있습니다.", "")
 
         if "RV_REMOVED" in types:
             if asset is None:
                 return (REFLECTED, "ITSM 에도 없습니다.", "")
-            if status in ACTIVE_STATUS:
+            if self.scope.counts_status(status):
                 return (NOT_REFLECTED,
-                        "vCenter 에서 사라졌는데 ITSM 은 아직 운영·대기입니다.",
+                        f"vCenter 에서 사라졌는데 ITSM 은 아직 집계 기준({basis}) 상태입니다.",
                         "ITSM 상태를 미사용·폐기로")
             return (REFLECTED, f"ITSM 상태가 이미 {status} 입니다.", "")
 
@@ -497,59 +529,136 @@ class ChangeDigestService:
             return (NOT_REFLECTED, " · ".join(gaps), "ITSM 값을 vCenter 와 맞추기")
         return (REFLECTED, "ITSM 값이 vCenter 와 같습니다.", "")
 
-    # ── 자산 대수를 움직이나 ────────────────────────────────────────────
+    # ── 자산 대수를 움직이나 · 생성/변경/삭제 ─────────────────────────────
     def _attach_count_effect(self, row: dict[str, Any], context: _Context) -> None:
-        """이 변경이 **서버 대수**를 +1 / -1 / 그대로 중 무엇으로 만드는가.
+        """이 변경이 **서버 대수**를 +1 / -1 / 그대로 중 무엇으로 만드는가, 그리고
+        그에 따라 이 줄을 생성 · 변경 · 삭제 중 어디에 둘 것인가.
 
-        일간에서 '신규' 로 본 것이 월간 대수에는 안 잡히는 일이 있었다. 상태가
-        운영·대기가 아니거나 제외 규칙에 걸리면 자산으로 세지 않기 때문인데,
-        화면이 그 말을 안 해 주니 숫자가 어긋난 것처럼 보였다. 여기서 밝힌다.
+        ITSM 쪽은 이벤트 종류로 정하지 않는다. 변경 **전 값**과 **후 값**으로 자산
+        판정(상태 · 빈 값 규칙 · 수동 제외)을 각각 돌려 보고, 밖 → 안 이면 생성,
+        안 → 밖 이면 삭제, 그대로면 변경이다. 미사용 → 운영이 '변경' 으로 섞여
+        월간 대수와 어긋나던 것을 이렇게 바로잡는다. 집계 기준을 바꾸면 지난
+        기록도 새 기준으로 다시 읽힌다.
+
+        vCenter 쪽 신규 · 삭제는 그대로 생성 · 삭제에 두되, ITSM 기준 대수는 움직이지
+        않는다(ITSM 에 반영돼야 잡힌다). 그 사실을 대수 근거에 적는다.
         """
         types = set(row.get("event_types") or [])
         payloads = row.get("_payloads") or {}
-        effect, note = 0, ""
+        basis = self.scope.basis_label
+        before, after, base_known = self._itsm_states(row, context)
+        effect, note, prefix = 0, "", ""
 
-        if "ITSM_ASSET_CREATED" in types or "ITSM_ASSET_REACTIVATED" in types:
-            asset = context.assets.get(str(row.get("itsm_cm_id") or ""))
-            if asset is None:
-                note = "ITSM 자산을 지금 스냅샷에서 찾지 못했습니다."
-            else:
-                decision = self.scope.decide_itsm(asset)
-                if decision.included and not decision.reason:
-                    effect, note = 1, "ITSM 운영 자산으로 들어가 서버 대수에 더해집니다."
-                else:
-                    note = ("자산에서 빠지는 대상이라 서버 대수는 그대로입니다"
-                            f" ({REASON_LABELS.get(decision.reason, decision.reason or '제외')}).")
-        elif "ITSM_RECORD_REMOVED" in types:
-            before = payloads.get("ITSM")
-            counted = self._counted_before(before)
+        if "ITSM_ASSET_CREATED" in types:
+            counted, reason = self._counted(row, after)
             if counted:
-                effect, note = -1, "ITSM 에서 빠져 서버 대수에서 하나 줄어듭니다."
+                effect, note = 1, f"ITSM 에 집계 기준({basis}) 자산으로 새로 들어와 서버 대수에 더해집니다."
             else:
-                note = "원래 자산으로 세지 않던 대상이라 서버 대수는 그대로입니다."
-        elif "ITSM_STATUS_TO_UNUSED" in types or "ITSM_STATUS_TO_DISPOSED" in types:
-            effect, note = -1, "상태가 운영·대기에서 빠져 서버 대수에서 하나 줄어듭니다."
-        elif row.get("kind") == CREATED and "RV_NEW" in types:
-            if row.get("itsm_cm_id"):
-                note = "ITSM 자산이 이미 있어 서버 대수는 그대로입니다."
+                note = f"ITSM 에 새로 등록됐지만 자산으로 세지 않습니다({reason}). 서버 대수는 그대로입니다."
+                prefix = "ITSM 신규 등록 · 집계 밖"
+        elif "ITSM_RECORD_REMOVED" in types:
+            counted, reason = self._counted(row, before)
+            if counted:
+                effect, note = -1, "ITSM 에서 레코드가 지워져 서버 대수에서 하나 줄어듭니다."
             else:
-                note = "ITSM 에 자산이 없어 서버 대수에 들어가지 않습니다. 등록해야 잡힙니다."
-        elif row.get("kind") == REMOVED and "RV_REMOVED" in types:
-            note = ("vCenter 에서만 사라졌습니다. ITSM 상태를 바꿔야 서버 대수가 줄어듭니다."
+                note = f"원래 자산으로 세지 않던 대상이 ITSM 에서 지워졌습니다({reason})."
+                prefix = "ITSM 레코드 삭제 · 집계 밖"
+        elif row.get("_itsm_changes"):
+            was, why_was = self._counted(row, before)
+            now, why_now = self._counted(row, after)
+            if not base_known:
+                # 지금 스냅샷에 자산이 없어 다른 항목을 모른다. 상태만으로 본다.
+                was = self.scope.counts_status(before.get("CM_STA_CD"))
+                now = self.scope.counts_status(after.get("CM_STA_CD"))
+            if now and not was:
+                effect = 1
+                note = (f"집계 기준({basis}) 안으로 들어와 서버 대수에 더해집니다"
+                        f"{self._status_move(before, after)}.")
+            elif was and not now:
+                effect = -1
+                note = (f"집계 기준({basis}) 밖으로 나가 서버 대수에서 하나 줄어듭니다"
+                        f"{self._status_move(before, after)}.")
+            elif not now:
+                note = f"자산으로 세지 않는 대상이라 서버 대수는 그대로입니다({why_now})."
+            else:
+                note = "내용만 바뀌어 서버 대수는 그대로입니다."
+        elif "RV_NEW" in types:
+            # 짝이 되는 ITSM 자산이 '지금' 있어도, 그 자산이 이날 있었다는 뜻은 아니다
+            # (며칠 뒤 등록했을 수 있다). 대수는 ITSM 쪽 등록·운영 전환일에 잡힌다.
+            note = (f"ITSM 자산({row['itsm_cm_id']})과 짝이 맞습니다. 운영 대수는 VM 이 생긴 날이 아니라"
+                    " ITSM 에 등록 · 운영 전환된 날 잡힙니다." if row.get("itsm_cm_id")
+                    else "ITSM 에 자산이 없어 서버 대수에 들어가지 않습니다. 등록하는 날 대수에 잡힙니다.")
+        elif "RV_REMOVED" in types:
+            note = ("vCenter 에서만 사라졌습니다. ITSM 상태를 바꾸는 날 서버 대수가 줄어듭니다."
                     if row.get("itsm_cm_id") else "ITSM 자산이 없어 서버 대수는 그대로입니다.")
         else:
             note = "내용만 바뀌어 서버 대수는 그대로입니다."
 
+        # 생성 · 변경 · 삭제. ITSM 이 대수를 움직였으면 그것이 먼저다.
+        if effect > 0:
+            kind = CREATED
+        elif effect < 0:
+            kind = REMOVED
+        elif "RV_NEW" in types:
+            kind = CREATED
+        elif "RV_REMOVED" in types:
+            kind = REMOVED
+        else:
+            kind = CHANGED
+        row["kind"] = kind
+        row["kind_label"] = KIND_LABELS[kind]
+        row["summary_prefix"] = prefix
+        row["summary"] = self._summary(row)
         row["count_effect"] = effect
         row["count_effect_label"] = {1: "자산 +1", -1: "자산 −1"}.get(effect, "대수 변화 없음")
         row["count_note"] = note
 
-    def _counted_before(self, raw: dict[str, Any] | None) -> bool:
-        """지워지기 전에 자산으로 세던 대상이었나. 이벤트에 남은 원본으로 판단한다."""
-        if not raw:
-            return True                      # 알 수 없으면 세던 것으로 본다
-        status = str(raw.get("CM_STA_CD") or "")
-        return status in ACTIVE_STATUS if status else True
+    def _itsm_states(
+        self, row: dict[str, Any], context: _Context
+    ) -> tuple[dict[str, Any], dict[str, Any], bool]:
+        """ITSM 원본의 변경 전 · 후 모습. 지금 값 위에 그날의 전 · 후 값을 얹는다.
+
+        지난 날짜를 볼 때도 그날 바뀐 항목은 그날 값으로 판정해야 한다. 지금 값만
+        쓰면 그 뒤에 또 바뀐 상태로 과거를 판정하게 된다.
+        """
+        payloads = row.get("_payloads") or {}
+        asset = context.assets.get(str(row.get("itsm_cm_id") or "")) or {}
+        base = dict(asset.get("raw") or payloads.get("ITSM") or {})
+        if asset and not base.get("CM_STA_CD") and asset.get("status_code"):
+            # 원본에 상태가 없고 정규화된 값에만 있는 경우가 있다. 판정은 상태가 핵심이다.
+            base["CM_STA_CD"] = asset["status_code"]
+        base_known = bool(asset)
+        before, after = dict(base), dict(base)
+        # 이벤트에 남은 원본이 그날의 모습이다. 빠진 항목은 지금 값으로 채운다.
+        if "ITSM_ASSET_CREATED" in set(row.get("event_types") or []) and payloads.get("ITSM"):
+            after.update(payloads["ITSM"])               # 등록되던 날의 모습
+        if "ITSM_RECORD_REMOVED" in set(row.get("event_types") or []) and payloads.get("ITSM"):
+            before.update(payloads["ITSM"])              # 지워지기 직전의 모습
+        for name, (old, new, _, _) in (row.get("_itsm_changes") or {}).items():
+            before[name] = old
+            after[name] = new
+        return before, after, base_known
+
+    def _counted(self, row: dict[str, Any], raw: dict[str, Any]) -> tuple[bool, str]:
+        """이 원본 모습이면 자산으로 세는가, 안 세면 왜인가."""
+        record = {
+            "cm_id": row.get("itsm_cm_id") or raw.get("CM_ID"),
+            "status_code": raw.get("CM_STA_CD"),
+            "raw": raw,
+        }
+        decision = self.scope.decide_itsm(record)
+        # '제외 포함 보기' 에서는 included 가 늘 참이다. 사유로 판단한다.
+        counted = bool(decision.included and not decision.reason)
+        return counted, self.scope.reason_label(decision.reason) if decision.reason else ""
+
+    @staticmethod
+    def _status_move(before: dict[str, Any], after: dict[str, Any]) -> str:
+        old, new = before.get("CM_STA_CD"), after.get("CM_STA_CD")
+        if not old or not new or old == new:
+            return ""
+        from ..normalization.code_maps import ASSET_STATUS
+
+        return f" (상태 {ASSET_STATUS.get(old, old)} → {ASSET_STATUS.get(new, new)})"
 
     # ── 엑셀 ────────────────────────────────────────────────────────────
     EXPORT_COLUMNS = (
