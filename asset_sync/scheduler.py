@@ -122,7 +122,57 @@ def describe(task_name: str) -> dict[str, Any]:
         "last_run": pick("마지막 실행 시간", "Last Run Time"),
         "last_result": pick("마지막 결과", "Last Result"),
         "command": pick("실행할 작업", "Task To Run"),
+        # 누구로 도는가. SYSTEM 이면 사용자 프로필에 깐 PowerCLI 를 못 본다.
+        "run_as": pick("실행 사용자", "사용자로 실행", "Run As User"),
+        # '사용자가 로그온할 때만 실행' 이면 아무도 로그온 안 한 07시에는 안 돈다.
+        "logon_mode": pick("로그온 모드", "Logon Mode"),
     }
+
+
+#: 작업 스케줄러 '마지막 결과' 값 → 무슨 뜻이고 무엇을 하면 되는가.
+RESULT_CODES: dict[int, tuple[str, str]] = {
+    0x0: ("정상 종료", ""),
+    0x1: ("배치 파일이 오류로 끝났습니다(파이썬 가상환경 문제 등)",
+          "logs\\daily_batch_console.log 의 마지막 BATCH START 아래를 보세요."),
+    0x2: ("수집이 실패로 끝났습니다(FAILED)",
+          "check_daily_batch.py 의 3) 배치 기록에 적힌 사유를 보세요."),
+    0x41300: ("작업을 실행할 준비가 됐습니다", ""),
+    0x41301: ("지금 실행 중입니다", "끝날 때까지 기다리세요. 4시간이 넘으면 멈춘 것입니다."),
+    0x41302: ("작업이 꺼져(사용 안 함) 있습니다",
+              "작업 스케줄러에서 작업을 [사용]으로 바꾸세요."),
+    0x41303: ("아직 한 번도 실행되지 않았습니다",
+              "예정 시각을 기다리거나 작업 스케줄러에서 [실행]을 눌러 보세요."),
+    0x41306: ("작업이 중간에 종료됐습니다(시간 초과 또는 사용자가 종료)",
+              "4시간 제한에 걸렸는지 로그를 보세요."),
+    0x8004131F: ("이전 실행이 아직 돌고 있어 이번 실행을 건너뛰었습니다",
+                 "멈춘 python.exe 가 있으면 종료하세요."),
+    0x800710E0: ("실행 계정이 거부됐습니다(암호 만료·권한 부족)",
+                 "실행 계정 암호를 갱신하거나 작업을 다시 등록하세요."),
+    0x80070002: ("실행할 파일을 찾지 못했습니다",
+                 "소스 폴더를 옮겼다면 작업을 다시 등록하세요."),
+    0x8007010B: ("작업 폴더 경로가 잘못됐습니다",
+                 "소스 폴더를 옮겼다면 작업을 다시 등록하세요."),
+    0x80070005: ("접근이 거부됐습니다(권한 부족)",
+                 "관리자 권한으로 작업을 다시 등록하세요."),
+    0xC000013A: ("강제로 종료됐습니다(Ctrl+C 또는 종료 신호)", ""),
+}
+
+
+def explain_result(value: Any) -> dict[str, Any]:
+    """'마지막 결과' 를 숫자로 읽어 뜻과 조치를 붙인다. 음수(부호 있는 표기)도 받는다."""
+    text = str(value or "").strip()
+    if not text:
+        return {"code": None, "hex": "", "meaning": "기록 없음", "action": ""}
+    try:
+        code = int(text, 16) if text.lower().startswith("0x") else int(text)
+    except ValueError:
+        return {"code": None, "hex": text, "meaning": "읽을 수 없는 값", "action": ""}
+    if code < 0:
+        code += 1 << 32
+    meaning, action = RESULT_CODES.get(
+        code, ("알 수 없는 결과 코드", "logs\\daily_batch_console.log 를 보세요.")
+    )
+    return {"code": code, "hex": f"0x{code:X}", "meaning": meaning, "action": action}
 
 
 def register(root: Path, task_name: str, daily_time: str, *, force: bool = True) -> dict[str, Any]:

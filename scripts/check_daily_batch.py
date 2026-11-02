@@ -5,11 +5,15 @@
 배치가 스스로 꺼져 있어 빠졌을 수도 있고, 수집은 됐는데 마지막에 실패해 저장이
 안 됐을 수도 있다.
 
-1. Windows 작업 스케줄러에 등록돼 있고, 마지막 실행 결과가 무엇인가
+1. Windows 작업 스케줄러에 등록돼 있고, 누구로·어떤 방식으로 돌며, 마지막 결과가 무엇인가
 2. 화면에서 배치를 켜 두었는가 (꺼 두면 작업은 깨어나도 배치가 스스로 빠진다)
 3. DB 에 배치 기록이 남았는가. 남았으면 상태가 무엇인가
 4. 그 배치가 만든 스냅샷에 실제로 몇 건이 들어왔는가
-5. 콘솔 로그의 마지막 줄
+5. 수집 실행 기록과 남아 있는 배치 잠금
+6. 콘솔 로그의 마지막 실행 한 벌 (실행 계정 · 사전 점검 · 결과)
+
+맨 끝에 **원인 → 조치** 를 모아 보여준다. 위를 다 읽지 않아도 무엇을 하면 되는지
+알 수 있어야 한다.
 
 쓰는 법::
 
@@ -29,6 +33,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 LINE = "-" * 78
+
+#: (원인, 조치). 점검하면서 모으고 맨 끝에 한꺼번에 보여준다.
+FINDINGS: list[tuple[str, str]] = []
+
+
+def found(cause: str, action: str) -> None:
+    FINDINGS.append((cause, action))
 
 
 def _rows(conn, sql: str, params=None) -> list[dict]:
@@ -68,12 +79,31 @@ def check_windows_task(config) -> None:
     described = scheduler.describe(settings["task_name"])
     print(f"  작업명       : {settings['task_name']}")
     print(f"  등록 여부    : {'등록됨' if described.get('registered') else '등록 안 됨'}")
-    if not described.get("registered"):
+    if described.get("supported") and not described.get("registered"):
         print("  → scripts\\register_daily_task.bat 을 관리자 권한으로 한 번 실행하세요.")
+        found("Windows 작업이 등록돼 있지 않습니다.",
+              "scripts\\register_daily_task.bat 을 관리자 권한으로 실행하세요.")
     for key, label in (("next_run", "다음 실행"), ("last_run", "마지막 실행"),
-                       ("last_result", "마지막 결과"), ("state", "상태")):
+                       ("state", "상태"), ("run_as", "실행 계정"), ("logon_mode", "로그온 방식")):
         if described.get(key):
             print(f"  {label:<12} : {described[key]}")
+    if described.get("last_result"):
+        meaning = scheduler.explain_result(described["last_result"])
+        print(f"  {'마지막 결과':<12} : {meaning['hex'] or described['last_result']} — {meaning['meaning']}")
+        if meaning["action"]:
+            print(f"  {'':<12}   → {meaning['action']}")
+        if meaning["code"] not in (None, 0x0, 0x41301, 0x41303):
+            found(f"작업 스케줄러 마지막 결과가 {meaning['hex']} ({meaning['meaning']}) 입니다.",
+                  meaning["action"] or "logs\\daily_batch_console.log 를 보세요.")
+    run_as = str(described.get("run_as") or "").upper()
+    if run_as.endswith("SYSTEM"):
+        print("  ※ SYSTEM 으로 돕니다. PowerCLI 가 C:\\Program Files\\WindowsPowerShell\\Modules 에")
+        print("     없고 관리자 프로필(Documents) 아래에만 있으면 vCenter 수집이 실패합니다.")
+    logon = str(described.get("logon_mode") or "")
+    if "Interactive only" in logon or "대화형" in logon:
+        print("  ※ '사용자가 로그온할 때만 실행' 입니다. 07:00 에 아무도 로그온해 있지 않으면 안 돕니다.")
+        found("작업이 '사용자가 로그온할 때만 실행' 으로 등록돼 있습니다.",
+              "scripts\\register_daily_task.bat 으로 다시 등록하세요(로그온과 무관하게 SYSTEM 으로 돕니다).")
     if described.get("reason"):
         print(f"  비고         : {described['reason']}")
     if described.get("command"):
@@ -92,6 +122,8 @@ def check_switch(config) -> None:
     if not enabled:
         print("  → 꺼져 있으면 Windows 작업이 깨어나도 배치가 스스로 빠집니다.")
         print("     관리 → 연계 설정 → 일일 실행 및 로그 에서 켜세요.")
+        found("화면에서 일일 배치가 꺼져 있습니다(작업은 깨어나도 배치가 스스로 빠집니다).",
+              "관리 → 연계 설정 → 일일 실행 및 로그 에서 [일일 배치]를 켜세요.")
     print()
 
 
@@ -118,6 +150,8 @@ def check_batches(conn, days: int) -> list[dict]:
         print("  기록이 없습니다. 배치가 한 번도 끝까지 돌지 않았습니다.")
         print("  → 수동으로 한 번 실행해 보세요: scripts\\run_daily_batch.bat")
         print()
+        found(f"최근 {days}일 동안 DB 에 배치 기록이 없습니다(배치가 시작조차 못 했습니다).",
+              "6) 로그의 BATCH START 아래를 보세요. 줄이 아예 없으면 작업이 깨어나지 않은 것입니다(1) 참고).")
         return []
 
     print(f"  {'일자':<12}{'시작':<20}{'상태':<10}{'소요':<8}자원사용률")
@@ -139,6 +173,9 @@ def check_batches(conn, days: int) -> list[dict]:
                 print(f"      ! {key}: {str(value)[:200]}")
         if not item.get("ended_at"):
             print("      ! 끝나지 않은 상태로 남아 있습니다(중간에 프로세스가 죽었을 수 있음).")
+            if item is batches[0]:
+                found("가장 최근 배치가 끝나지 않은 채 남아 있습니다(중간에 죽었을 수 있음).",
+                      "작업 관리자에서 멈춘 python.exe/powershell.exe 를 종료하고 5) 의 잠금을 확인하세요.")
     print()
     return batches
 
@@ -214,8 +251,37 @@ def check_runs(conn, days: int) -> None:
     print()
 
 
+def check_lock(conn) -> None:
+    """남아 있는 배치 잠금. 죽은 배치가 남긴 잠금은 4시간 뒤 저절로 풀린다."""
+    print("5-1) 배치 잠금(process_lock)")
+    rows = _rows(conn, "SELECT * FROM process_lock WHERE lock_name='daily_batch'")
+    if not rows:
+        print("  잠금 없음 — 다음 배치가 바로 돌 수 있습니다.\n")
+        return
+    lock = rows[0]
+    expires = str(lock.get("expires_at") or "")
+    alive = expires > datetime.now().isoformat()
+    print(f"  보유자 {_text(lock.get('owner'))} · 잡은 시각 {_when(lock.get('acquired_at'))}"
+          f" · 만료 {_when(expires)} · {'유효' if alive else '만료됨(다음 배치가 회수)'}")
+    if alive:
+        found(f"배치 잠금이 {_when(expires)} 까지 잡혀 있어 그 전에는 배치가 SKIPPED 로 빠집니다.",
+              "돌고 있는 배치가 없다면(작업 관리자에 python.exe 없음) 만료를 기다리거나 "
+              "scripts\\release_batch_lock.py --release 로 푸세요.")
+    print()
+
+
+def last_run_block(path: Path) -> list[str]:
+    """로그에서 마지막 'BATCH START' 부터 끝까지. 한 번의 실행을 통째로 본다."""
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    starts = [index for index, line in enumerate(content) if "BATCH START" in line]
+    return content[starts[-1]:] if starts else content[-15:]
+
+
 def check_logs(config, lines: int = 15) -> None:
-    print(f"6) 콘솔 로그 마지막 {lines}줄")
+    print("6) 콘솔 로그 — 마지막 실행 한 벌(BATCH START 부터)")
     candidates = [
         config.resolve("logs") / "daily_batch_console.log",
         config.resolve("logs") / "asset_sync.log",
@@ -224,18 +290,26 @@ def check_logs(config, lines: int = 15) -> None:
         if not path.exists():
             continue
         print(f"  {path}")
-        try:
-            content = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError as exc:
-            print(f"  (읽지 못했습니다: {exc})")
+        block = last_run_block(path)
+        if not block:
+            print("  (읽지 못했습니다)")
             continue
-        for line in content[-lines:]:
+        for line in block[-80:]:
             print(f"    {line}")
+        text = "\n".join(block)
+        if "VMware.VimAutomation.Core" in text and ("찾지 못했습니다" in text or "not found" in text.lower()):
+            found("실행 계정에서 PowerCLI 모듈을 찾지 못했습니다(로그의 사전 점검).",
+                  "관리자 PowerShell 로 PowerCLI 모듈 폴더를 C:\\Program Files\\WindowsPowerShell\\Modules 에 복사하세요.")
+        if "[STOP]" in text:
+            found("배치가 파이썬 가상환경 문제로 시작 전에 멈췄습니다.",
+                  "scripts\\install_offline.bat 을 다시 실행하세요.")
         print()
         return
     print(f"  로그 파일이 없습니다. 찾아본 곳: {', '.join(str(p) for p in candidates)}")
     print("  → 배치가 한 번도 실행되지 않았을 수 있습니다.")
     print()
+    found("배치 콘솔 로그가 없습니다(작업이 한 번도 배치 파일을 실행하지 않았습니다).",
+          "1) 의 등록 여부·실행 계정·마지막 결과를 확인하고, scripts\\run_daily_batch.bat 을 직접 한 번 실행해 보세요.")
 
 
 def main() -> int:
@@ -261,6 +335,7 @@ def main() -> int:
         batches = check_batches(conn, args.days)
         check_snapshots(conn, batches)
         check_runs(conn, args.days)
+        check_lock(conn)
     check_logs(config)
 
     print(LINE)
@@ -285,6 +360,17 @@ def main() -> int:
             print(f"가장 최근 배치 상태가 {status} 입니다. 위 3) 의 오류 줄을 보세요.")
     else:
         print("배치 기록이 없습니다. 2) 의 켜짐 여부와 1) 의 등록 여부를 먼저 확인하세요.")
+    print(LINE)
+    print("진단 요약 — 원인 → 조치")
+    if FINDINGS:
+        seen = set()
+        for number, (cause, action) in enumerate(
+            [item for item in FINDINGS if not (item in seen or seen.add(item))], start=1
+        ):
+            print(f"  {number}. {cause}")
+            print(f"     → {action}")
+    else:
+        print("  찾은 문제가 없습니다. 그래도 화면에 안 보이면 4) 의 '화면이 읽는 최신 스냅샷' 날짜를 보세요.")
     print(LINE)
     return 0
 

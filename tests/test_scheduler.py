@@ -129,3 +129,48 @@ def test_the_batch_skips_itself_when_disabled(tmp_path, monkeypatch):
     )
     assert proc.returncode == 0, proc.stderr
     assert '"status": "DISABLED"' in proc.stdout, proc.stdout
+
+
+# ── 작업 스케줄러 '마지막 결과' 를 사람 말로 ─────────────────────────────
+# 0x1 · 0x800710E0 같은 숫자만 보고는 무엇을 해야 할지 알 수 없다.
+
+
+def test_known_result_codes_get_a_meaning_and_an_action() -> None:
+    from asset_sync.scheduler import explain_result
+
+    assert explain_result("0")["meaning"] == "정상 종료"
+    assert explain_result("1")["hex"] == "0x1"
+    assert explain_result("2")["meaning"].startswith("수집이 실패")
+    # schtasks 는 0x8... 을 부호 있는 음수로 찍는다.
+    refused = explain_result(str(0x800710E0 - (1 << 32)))
+    assert refused["hex"] == "0x800710E0"
+    assert "암호" in refused["action"]
+    assert explain_result("267011")["hex"] == "0x41303"
+
+
+def test_unknown_or_empty_result_is_not_an_error() -> None:
+    from asset_sync.scheduler import explain_result
+
+    assert explain_result("")["meaning"] == "기록 없음"
+    assert explain_result("12345")["meaning"] == "알 수 없는 결과 코드"
+    assert explain_result("abc")["meaning"] == "읽을 수 없는 값"
+
+
+def test_describe_reads_the_run_as_account_and_logon_mode(monkeypatch) -> None:
+    from asset_sync import scheduler
+
+    output = "\n".join([
+        "작업 이름:         \\AssetDailyCollection",
+        "다음 실행 시간:    2026-11-03 오전 7:00:00",
+        "상태:              준비",
+        "로그온 모드:       대화형/백그라운드",
+        "마지막 실행 시간:  2026-11-02 오전 7:00:00",
+        "마지막 결과:       1",
+        "실행 사용자:       SYSTEM",
+    ])
+    monkeypatch.setattr(scheduler, "is_windows", lambda: True)
+    monkeypatch.setattr(scheduler, "_run", lambda argv: (0, output))
+    described = scheduler.describe("AssetDailyCollection")
+    assert described["run_as"] == "SYSTEM"
+    assert described["logon_mode"] == "대화형/백그라운드"
+    assert described["last_result"] == "1"

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import getpass
 import json
+import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -11,6 +14,40 @@ sys.path.insert(0, str(ROOT))
 from asset_sync import scheduler
 from asset_sync.collectors.powercli_collector import PowerCLICollector
 from asset_sync.config import load_config
+
+
+def run_account() -> str:
+    """지금 이 점검을 돌리는 계정. 배치 안에서 돌면 곧 작업 스케줄러의 실행 계정이다."""
+    domain = os.environ.get("USERDOMAIN") or ""
+    try:
+        user = getpass.getuser()
+    except Exception:                        # 계정 이름을 못 읽어도 점검은 계속한다
+        user = os.environ.get("USERNAME") or "?"
+    return f"{domain}\\{user}" if domain else user
+
+
+def powercli_module(powershell: str) -> dict:
+    """이 계정으로 PowerCLI 모듈이 보이는가, 보이면 어디에 있는가.
+
+    관리자 계정으로 PowerCLI 를 깔면 그 사람 프로필(Documents) 아래에 들어가는
+    일이 흔하다. 작업이 SYSTEM 으로 돌면 그 모듈을 못 보고, 사람이 직접
+    check_powercli.ps1 을 돌리면 멀쩡하게 나온다 -- 그래서 원인을 못 찾는다.
+    배치 안에서 같은 질문을 던져야 실행 계정 기준의 답이 나온다.
+    """
+    command = (
+        "$m = Get-Module -ListAvailable VMware.VimAutomation.Core | "
+        "Sort-Object Version -Descending | Select-Object -First 1; "
+        "if ($m) { Write-Output $m.Path }"
+    )
+    try:
+        proc = subprocess.run(
+            [powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True, text=True, timeout=90,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"checked": False, "error": str(exc)}
+    lines = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+    return {"checked": True, "found": bool(lines), "path": lines[-1] if lines else ""}
 
 
 def main() -> None:
@@ -56,6 +93,21 @@ def main() -> None:
         powershell = str(cfg.rvtools.get("powershell_path") or "powershell.exe")
         if not (Path(powershell).exists() if Path(powershell).is_absolute() else shutil.which(powershell)):
             errors.append(f"PowerShell 경로가 올바르지 않습니다: {powershell} → 관리 → 연계 설정")
+        resolved_ps = powershell if Path(powershell).is_absolute() else shutil.which(powershell)
+        if resolved_ps:
+            module = powercli_module(powershell)
+            if module.get("checked") and not module.get("found"):
+                errors.append(
+                    f"실행 계정({run_account()})에서 PowerCLI 모듈(VMware.VimAutomation.Core)을 찾지 못했습니다. "
+                    "→ 관리자 PowerShell 로 모듈 폴더를 C:\\Program Files\\WindowsPowerShell\\Modules 에 "
+                    "복사하세요(작업이 SYSTEM 으로 돌면 사용자 프로필의 모듈은 안 보입니다)."
+                )
+            elif module.get("found") and "\\users\\" in str(module.get("path")).lower():
+                warnings.append(
+                    f"PowerCLI 모듈이 사용자 프로필 아래에 있습니다: {module['path']} "
+                    "→ 작업이 SYSTEM 이나 다른 계정으로 돌면 이 모듈을 못 봅니다. "
+                    "C:\\Program Files\\WindowsPowerShell\\Modules 로 옮기세요."
+                )
         script = cfg.resolve(cfg.rvtools.get("script_path", "scripts/collect_vcenter_inventory.ps1"))
         if not script.exists():
             errors.append(f"PowerCLI 수집 스크립트가 없습니다: {script} → 소스 반입이 누락되었는지 확인하세요.")
@@ -89,6 +141,7 @@ def main() -> None:
 
     result = {
         "status": "READY" if not errors else "NOT_READY",
+        "account": run_account(),
         "itsm_mode": itsm_mode,
         "vcenter_mode": vc_mode,
         "schedule": schedule,
