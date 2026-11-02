@@ -31,14 +31,28 @@ def test_commas_inside_parentheses_are_not_split() -> None:
     assert out == "#s :is(.a, .b) span{color:red}"
 
 
+def _flat(css: str) -> str:
+    return css.replace("\n", "")
+
+
 def test_media_queries_are_scoped_inside() -> None:
     out = scope_css("@media (max-width:800px){.card{gap:0}}", "#s")
-    assert out == "@media (max-width:800px){#s .card{gap:0}}"
+    assert _flat(out) == "@media (max-width:800px){#s .card{gap:0}}"
 
 
 def test_nested_at_rules_are_handled() -> None:
     out = scope_css("@supports (display:grid){@media screen{.x{gap:0}}}", "#s")
-    assert out == "@supports (display:grid){@media screen{#s .x{gap:0}}}"
+    assert _flat(out) == "@supports (display:grid){@media screen{#s .x{gap:0}}}"
+
+
+def test_a_media_block_does_not_open_a_jinja_comment() -> None:
+    """범위가 #id 라서 '{' 바로 뒤에 붙이면 '{#' 이 된다. 결과는 Jinja 가 다시 읽으므로
+    주석 시작으로 보고 'Missing end of comment tag' 로 화면 전체가 500 이 된다."""
+    from jinja2 import Environment
+
+    source = scope_template("<style>@media (max-width:900px){.a{gap:0}}</style><p>ok</p>", "#page-x")
+    assert "{#" not in source
+    assert Environment().from_string(source).render().endswith("<p>ok</p>")
 
 
 def test_keyframes_are_left_alone() -> None:

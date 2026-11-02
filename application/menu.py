@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Any, Iterable, Mapping
 
 #: 사이드바 묶음 순서. 여기 없는 이름은 뒤에 사전순으로 붙는다.
-SECTION_ORDER = ("운영", "자산 관리", "연계 모듈", "설정")
+SECTION_ORDER = ("운영", "자산 관리", "지식 관리", "연계 모듈", "설정")
 
 #: 통합 웹이 직접 갖고 있는 화면. 모듈이 아니므로 레지스트리에 두지 않는다.
 #: ``children`` 은 소메뉴이고, ``role`` 이 admin 이면 관리자에게만 보인다.

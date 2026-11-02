@@ -1,0 +1,375 @@
+<script>
+// ── 지식 저장소 ──
+// 전역 이름은 모두 knowledge / KNOWLEDGE 로 시작한다(다른 대메뉴와 겹치지 않게).
+const KNOWLEDGE = {datasets: [], categories: [], detail: null, sheetId: null, offset: 0, limit: 50, loaded: false};
+const KNOWLEDGE_KIND = {TABLE: '표', DOCUMENT: '문서', ATTACHMENT: '첨부'};
+const KNOWLEDGE_ACTION = {UPLOAD: '올림', NEW_VERSION: '새 버전', EDIT: '정보 고침', DELETE: '지움', DOWNLOAD: '내려받음'};
+
+function knowledgeBytes(n){
+  n = Number(n || 0);
+  if(n < 1024) return `${n} B`;
+  if(n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if(n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+// 글자를 이스케이프한 뒤 검색어 자리에 <mark> 를 씌운다. 대소문자는 가리지 않는다.
+function knowledgeMark(text, terms){
+  const raw = String(text ?? '');
+  if(!raw || !(terms || []).length) return escapeHtml(raw);
+  const lower = raw.toLowerCase();
+  const spans = [];
+  terms.forEach(term => {
+    const needle = String(term || '').toLowerCase();
+    if(!needle) return;
+    let at = lower.indexOf(needle);
+    while(at >= 0){ spans.push([at, at + needle.length]); at = lower.indexOf(needle, at + needle.length); }
+  });
+  if(!spans.length) return escapeHtml(raw);
+  spans.sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  spans.forEach(span => {
+    const last = merged[merged.length - 1];
+    if(last && span[0] <= last[1]) last[1] = Math.max(last[1], span[1]); else merged.push([...span]);
+  });
+  let out = '', cursor = 0;
+  merged.forEach(([start, end]) => {
+    out += escapeHtml(raw.slice(cursor, start)) + `<mark>${escapeHtml(raw.slice(start, end))}</mark>`;
+    cursor = end;
+  });
+  return out + escapeHtml(raw.slice(cursor));
+}
+
+function knowledgeHas(text, terms){
+  const lower = String(text ?? '').toLowerCase();
+  return (terms || []).some(term => term && lower.includes(String(term).toLowerCase()));
+}
+
+function knowledgeAlert(message, type='error'){
+  const el = document.getElementById('knowledge-alert');
+  el.innerHTML = message ? `<div class="alert alert-${type}">${escapeHtml(message)}</div>` : '';
+}
+
+// ── 처음 열 때 · 새로고침 ──
+async function knowledgeLoad(){
+  const [summary, list] = await Promise.all([
+    integrationFetch('/api/knowledge/summary'),
+    integrationFetch('/api/knowledge/datasets'),
+  ]);
+  if(summary.status !== 'SUCCESS'){ knowledgeAlert(summary.error || '지식 저장소를 불러오지 못했습니다.'); return; }
+  knowledgeAlert('');
+  document.getElementById('knowledge-stat-datasets').textContent = fmtNumber(summary.datasets);
+  document.getElementById('knowledge-stat-rows').textContent = fmtNumber(summary.rows);
+  document.getElementById('knowledge-stat-month').textContent = fmtNumber(summary.uploads_this_month);
+  document.getElementById('knowledge-stat-size').textContent = knowledgeBytes(summary.bytes);
+  KNOWLEDGE.datasets = list.datasets || [];
+  KNOWLEDGE.categories = list.categories || summary.categories || [];
+  KNOWLEDGE.loaded = true;
+  knowledgeRenderCategories();
+  knowledgeRenderTargets();
+  knowledgeRenderLibrary();
+}
+
+function knowledgeRenderCategories(){
+  const select = document.getElementById('knowledge-category');
+  const current = select.value;
+  const names = KNOWLEDGE.categories.filter(c => c.category).map(c => c.category);
+  select.innerHTML = '<option value="">분류 전체</option>' + KNOWLEDGE.categories.map(c =>
+    `<option value="${escapeHtml(c.category)}">${escapeHtml(c.category || '(분류 없음)')} · ${c.count}</option>`).join('');
+  select.value = current;
+  document.getElementById('knowledge-category-list').innerHTML =
+    names.map(name => `<option value="${escapeHtml(name)}"></option>`).join('');
+}
+
+function knowledgeRenderTargets(){
+  const select = document.getElementById('knowledge-target');
+  const current = select.value;
+  select.innerHTML = '<option value="">새 자료로 올리기</option>' + KNOWLEDGE.datasets.map(d =>
+    `<option value="${d.id}">새 버전 → ${escapeHtml(d.title)} (v${d.version_no || 1})</option>`).join('');
+  select.value = current;
+  knowledgeTargetChanged();
+}
+
+function knowledgeRenderLibrary(){
+  const body = document.getElementById('knowledge-lib-body');
+  const filter = (document.getElementById('knowledge-lib-q').value || '').trim().toLowerCase();
+  const category = document.getElementById('knowledge-category').value;
+  const rows = KNOWLEDGE.datasets.filter(d => (!category || d.category === category) && (!filter ||
+    [d.title, d.category, d.description, d.source_note, d.tags, d.file_name].join(' ').toLowerCase().includes(filter)));
+  if(!rows.length){
+    body.innerHTML = `<tr><td colspan="8" class="text-muted">${KNOWLEDGE.datasets.length
+      ? '조건에 맞는 자료가 없습니다.' : '아직 올린 자료가 없습니다. 위의 ＋ 자료 올리기로 시작하세요.'}</td></tr>`;
+    return;
+  }
+  body.innerHTML = rows.map(d => `<tr>
+      <td><span class="kn-link" onclick="knowledgeOpen(${d.id})">${escapeHtml(d.title)}</span>
+        ${d.tags ? `<div class="text-xs text-muted">#${escapeHtml(d.tags).replaceAll(', ', ' #')}</div>` : ''}</td>
+      <td>${escapeHtml(d.category || '-')}</td>
+      <td><span class="badge badge-blue">${KNOWLEDGE_KIND[d.kind] || d.kind}</span>
+        <span class="text-xs text-muted">${escapeHtml((d.file_type || '').toUpperCase())}</span></td>
+      <td class="mono">${d.searchable ? fmtNumber(d.row_count) : '<span class="text-muted">본문 없음</span>'}</td>
+      <td class="mono">v${d.version_no || 1}</td>
+      <td>${escapeHtml(d.source_note || '-')}</td>
+      <td>${escapeHtml(d.created_by_name || d.created_by || '-')}</td>
+      <td class="mono">${escapeHtml(String(d.updated_at || '').slice(0, 10))}</td>
+    </tr>`).join('');
+}
+
+function knowledgeCategoryChanged(){
+  knowledgeRenderLibrary();
+  if((document.getElementById('knowledge-q').value || '').trim()) knowledgeSearch();
+}
+
+// ── 찾기 ──
+async function knowledgeSearch(){
+  const q = (document.getElementById('knowledge-q').value || '').trim();
+  const holder = document.getElementById('knowledge-search-result');
+  if(!q){ holder.innerHTML = ''; return; }
+  holder.innerHTML = '<div class="text-sm text-muted"><span class="loading"></span> 찾는 중...</div>';
+  const category = document.getElementById('knowledge-category').value;
+  const res = await integrationFetch(`/api/knowledge/search?q=${encodeURIComponent(q)}&category=${encodeURIComponent(category)}`);
+  if(res.status !== 'SUCCESS'){ holder.innerHTML = `<div class="alert alert-error">${escapeHtml(res.error || '찾지 못했습니다.')}</div>`; return; }
+  const terms = res.terms || [];
+  const parts = [];
+  const metaOnly = (res.datasets || []).filter(d => !(res.groups || []).some(g => g.dataset_id === d.dataset_id));
+  if(metaOnly.length){
+    parts.push(`<div class="text-sm" style="font-weight:700;margin-bottom:6px">제목 · 설명에 들어간 자료 ${metaOnly.length}건</div>`
+      + `<div class="mb-4">${metaOnly.map(d => `<div style="margin-bottom:4px">
+          <span class="kn-link" onclick="knowledgeOpen(${d.dataset_id})">${knowledgeMark(d.title, terms)}</span>
+          <span class="badge badge-blue">${KNOWLEDGE_KIND[d.kind] || d.kind}</span>
+          <span class="text-xs text-muted">${knowledgeMark(String(d.description || '').slice(0, 160), terms)}</span></div>`).join('')}</div>`);
+  }
+  if((res.groups || []).length){
+    parts.push(`<div class="text-sm" style="font-weight:700;margin-bottom:6px">내용에서 찾은 곳 ${fmtNumber(res.hit_count)}건${res.more ? ' (더 있음 — 낱말을 더 넣어 좁혀 보세요)' : ''}</div>`);
+    res.groups.forEach(group => {
+      const shown = group.hits.slice(0, 20);
+      parts.push(`<div class="kn-hit-group">
+        <div class="kn-hit-head">
+          <div><span class="kn-hit-title" onclick="knowledgeOpenHit(${group.dataset_id}, ${group.hits[0].sheet_id})">${escapeHtml(group.title)}</span>
+            ${group.category ? `<span class="badge badge-blue">${escapeHtml(group.category)}</span>` : ''}</div>
+          <div class="text-xs text-muted">${group.hits.length}건</div>
+        </div>
+        ${shown.map(hit => knowledgeHitLine(group, hit, terms)).join('')}
+        ${group.hits.length > shown.length ? `<div class="text-xs text-muted">… ${group.hits.length - shown.length}건 더. 자료를 열어 시트에서 찾아 보세요.</div>` : ''}
+      </div>`);
+    });
+  }
+  holder.innerHTML = parts.length ? parts.join('')
+    : `<div class="text-sm text-muted">「${escapeHtml(q)}」가 들어간 자료가 없습니다. 낱말을 줄이거나 다른 표현으로 찾아 보세요.</div>`;
+}
+
+// 한 행에서 검색어가 들어간 칸만 "열: 값" 으로 보여 준다. 없으면 앞 4칸.
+function knowledgeHitLine(group, hit, terms){
+  const pairs = hit.cells.map((value, index) => [hit.columns[index] || `열${index + 1}`, value]).filter(p => p[1]);
+  let picked = pairs.filter(p => knowledgeHas(p[1], terms));
+  if(!picked.length) picked = pairs.slice(0, 4);
+  // 문맥을 위해 첫 칸(대개 이름 · 키)은 늘 앞에 둔다.
+  if(pairs.length && !picked.includes(pairs[0])) picked = [pairs[0], ...picked];
+  return `<div class="kn-cells" style="margin-bottom:6px">
+    <span class="text-xs text-muted kn-link" onclick="knowledgeOpenHit(${group.dataset_id}, ${hit.sheet_id})">${escapeHtml(hit.sheet_name)} · ${hit.row_no}행</span>
+    ${picked.slice(0, 8).map(([name, value]) => `<span><b>${escapeHtml(name)}</b>${knowledgeMark(String(value).slice(0, 300), terms)}</span>`).join('')}
+  </div>`;
+}
+
+// ── 자료 열기 ──
+// 검색 결과에서 연 경우에만 검색어로 시트를 거른다. 목록에서 열면 전체를 보여 준다.
+function knowledgeOpenHit(datasetId, sheetId){
+  knowledgeOpen(datasetId, null, sheetId, (document.getElementById('knowledge-q').value || '').trim());
+}
+
+async function knowledgeOpen(datasetId, versionId=null, sheetId=null, filter=null){
+  const card = document.getElementById('knowledge-detail-card');
+  card.style.display = '';
+  document.getElementById('knowledge-edit').style.display = 'none';
+  const res = await integrationFetch(`/api/knowledge/datasets/${datasetId}${versionId ? `?version=${versionId}` : ''}`);
+  if(res.status !== 'SUCCESS'){ knowledgeAlert(res.error || '자료를 열지 못했습니다.'); card.style.display = 'none'; return; }
+  KNOWLEDGE.detail = res;
+  const d = res.dataset;
+  const version = res.versions.find(v => v.id === res.version_id) || {};
+  document.getElementById('knowledge-detail-title').textContent = d.title;
+  const actions = [
+    version.id ? `<a class="btn btn-secondary btn-sm" href="/api/knowledge/versions/${version.id}/download">원본 내려받기 (v${version.version_no})</a>` : '',
+    res.can_edit ? `<button class="btn btn-secondary btn-sm" onclick="knowledgeNewVersion()">새 버전 올리기</button>` : '',
+    res.can_edit ? `<button class="btn btn-secondary btn-sm" onclick="knowledgeEditForm()">정보 고치기</button>` : '',
+    res.can_edit ? `<button class="btn btn-danger btn-sm" onclick="knowledgeDelete()">지우기</button>` : '',
+    `<button class="btn btn-secondary btn-sm" onclick="document.getElementById('knowledge-detail-card').style.display='none'">닫기</button>`,
+  ];
+  document.getElementById('knowledge-detail-actions').innerHTML = actions.join('');
+  document.getElementById('knowledge-detail-meta').innerHTML = `<dl class="kn-meta">
+      <dt>분류</dt><dd>${escapeHtml(d.category || '-')}</dd>
+      <dt>출처</dt><dd>${escapeHtml(d.source_note || '-')}</dd>
+      <dt>태그</dt><dd>${d.tags ? '#' + escapeHtml(d.tags).replaceAll(', ', ' #') : '-'}</dd>
+      <dt>설명</dt><dd>${escapeHtml(d.description || '-')}</dd>
+      <dt>파일</dt><dd>${escapeHtml(version.file_name || '-')} · ${knowledgeBytes(version.file_size)} · ${escapeHtml(version.uploaded_by_name || '')} · ${escapeHtml(String(version.uploaded_at || '').replace('T', ' '))}${version.note ? ` · ${escapeHtml(version.note)}` : ''}</dd>
+    </dl>`;
+  document.getElementById('knowledge-version').innerHTML = res.versions.map(v =>
+    `<option value="${v.id}" ${v.id === res.version_id ? 'selected' : ''}>v${v.version_no} · ${escapeHtml(String(v.uploaded_at || '').slice(0, 10))} · ${escapeHtml(v.file_name)}${v.id === d.current_version_id ? ' (현재)' : ''}</option>`).join('');
+  document.getElementById('knowledge-detail-history').innerHTML = `
+    <div class="table-wrap"><table><thead><tr><th>언제</th><th>누가</th><th>무엇</th><th>내용</th></tr></thead><tbody>
+    ${(res.events || []).map(e => `<tr><td class="mono">${escapeHtml(String(e.created_at || '').replace('T', ' '))}</td>
+      <td>${escapeHtml(e.actor_name || '-')}</td><td>${KNOWLEDGE_ACTION[e.action] || escapeHtml(e.action)}</td>
+      <td>${escapeHtml(e.detail || '')}</td></tr>`).join('') || '<tr><td colspan="4" class="text-muted">이력이 없습니다.</td></tr>'}
+    </tbody></table></div>`;
+  const sheets = res.sheets || [];
+  document.getElementById('knowledge-sheet-tabs').innerHTML = sheets.map(s =>
+    `<div class="tab" id="knowledge-tab-${s.id}" onclick="knowledgeShowSheet(${s.id}, 0)">${escapeHtml(s.sheet_name)} <span class="text-xs text-muted">${fmtNumber(s.row_count)}${s.truncated ? '+' : ''}</span></div>`).join('');
+  if(filter !== null || !versionId) document.getElementById('knowledge-rows-q').value = filter || '';
+  if(!sheets.length){
+    KNOWLEDGE.sheetId = null;
+    document.getElementById('knowledge-rows-head').innerHTML = '';
+    document.getElementById('knowledge-rows-body').innerHTML = '';
+    document.getElementById('knowledge-rows-pager').innerHTML = '';
+    document.getElementById('knowledge-rows-info').textContent = version.searchable === 0
+      ? '이 형식은 본문을 읽지 않고 원본만 보관합니다. 원본 내려받기로 여세요.' : '시트가 없습니다.';
+  } else {
+    const chosen = sheets.find(s => s.id === sheetId) || sheets[0];
+    await knowledgeShowSheet(chosen.id, 0);
+  }
+  card.scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
+function knowledgeVersionChanged(){
+  const versionId = Number(document.getElementById('knowledge-version').value);
+  if(KNOWLEDGE.detail) knowledgeOpen(KNOWLEDGE.detail.dataset.id, versionId);
+}
+
+async function knowledgeShowSheet(sheetId, offset){
+  if(!sheetId) return;
+  KNOWLEDGE.sheetId = sheetId;
+  KNOWLEDGE.offset = Math.max(0, offset || 0);
+  document.querySelectorAll('#knowledge-sheet-tabs .tab').forEach(tab => tab.classList.remove('active'));
+  document.getElementById(`knowledge-tab-${sheetId}`)?.classList.add('active');
+  const q = (document.getElementById('knowledge-rows-q').value || '').trim();
+  const res = await integrationFetch(`/api/knowledge/sheets/${sheetId}/rows?offset=${KNOWLEDGE.offset}&limit=${KNOWLEDGE.limit}&q=${encodeURIComponent(q)}`);
+  if(res.status !== 'SUCCESS'){ knowledgeAlert(res.error || '시트를 열지 못했습니다.'); return; }
+  const columns = res.sheet.columns || [];
+  const terms = res.terms || [];
+  document.getElementById('knowledge-rows-head').innerHTML =
+    `<tr><th>행</th>${columns.map(c => `<th>${escapeHtml(c)}</th>`).join('')}</tr>`;
+  document.getElementById('knowledge-rows-body').innerHTML = res.rows.map(row =>
+    `<tr><td class="mono text-muted">${row.row_no}</td>${columns.map((_, i) => `<td>${knowledgeMark(row.cells[i] ?? '', terms)}</td>`).join('')}</tr>`).join('')
+    || `<tr><td colspan="${columns.length + 1}" class="text-muted">${q ? '이 시트에 그 낱말이 든 행이 없습니다.' : '행이 없습니다.'}</td></tr>`;
+  const end = Math.min(res.offset + res.rows.length, res.total);
+  document.getElementById('knowledge-rows-info').textContent =
+    `${q ? `「${q}」가 든 행 ` : ''}${fmtNumber(res.total)}행 중 ${res.total ? fmtNumber(res.offset + 1) : 0}–${fmtNumber(end)}`
+    + (res.sheet.header_row ? ` · 머리글은 원본 ${res.sheet.header_row}행` : '')
+    + (res.sheet.truncated ? ' · 행이 많아 뒤쪽은 저장하지 않았습니다' : '');
+  const prev = res.offset > 0, next = end < res.total;
+  document.getElementById('knowledge-rows-pager').innerHTML =
+    `<button class="btn btn-secondary btn-sm" ${prev ? '' : 'disabled'} onclick="knowledgeShowSheet(${sheetId}, ${res.offset - res.limit})">◀ 앞</button>`
+    + `<button class="btn btn-secondary btn-sm" ${next ? '' : 'disabled'} onclick="knowledgeShowSheet(${sheetId}, ${res.offset + res.limit})">뒤 ▶</button>`;
+}
+
+// ── 올리기 ──
+function knowledgeToggleUpload(show){
+  const card = document.getElementById('knowledge-upload-card');
+  const visible = show === undefined ? card.style.display === 'none' : show;
+  card.style.display = visible ? '' : 'none';
+  if(visible) card.scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
+function knowledgeFileChosen(){
+  const file = document.getElementById('knowledge-file').files[0];
+  const title = document.getElementById('knowledge-title');
+  if(file && !title.value) title.value = file.name.replace(/\.[^.]+$/, '');
+}
+
+function knowledgeTargetChanged(){
+  const isNew = !document.getElementById('knowledge-target').value;
+  document.querySelectorAll('#knowledge-upload-card .knowledge-new-only').forEach(el => { el.style.display = isNew ? '' : 'none'; });
+}
+
+function knowledgeNewVersion(){
+  if(!KNOWLEDGE.detail) return;
+  document.getElementById('knowledge-target').value = String(KNOWLEDGE.detail.dataset.id);
+  knowledgeTargetChanged();
+  knowledgeToggleUpload(true);
+}
+
+async function knowledgeUpload(){
+  const file = document.getElementById('knowledge-file').files[0];
+  const result = document.getElementById('knowledge-upload-result');
+  if(!file){ result.innerHTML = '<div class="alert alert-warning" style="margin-top:12px">올릴 파일을 골라 주세요.</div>'; return; }
+  const form = new FormData();
+  form.append('file', file);
+  const target = document.getElementById('knowledge-target').value;
+  if(target) form.append('dataset_id', target);
+  form.append('header_row', document.getElementById('knowledge-header-row').value || '0');
+  form.append('title', document.getElementById('knowledge-title').value);
+  form.append('category', document.getElementById('knowledge-category-input').value);
+  form.append('source_note', document.getElementById('knowledge-source').value);
+  form.append('tags', document.getElementById('knowledge-tags').value);
+  form.append('description', document.getElementById('knowledge-description').value);
+  form.append('note', document.getElementById('knowledge-note').value);
+  setButtonBusy('knowledge-btn-upload', true, '올리는 중...', '올리기');
+  const res = await integrationFetch('/api/knowledge/datasets', {method: 'POST', body: form});
+  setButtonBusy('knowledge-btn-upload', false, '', '올리기');
+  if(res.status !== 'SUCCESS'){
+    result.innerHTML = `<div class="alert alert-error" style="margin-top:12px">${escapeHtml(res.error || '올리지 못했습니다.')}</div>`;
+    return;
+  }
+  const notes = [...(res.warnings || [])];
+  (res.duplicates || []).forEach(d => notes.push(`같은 파일이 이미 「${d.title}」 v${d.version_no} 로 올라가 있습니다.`));
+  result.innerHTML = `<div class="alert alert-success" style="margin-top:12px;display:block">
+      v${res.version_no} 로 저장했습니다 · ${res.sheet_count}개 시트 · ${fmtNumber(res.row_count)}행
+      ${notes.length ? `<ul style="margin:6px 0 0 18px">${notes.map(n => `<li>${escapeHtml(n)}</li>`).join('')}</ul>` : ''}
+    </div>`;
+  integrationToast('자료를 올렸습니다.', 'success');
+  ['knowledge-file', 'knowledge-title', 'knowledge-description', 'knowledge-note', 'knowledge-tags', 'knowledge-source']
+    .forEach(id => { document.getElementById(id).value = ''; });
+  document.getElementById('knowledge-target').value = '';
+  await knowledgeLoad();
+  knowledgeOpen(res.dataset_id);
+}
+
+// ── 고치기 · 지우기 ──
+function knowledgeEditForm(){
+  const d = KNOWLEDGE.detail?.dataset;
+  if(!d) return;
+  const box = document.getElementById('knowledge-edit');
+  box.style.display = '';
+  box.innerHTML = `<div class="kn-form">
+      <div class="form-group"><label class="form-label">제목</label><input class="form-input" id="knowledge-edit-title" maxlength="300" value="${escapeHtml(d.title)}"></div>
+      <div class="form-group"><label class="form-label">분류</label><input class="form-input" id="knowledge-edit-category" maxlength="100" list="knowledge-category-list" value="${escapeHtml(d.category)}"></div>
+      <div class="form-group"><label class="form-label">출처</label><input class="form-input" id="knowledge-edit-source" maxlength="500" value="${escapeHtml(d.source_note)}"></div>
+      <div class="form-group"><label class="form-label">태그</label><input class="form-input" id="knowledge-edit-tags" maxlength="500" value="${escapeHtml(d.tags)}"></div>
+      <div class="form-group kn-wide"><label class="form-label">설명</label><textarea class="form-input" id="knowledge-edit-description" maxlength="4000">${escapeHtml(d.description)}</textarea></div>
+    </div>
+    <div class="flex gap-2"><button class="btn btn-primary btn-sm" id="knowledge-btn-save" onclick="knowledgeSaveEdit()">저장</button>
+      <button class="btn btn-secondary btn-sm" onclick="document.getElementById('knowledge-edit').style.display='none'">취소</button></div>`;
+}
+
+async function knowledgeSaveEdit(){
+  const d = KNOWLEDGE.detail?.dataset;
+  if(!d) return;
+  const payload = {
+    title: document.getElementById('knowledge-edit-title').value,
+    category: document.getElementById('knowledge-edit-category').value,
+    source_note: document.getElementById('knowledge-edit-source').value,
+    tags: document.getElementById('knowledge-edit-tags').value,
+    description: document.getElementById('knowledge-edit-description').value,
+  };
+  setButtonBusy('knowledge-btn-save', true, '저장 중...', '저장');
+  const res = await integrationFetch(`/api/knowledge/datasets/${d.id}`, {
+    method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+  setButtonBusy('knowledge-btn-save', false, '', '저장');
+  if(res.status !== 'SUCCESS'){ integrationToast(res.error || '저장하지 못했습니다.', 'error'); return; }
+  integrationToast('자료 정보를 고쳤습니다.', 'success');
+  await knowledgeLoad();
+  knowledgeOpen(d.id, KNOWLEDGE.detail.version_id);
+}
+
+async function knowledgeDelete(){
+  const d = KNOWLEDGE.detail?.dataset;
+  if(!d) return;
+  if(!confirm(`「${d.title}」을(를) 지울까요? 목록과 검색에서 빠집니다. (원본과 이력은 남습니다)`)) return;
+  const res = await integrationFetch(`/api/knowledge/datasets/${d.id}`, {method: 'DELETE'});
+  if(res.status !== 'SUCCESS'){ integrationToast(res.error || '지우지 못했습니다.', 'error'); return; }
+  integrationToast('자료를 지웠습니다.', 'success');
+  document.getElementById('knowledge-detail-card').style.display = 'none';
+  KNOWLEDGE.detail = null;
+  knowledgeLoad();
+}
+
+PAGE_LOADERS['knowledge'] = knowledgeLoad;
+</script>

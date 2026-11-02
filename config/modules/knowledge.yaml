@@ -1,0 +1,15 @@
+# 지식 저장소. 파트가 가진 백데이터(엑셀 · CSV · 문서)를 한곳에 모으고 찾아본다.
+# 통합 웹 안에서 도는 내부 모듈이다(base_url 비움). 나중에 담당 WAS 로 떼어낼 때는
+# base_url 만 채우면 된다 -- 화면과 API 경로는 그대로다.
+name: 지식 저장소
+icon: 📚
+menu_section: 지식 관리
+base_url: ''
+enabled: true
+required_role: user
+# role: 로그인한 사용자 모두 · explicit: 관리자가 사용자별로 부여한 사람만
+access: role
+page: knowledge
+dashboard:
+  width: 4
+  height: 1

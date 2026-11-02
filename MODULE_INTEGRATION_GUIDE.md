@@ -395,6 +395,10 @@ templates/
 - 공통 헬퍼(`escapeHtml`, `integrationFetch`, `setActionResult`, `setButtonBusy`,
   `integrationToast`, 모달 제어)는 `partials/js/common.html` 에 있다. 화면
   스크립트에서 그대로 호출한다.
+- 화면이 열릴 때 데이터를 불러오려면 `scripts.html` 끝에
+  `PAGE_LOADERS['<page 키>'] = 불러오는함수;` 를 둔다. 사이드바로 들어올 때와 주소로 바로
+  열 때 모두 불린다. `common.html` 의 `showPage` 를 고치지 않는다(병합 충돌).
+  예: `templates/modules/knowledge/scripts.html`.
 - **CSS 는 자동으로 그 화면 안에 갇힌다.** `page.html` / `widget.html` 의 `<style>`
   안 선택자에는 통합 웹이 범위를 붙인다. `.card { border:0 }` 를 써도 다른 팀 화면은
   바뀌지 않는다.

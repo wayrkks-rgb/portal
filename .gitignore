@@ -18,3 +18,5 @@ outputs/
 data/temp/
 config/modules/*.local.yaml
 data/users.json
+# 지식 저장소에 올린 원본 파일. 파트 자료라 저장소에 올리지 않는다(백업은 따로).
+data/knowledge/

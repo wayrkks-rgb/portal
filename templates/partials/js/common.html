@@ -39,6 +39,15 @@ async function apiFetch(url) {
 }
 
 // ── 페이지 전환 ──
+// 대메뉴 화면이 열릴 때 부를 함수. 모듈의 scripts.html 이 PAGE_LOADERS['<page>'] = fn 으로
+// 등록한다. 담당자가 이 파일의 showPage 에 if 를 덧붙이면 병합 때마다 충돌하기 때문이다.
+const PAGE_LOADERS = {};
+function runPageLoader(id){
+  const loader = PAGE_LOADERS[id];
+  if(typeof loader !== 'function') return;
+  try{ loader(); }catch(error){ console.error(`화면 ${id} 불러오기 실패`, error); }
+}
+
 function showPage(id) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
@@ -55,6 +64,7 @@ function showPage(id) {
   if (id === 'report') loadResourceUsage();
   if (id === 'asset_sync') loadAssetSyncDashboard();
   if (id === 'dashboard') loadModulePanels();
+  runPageLoader(id);
 }
 
 // ── 연계 모듈 (BFF 호출) ──
@@ -278,6 +288,7 @@ window.addEventListener('load', () => {
   if(page === 'daily_check') { loadDailyCheck(); }
   if(page === 'weekly_check') { loadWeeklyCheck(); }
   if(page === 'monthly_check') { loadMonthlyCheck(); }
+  runPageLoader(page);
   const openModule = PORTAL_MODULES.find(m => m.location === 'REMOTE' && m.page === page);
   if(openModule) loadModulePage(openModule.id);
 });

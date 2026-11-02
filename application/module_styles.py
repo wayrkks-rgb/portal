@@ -145,7 +145,9 @@ def _scope_css(css: str, scope: str, *, source: str) -> str:
         if kind == "at":
             name = prelude.strip().split(None, 1)[0].lower()
             if name in _NESTING_AT_RULES:
-                out.append(f"{prelude}{{{_scope_css(body, scope, source=source)}}}")
+                # 안쪽 규칙이 #id 로 시작하면 "{#" 가 되는데, 이 결과는 Jinja 가 다시 읽으므로
+                # 주석 시작으로 오해한다. 사이에 줄바꿈을 둔다.
+                out.append(f"{prelude}{{\n{_scope_css(body, scope, source=source)}\n}}")
             else:
                 # @keyframes / @font-face 등은 선택자가 없어 범위 개념이 없다.
                 # 이름이 겹치지 않게 하는 것은 담당자 몫이라 문서로 안내한다.

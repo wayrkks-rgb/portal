@@ -1,0 +1,166 @@
+{# 지식 저장소. 파트 백데이터(엑셀 · CSV · 문서)를 올리고, 찾고, 열어 본다.
+   이 파일의 스타일은 #page-knowledge 안으로 자동으로 갇힌다(module_styles). #}
+<style>
+  .kn-hit-group{border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:12px;}
+  .kn-hit-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;}
+  .kn-hit-title{font-weight:700;cursor:pointer;color:var(--accent);}
+  .kn-hit-title:hover{text-decoration:underline;}
+  .kn-cells{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12px;}
+  .kn-cells span b{color:var(--text-muted);font-weight:500;margin-right:4px;}
+  mark{background:rgba(154,106,18,.25);color:inherit;padding:0 1px;border-radius:2px;}
+  .kn-meta{display:grid;grid-template-columns:110px 1fr;gap:6px 12px;font-size:13px;margin-bottom:12px;}
+  .kn-meta dt{color:var(--text-muted);}
+  .kn-meta dd{margin:0;white-space:pre-wrap;}
+  .kn-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 16px;}
+  .kn-form .kn-wide{grid-column:1 / -1;}
+  .kn-rows td{white-space:pre-wrap;vertical-align:top;font-size:12px;}
+  .kn-rows th{white-space:nowrap;}
+  .kn-link{cursor:pointer;color:var(--accent);}
+  .kn-link:hover{text-decoration:underline;}
+  @media (max-width: 900px){ .kn-form{grid-template-columns:1fr;} }
+</style>
+<div class="page {% if page=='knowledge' %}active{% endif %}" id="page-knowledge">
+  <div class="topbar">
+    <div>
+      <div class="topbar-title">📚 지식 저장소</div>
+      <div class="topbar-sub">파트가 가진 엑셀 · 문서를 한곳에 모으고, 키워드로 찾아 봅니다</div>
+    </div>
+    <div class="flex gap-2 items-center">
+      <button class="btn btn-primary btn-sm" onclick="knowledgeToggleUpload()">＋ 자료 올리기</button>
+      <button class="btn btn-secondary btn-sm" onclick="knowledgeLoad()">새로고침</button>
+    </div>
+  </div>
+  <div class="content">
+    <div id="knowledge-alert"></div>
+
+    <div class="grid-4 mb-4">
+      <div class="stat-card"><div class="stat-value" id="knowledge-stat-datasets">-</div><div class="stat-label">자료</div></div>
+      <div class="stat-card"><div class="stat-value" id="knowledge-stat-rows">-</div><div class="stat-label">찾을 수 있는 행 · 문단</div></div>
+      <div class="stat-card"><div class="stat-value" id="knowledge-stat-month">-</div><div class="stat-label">이번 달 올림</div></div>
+      <div class="stat-card"><div class="stat-value" id="knowledge-stat-size">-</div><div class="stat-label">보관 용량</div></div>
+    </div>
+
+    <!-- 올리기 -->
+    <div class="card" id="knowledge-upload-card" style="display:none">
+      <div class="card-title"><span class="icon">⬆️</span> 자료 올리기</div>
+      <div class="text-xs text-muted mb-4">
+        엑셀(.xlsx · .xlsm) · CSV 는 시트별 표로, Word(.docx) · PowerPoint(.pptx) · 텍스트는 문단으로 쪼개 찾을 수
+        있게 저장합니다. PDF · 한글 파일은 원본만 보관하고 제목 · 설명 · 태그로 찾습니다.
+        같은 자료를 고쳐 다시 올릴 때는 <strong>대상</strong>에서 그 자료를 고르면 새 버전이 됩니다.
+      </div>
+      <div class="kn-form">
+        <div class="form-group kn-wide">
+          <label class="form-label">파일</label>
+          <input class="form-input" type="file" id="knowledge-file"
+                 accept=".xlsx,.xlsm,.csv,.docx,.pptx,.txt,.md,.pdf,.hwp,.hwpx,.doc,.ppt,.vsdx,.png,.jpg,.jpeg"
+                 onchange="knowledgeFileChosen()">
+        </div>
+        <div class="form-group">
+          <label class="form-label">대상</label>
+          <select class="form-select" id="knowledge-target" onchange="knowledgeTargetChanged()">
+            <option value="">새 자료로 올리기</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">머리글 행 (엑셀 · CSV)</label>
+          <input class="form-input" type="number" min="0" id="knowledge-header-row" value="0"
+                 title="0 이면 값이 찬 첫 행을 머리글로 봅니다">
+        </div>
+        <div class="form-group knowledge-new-only">
+          <label class="form-label">제목</label>
+          <input class="form-input" id="knowledge-title" maxlength="300" placeholder="비우면 파일 이름">
+        </div>
+        <div class="form-group knowledge-new-only">
+          <label class="form-label">분류</label>
+          <input class="form-input" id="knowledge-category-input" maxlength="100" list="knowledge-category-list"
+                 placeholder="예: 서버 자산 · 장애 이력 · 작업 절차">
+          <datalist id="knowledge-category-list"></datalist>
+        </div>
+        <div class="form-group knowledge-new-only">
+          <label class="form-label">출처</label>
+          <input class="form-input" id="knowledge-source" maxlength="500" placeholder="예: ITSM 추출 2026-10 · 운영팀 공유폴더">
+        </div>
+        <div class="form-group knowledge-new-only">
+          <label class="form-label">태그 (쉼표로 구분)</label>
+          <input class="form-input" id="knowledge-tags" maxlength="500" placeholder="예: AIX, 백업, 월간보고">
+        </div>
+        <div class="form-group kn-wide knowledge-new-only">
+          <label class="form-label">설명</label>
+          <textarea class="form-input" id="knowledge-description" maxlength="4000"
+                    placeholder="무엇을 담은 자료인지, 언제 기준인지, 어떻게 쓰는지"></textarea>
+        </div>
+        <div class="form-group kn-wide">
+          <label class="form-label">버전 메모</label>
+          <input class="form-input" id="knowledge-note" maxlength="1000" placeholder="예: 10월 말 기준으로 갱신">
+        </div>
+      </div>
+      <div class="flex gap-2 items-center">
+        <button class="btn btn-primary btn-sm" id="knowledge-btn-upload" onclick="knowledgeUpload()">올리기</button>
+        <button class="btn btn-secondary btn-sm" onclick="knowledgeToggleUpload(false)">닫기</button>
+      </div>
+      <div id="knowledge-upload-result"></div>
+    </div>
+
+    <!-- 찾기 -->
+    <div class="card">
+      <div class="card-title"><span class="icon">🔎</span> 찾기</div>
+      <div class="flex gap-2 items-center mb-4" style="flex-wrap:wrap">
+        <input class="form-input" id="knowledge-q" style="flex:1;min-width:220px"
+               placeholder="띄어쓰기로 나눈 낱말이 모두 들어간 행을 찾습니다 (예: AIX 7.2 백업)"
+               onkeyup="if(event.key==='Enter') knowledgeSearch()">
+        <select class="form-select" id="knowledge-category" style="width:180px" onchange="knowledgeCategoryChanged()">
+          <option value="">분류 전체</option>
+        </select>
+        <button class="btn btn-primary btn-sm" onclick="knowledgeSearch()">찾기</button>
+      </div>
+      <div class="text-xs text-muted mb-4">
+        지금은 낱말이 그대로 들어간 곳을 찾습니다(현재 버전만). 질문을 문장으로 받아 답하는 기능은
+        폐쇄망 LLM 을 붙이는 다음 단계에서 이 검색 결과를 근거로 씁니다.
+      </div>
+      <div id="knowledge-search-result"></div>
+    </div>
+
+    <!-- 자료 열기 -->
+    <div class="card" id="knowledge-detail-card" style="display:none">
+      <div class="flex justify-between items-center mb-4" style="flex-wrap:wrap;gap:8px">
+        <div class="card-title" style="margin-bottom:0"><span class="icon">📄</span>
+          <span id="knowledge-detail-title">자료</span></div>
+        <div class="flex gap-2 items-center" style="flex-wrap:wrap" id="knowledge-detail-actions"></div>
+      </div>
+      <div id="knowledge-detail-meta"></div>
+      <div id="knowledge-edit" style="display:none" class="result-box mb-4"></div>
+      <div class="flex gap-2 items-center mb-4" style="flex-wrap:wrap">
+        <label class="text-xs">버전</label>
+        <select class="form-select" id="knowledge-version" style="width:260px" onchange="knowledgeVersionChanged()"></select>
+        <input class="form-input" id="knowledge-rows-q" style="width:220px" placeholder="이 시트에서 찾기"
+               onkeyup="if(event.key==='Enter') knowledgeShowSheet(KNOWLEDGE.sheetId, 0)">
+        <button class="btn btn-secondary btn-sm" onclick="knowledgeShowSheet(KNOWLEDGE.sheetId, 0)">찾기</button>
+      </div>
+      <div class="tabs" id="knowledge-sheet-tabs" style="flex-wrap:wrap;margin-bottom:12px"></div>
+      <div id="knowledge-rows-info" class="text-xs text-muted mb-4"></div>
+      <div class="table-wrap" style="max-height:560px;overflow:auto">
+        <table class="kn-rows table-sticky"><thead id="knowledge-rows-head"></thead><tbody id="knowledge-rows-body"></tbody></table>
+      </div>
+      <div class="flex gap-2 items-center" style="margin-top:10px" id="knowledge-rows-pager"></div>
+      <details style="margin-top:16px">
+        <summary class="text-sm" style="cursor:pointer">버전 · 이력</summary>
+        <div id="knowledge-detail-history" style="margin-top:10px"></div>
+      </details>
+    </div>
+
+    <!-- 자료 목록 -->
+    <div class="card">
+      <div class="flex justify-between items-center mb-4" style="flex-wrap:wrap;gap:8px">
+        <div class="card-title" style="margin-bottom:0"><span class="icon">🗂️</span> 자료 목록</div>
+        <input class="form-input" id="knowledge-lib-q" style="width:240px" placeholder="제목 · 설명 · 태그로 거르기"
+               oninput="knowledgeRenderLibrary()">
+      </div>
+      <div class="table-wrap" style="max-height:520px;overflow:auto">
+        <table class="table-sticky">
+          <thead><tr><th>자료</th><th>분류</th><th>형식</th><th>행 · 문단</th><th>버전</th><th>출처</th><th>올린 사람</th><th>고친 날</th></tr></thead>
+          <tbody id="knowledge-lib-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
