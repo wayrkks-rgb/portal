@@ -105,6 +105,10 @@ vcenter:
   hostname_suffixes:
   - .korealife.dom
   timeout_seconds: 1800
+  # 일간 점검 [현재 VM 상태 보기]: AUTO(REST 먼저, 안 되면 PowerCLI) · REST · POWERCLI
+  live_power_method: AUTO
+  live_power_rest_timeout_seconds: 10
+  live_power_timeout_seconds: 90
   retry_count: 1
   default_port: 443
   default_auth_mode: CREDENTIAL

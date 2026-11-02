@@ -99,6 +99,7 @@ function renderDailyDigest() {
     pending: (document.getElementById('daily-digest-pending') || {}).checked,
   });
   renderChangeDigestGroups('daily-digest-groups', shown, {kind, empty: '없음'});
+  renderDailyPowerBox(rows);
   renderDigestPendingNotice('daily-digest-pending-notice', dailyDigest,
     {onShow: 'showDailyPending()', onExport: 'exportDailyPending()'});
 
@@ -115,6 +116,99 @@ function renderDailyDigest() {
         + (summary.trivial_hidden ? ` · 경미 ${Number(summary.trivial_hidden).toLocaleString()}건 숨김` : '')
       : `${dailyDigestDate} 에 바뀐 서버가 없습니다.`);
   }
+}
+
+// ── 전원이 바뀐 VM: 지금 상태 보기 ──
+// 아침 배치 때 꺼져 있던 VM 이 업무 시간엔 켜져 있는 일이 있다. 전원이 바뀐 VM 만
+// 골라, 그 VM 의 통합기 1대에만 붙어 지금 상태를 읽는다(서버가 통합기를 정한다).
+const POWER_TEXT = {poweredon: '켜짐', poweredoff: '꺼짐', suspended: '일시중지'};
+let dailyPowerRows = [];
+
+function powerText(value) {
+  const key = String(value || '').replace(/[_\s]/g, '').toLowerCase();
+  return POWER_TEXT[key] || key || '-';
+}
+
+function powerChangedRows(rows) {
+  return (rows || []).filter(row => row.vm_key && (
+    (row.event_types || []).some(t => t === 'RV_POWER_ON' || t === 'RV_POWER_OFF')
+    || (row.fields || []).some(f => f.name === 'power_state')));
+}
+
+function renderDailyPowerBox(rows) {
+  const holder = document.getElementById('daily-power-now');
+  if (!holder) return;
+  dailyPowerRows = powerChangedRows(rows);
+  if (!dailyPowerRows.length) { holder.innerHTML = ''; return; }
+  const on = dailyPowerRows.filter(r => (r.event_types || []).includes('RV_POWER_ON')).length;
+  const off = dailyPowerRows.filter(r => (r.event_types || []).includes('RV_POWER_OFF')).length;
+  const vcenters = new Set(dailyPowerRows.map(r => r.vcenter_label || r.vcenter_id || '-'));
+  holder.innerHTML = `<div class="result-box">
+    <div class="flex justify-between items-center gap-2" style="flex-wrap:wrap">
+      <div><strong>⚡ 전원이 바뀐 VM ${dailyPowerRows.length}대</strong>
+        <span class="text-xs text-muted">(꺼짐→켜짐 ${on} · 켜짐→꺼짐 ${off} · 통합기 ${vcenters.size}곳)
+        아침 배치 시점 값입니다. 낮에는 다를 수 있습니다.</span></div>
+      <button class="btn btn-primary btn-sm" id="btn-daily-power-now" onclick="loadDailyPowerNow()">현재 VM 상태 보기</button>
+    </div>
+    <div id="daily-power-now-result" style="margin-top:10px"></div>
+  </div>`;
+}
+
+function powerTimingText(vc) {
+  const ok = (vc.attempts || []).find(a => a.status === 'SUCCESS');
+  const failed = (vc.attempts || []).filter(a => a.status === 'FAILED');
+  const names = {module: '모듈 로딩', connect: '접속', query: '조회', process: '프로세스'};
+  const steps = ok ? ['module', 'connect', 'query', 'process'].filter(k => (ok.timings || {})[k] != null)
+    .map(k => `${names[k]} ${ok.timings[k]}s`).join(' · ') : '';
+  const fallback = failed.length ? ` (먼저 ${failed.map(a => a.method).join('·')} 실패: ${failed[0].error})` : '';
+  return `${syncEscape(vc.vcenter_label || vc.vcenter_id)} — ${ok ? `${ok.method} ${vc.seconds}s` : `실패 ${vc.seconds}s`}`
+    + `${steps ? ` [${syncEscape(steps)}]` : ''}${syncEscape(fallback)}`;
+}
+
+async function loadDailyPowerNow() {
+  const out = document.getElementById('daily-power-now-result');
+  if (!out || !dailyPowerRows.length) return;
+  setButtonBusy('btn-daily-power-now', true, '통합기에 묻는 중...', '현재 VM 상태 보기');
+  out.innerHTML = '<div class="text-sm text-muted"><span class="loading"></span> 그 VM 이 있는 통합기에만 붙어 지금 전원을 읽습니다...</div>';
+  const started = performance.now();
+  const res = await integrationFetch('/api/asset-sync/vm-power-now', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({vm_keys: dailyPowerRows.map(r => r.vm_key)}),
+  });
+  setButtonBusy('btn-daily-power-now', false, '', '현재 VM 상태 보기');
+  const waited = ((performance.now() - started) / 1000).toFixed(1);
+  if (!res.results) {
+    out.innerHTML = `<div class="alert alert-error">${syncEscape(res.error || '조회하지 못했습니다.')}</div>`;
+    return;
+  }
+  const byKey = {};
+  res.results.forEach(r => { byKey[r.vm_key] = r; });
+  const changed = res.results.filter(r => r.found && !r.same).length;
+  const body = dailyPowerRows.map(row => {
+    const live = byKey[row.vm_key] || {};
+    const field = (row.fields || []).find(f => f.name === 'power_state');
+    const verdict = !live.found
+      ? `<span class="text-error">${syncEscape(live.error || '찾지 못함')}</span>`
+      : (live.same ? '<span class="text-muted">아침과 같음</span>'
+                   : '<span class="text-warning"><strong>아침과 다름</strong></span>');
+    return `<tr>
+      <td><strong>${syncEscape(row.hostname || row.label || '-')}</strong>
+        <div class="text-xs text-muted">${syncEscape(row.primary_ip || '')} ${row.itsm_cm_id ? '· ' + syncEscape(row.itsm_cm_id) : ''}</div></td>
+      <td>${syncEscape(live.vm_name || row.vm_name || row.vm_key)}</td>
+      <td class="text-xs">${syncEscape(row.vcenter_label || row.vcenter_id || '-')}</td>
+      <td class="text-xs">${field ? `${syncEscape(powerText(field.old))} → ${syncEscape(powerText(field.new))}` : '-'}</td>
+      <td>${syncEscape(powerText(live.batch_power || row.power_state))}</td>
+      <td><strong>${live.found ? syncEscape(powerText(live.now_power)) : '-'}</strong></td>
+      <td>${verdict}</td>
+    </tr>`;
+  }).join('');
+  out.innerHTML = `
+    <div class="text-sm" style="margin-bottom:6px">지금 기준 · 아침과 다른 VM <strong>${changed}대</strong>
+      · 화면에서 기다린 시간 <strong>${waited}초</strong></div>
+    <div class="text-xs text-muted" style="margin-bottom:8px">${(res.vcenters || []).map(powerTimingText).join('<br>')}</div>
+    <div class="table-wrap" style="max-height:360px;overflow:auto"><table class="table-sticky">
+      <thead><tr><th>서버</th><th>VM</th><th>통합기</th><th>아침 배치 변경</th><th>아침 상태</th><th>지금 상태</th><th>비교</th></tr></thead>
+      <tbody>${body}</tbody></table></div>`;
 }
 
 // 대수 효과 한 줄. 일간에서 본 증감이 월간 서버 대수에 얼마나 들어가는지를
@@ -304,6 +398,32 @@ async function loadWeeklyCheck() {
   alertEl.innerHTML = '';
   renderWeekly(rows, monday);
   showCollectionNotice('weekly-collection-notice');
+  loadWeeklyMovements(localDate(monday), localDate(sunday));
+}
+
+// 이번 주 자산 생성 · 삭제. 월간 '변동 내역' 과 같은 계산을 주 단위로 돌린다.
+let weeklyMovements = null;
+
+async function loadWeeklyMovements(start, end) {
+  const holder = document.getElementById('weekly-movement-items');
+  if (!holder) return;
+  holder.innerHTML = '<div class="text-sm text-muted"><span class="loading"></span> 생성 · 삭제 집계 중...</div>';
+  const res = await integrationFetch(`/api/asset-sync/asset-movements?start=${start}&end=${end}`);
+  if (res.status !== 'SUCCESS') {
+    weeklyMovements = null;
+    holder.innerHTML = `<div class="text-sm text-muted">${syncEscape(res.message || res.error || '생성 · 삭제를 불러오지 못했습니다.')}</div>`;
+    return;
+  }
+  weeklyMovements = res.movements;
+  const basis = document.getElementById('weekly-movement-basis');
+  if (basis) basis.textContent = `비교: ${res.previous_as_of} → ${res.as_of} · 집계 기준 ${(res.basis || {}).label || ''}`;
+  renderWeeklyMovements();
+}
+
+function renderWeeklyMovements() {
+  if (!weeklyMovements) return;
+  const term = (document.getElementById('weekly-movement-search') || {}).value || '';
+  renderAssetMovementGroups('weekly-movement-items', weeklyMovements, {term, previousLabel: '지난주'});
 }
 
 // 생성·삭제로 세는 이벤트. 나머지는 변경으로 본다.

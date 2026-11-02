@@ -204,7 +204,8 @@
         </div>
         <div id="monthly-movements"></div>
         <div class="text-xs text-muted mb-4" style="margin-top:12px">
-          어느 서버가 늘거나 빠졌는지 한 줄씩 적습니다. 빼야 할 대상이면
+          순증감을 <strong>생성 − 삭제</strong> 로 풀고, 일간 보고처럼 <strong>[생성] · [삭제]</strong> 로 나눠
+          어느 서버인지 적습니다. 날짜 · 사유는 그 서버가 대수에 들어오거나 빠진 날의 일간 기록입니다. 빼야 할 대상이면
           <strong>[제외]</strong> 를 눌러 바로 자산에서 뺄 수 있고, 목록이 길면
           <strong>[전체 보기]</strong> 에서 검색·엑셀·일괄 제외를 씁니다.
         </div>
@@ -215,9 +216,7 @@
                  placeholder="호스트명·IP·업무명 검색" oninput="renderMovementItems()">
           <span class="text-xs text-muted" id="monthly-movement-shown"></span>
         </div>
-        <div class="table-wrap" style="max-height:420px;overflow:auto">
-          <table id="monthly-movement-items"></table>
-        </div>
+        <div id="monthly-movement-items"></div>
       </div>
 
       <div class="card">

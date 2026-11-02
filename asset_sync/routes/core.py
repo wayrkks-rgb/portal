@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -28,6 +29,8 @@ from ..services.asset_scope import AssetScope
 from ..services.monthly_report_service import SORT_FIELDS
 from ..services.change_presenter import attach_identity
 from ..web_common import admin_required, login_required
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _month_end(month: str | None) -> date:
@@ -124,6 +127,17 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
     def monthly_check_page() -> Any:
         return render_template("main.html", user=session["user"], page="monthly_check")
 
+    def _annotate(conn: Any, movements: dict[str, Any], start: date, end: date) -> None:
+        """변동 대상에 일간 보고의 날짜 · 사유를 붙인다. 실패해도 목록은 그대로 낸다."""
+        try:
+            rows = ChangeDigestService(cfg, AssetRepository(conn), scope_for(conn)).digest(
+                f"{start.isoformat()}T00:00:00", f"{end.isoformat()}T23:59:59", source="ITSM",
+            )["rows"]
+        except Exception:  # 날짜 · 사유는 덧붙이는 정보다. 대수 화면을 막지 않는다.
+            LOGGER.exception("변동 내역에 날짜 · 사유를 붙이지 못했습니다")
+            return
+        ServerStatusService.annotate_movements(movements, rows)
+
     def _monthly_status(conn: Any, base_day: date) -> tuple[dict[str, Any] | None, Any]:
         """월간 점검 결과 한 벌. 화면과 엑셀이 **같은 계산**을 쓰도록 여기서만 만든다.
 
@@ -143,6 +157,7 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         result["eosl"] = service.eosl(int(current["id"]), previous_snapshot_id=previous_id)
         if previous:
             result["movements"] = service.movements(int(current["id"]), int(previous["id"]))
+            _annotate(conn, result["movements"], base_day.replace(day=1), base_day)
         result.update({
             "status": "SUCCESS",
             "as_of": current["snapshot_date"],
@@ -166,6 +181,70 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
                 "status": "NO_SNAPSHOT", "as_of": None,
                 "message": "해당 기간까지의 ITSM 스냅샷이 없습니다. 수집을 먼저 실행하세요.",
             })
+        return jsonify(result)
+
+    @bp.route("/api/asset-sync/asset-movements")
+    @login_required
+    def asset_movements() -> Any:
+        """기간(주간 등)의 자산 생성 · 삭제 목록. 월간 '변동 내역' 과 같은 계산이다.
+
+        기간 전날까지의 마지막 ITSM 과 기간 끝날까지의 마지막 ITSM 을 견준다. 그래서
+        생성 - 삭제 = 기간 순증감이 되고, 일간 증감을 더한 값과도 맞는다.
+        """
+        try:
+            start = date.fromisoformat(str(request.args.get("start") or "")[:10])
+            end = date.fromisoformat(str(request.args.get("end") or "")[:10])
+        except ValueError:
+            return jsonify({"error": "start · end 는 YYYY-MM-DD 로 주세요."}), 400
+        if end < start:
+            return jsonify({"error": "end 가 start 보다 앞섭니다."}), 400
+        with manager.connect() as conn:
+            repo = AssetRepository(conn)
+            current = repo.snapshot_on_or_before("ITSM", end.isoformat())
+            previous = repo.snapshot_on_or_before("ITSM", (start - timedelta(days=1)).isoformat())
+            if not current or not previous:
+                return jsonify({
+                    "status": "NO_SNAPSHOT",
+                    "message": "기간 앞뒤의 ITSM 스냅샷이 없어 생성 · 삭제를 견줄 수 없습니다.",
+                })
+            service = ServerStatusService(cfg, repo, include_all=_include_all())
+            movements = service.movements(int(current["id"]), int(previous["id"]))
+            _annotate(conn, movements, start, end)
+        return jsonify({
+            "status": "SUCCESS",
+            "movements": movements,
+            "as_of": current["snapshot_date"],
+            "previous_as_of": previous["snapshot_date"],
+            "basis": service.scope.basis(),
+        })
+
+    @bp.route("/api/asset-sync/vm-power-now", methods=["POST"])
+    @login_required
+    def vm_power_now() -> Any:
+        """전원이 바뀐 VM 의 '지금' 전원 상태. 그 VM 이 있는 통합기에만 붙는다.
+
+        화면은 VM 키만 보낸다. 어느 통합기 · 어떤 ID 로 물을지는 마지막 vCenter
+        스냅샷에서 서버가 정한다(브라우저가 준 주소로 붙지 않는다).
+        """
+        from ..services.live_power_service import MAX_VMS, LivePowerService
+
+        payload = request.get_json(silent=True) or {}
+        keys = [str(key) for key in (payload.get("vm_keys") or []) if str(key or "").strip()]
+        if not keys:
+            return jsonify({"error": "vm_keys 가 필요합니다."}), 400
+        if len(keys) > MAX_VMS:
+            return jsonify({"error": f"한 번에 {MAX_VMS}대까지 조회합니다."}), 400
+        with manager.connect() as conn:
+            repo = AssetRepository(conn)
+            snapshot = repo.latest_snapshot("RVTOOLS")
+            records = repo.load_rv_records(int(snapshot["id"])) if snapshot else {}
+        vms = [dict(records[key], asset_key=key) for key in dict.fromkeys(keys) if key in records]
+        missing = [key for key in keys if key not in records]
+        if not vms:
+            return jsonify({"error": "마지막 vCenter 스냅샷에 없는 VM 입니다.", "missing": missing}), 404
+        result = LivePowerService(cfg).lookup(vms)
+        result["missing"] = missing
+        result["batch_collected_at"] = snapshot["collected_at"] if snapshot else None
         return jsonify(result)
 
     @bp.route("/api/asset-sync/count-audit")

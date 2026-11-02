@@ -191,3 +191,94 @@ def test_registered_as_standby_counts_when_it_turns_operating(portal) -> None:
     wide = ["CMSTA010", "CMSTA050"]
     assert day_digest(config, manager, DAY_ITSM, wide)["rows"][0]["count_effect"] == 1
     assert day_digest(config, manager, DAY_RUN, wide)["rows"][0]["kind"] == CHANGED
+
+
+# ── 삭제도 같은 규칙인가 ─────────────────────────────────────────────────
+# VM 이 먼저 사라지고 ITSM 은 며칠 뒤에 바뀐다. 대수는 ITSM 이 바뀐 날 -1 이어야 하고,
+# 그사이 일간 화면에는 'ITSM 미반영' 으로 보여야 한다.
+OLD_ASSET = asset("CM098", "oldsrv", "10.0.0.98")
+OLD_VM = vm("u-old", "oldsrv", "10.0.0.98")
+
+
+def setup_removal(config, manager, itsm_after: list[dict]) -> None:
+    put_itsm(config, manager, PREV_END, BASE_ASSETS + [OLD_ASSET])
+    put_vcenter(config, manager, PREV_END, BASE_VMS + [OLD_VM])
+    # 10/05: vCenter 에서만 VM 이 사라졌다.
+    put_itsm(config, manager, DAY_VM, BASE_ASSETS + [OLD_ASSET])
+    put_vcenter(config, manager, DAY_VM, BASE_VMS)
+
+
+@pytest.mark.parametrize("itsm_after", ["status", "deleted"], ids=["폐기로 바꿈", "레코드 삭제"])
+def test_a_late_itsm_removal_counts_on_the_itsm_day(portal, itsm_after) -> None:
+    config, manager = portal
+    setup_removal(config, manager, [])
+    before = day_digest(config, manager, DAY_VM)["rows"][0]
+    assert (before["kind"], before["count_effect"], before["reflection"]) == ("REMOVED", 0, NOT_REFLECTED)
+    assert before["itsm_cm_id"] == "CM098"
+
+    later = BASE_ASSETS + ([asset("CM098", "oldsrv", "10.0.0.98", "CMSTA060")] if itsm_after == "status" else [])
+    put_itsm(config, manager, DAY_ITSM, later)
+    put_vcenter(config, manager, DAY_ITSM, BASE_VMS)
+
+    itsm_day = day_digest(config, manager, DAY_ITSM)["rows"][0]
+    assert (itsm_day["kind"], itsm_day["count_effect"]) == ("REMOVED", -1)
+    # 사흘 전 줄을 다시 열어도 ITSM 짝을 잃지 않고, 이제는 반영됨이다.
+    vm_day = day_digest(config, manager, DAY_VM)["rows"][0]
+    assert vm_day["itsm_cm_id"] == "CM098" and vm_day["reflection"] == REFLECTED
+    assert vm_day["count_effect"] == 0 and "이날이 아니라" in vm_day["count_note"]
+    assert vm_day["hostname"] == "oldsrv"
+
+    with manager.connect() as conn:
+        repo = AssetRepository(conn)
+        current = repo.snapshot_on_or_before("ITSM", MONTH_END)
+        previous = repo.snapshot_on_or_before("ITSM", PREV_END)
+        status = ServerStatusService(config, repo).status(int(current["id"]), int(previous["id"]))
+        assert status["all"]["delta"]["계"]["소계"] == -1
+        audit = CountAuditService(config, repo).audit(date.fromisoformat(MONTH_END))
+        check = next(c for c in audit["checks"] if c["name"] == "월간 대수 = 이번 달 일일 증감")
+        assert check["verdict"] == "OK" and check["daily_net"] == -1
+
+
+# ── 주간 · 월간의 [생성] · [삭제] 목록 ─────────────────────────────────────
+def test_period_movements_list_who_and_when(tmp_path, monkeypatch) -> None:
+    """주간 화면 API: 생성 - 삭제 = 순증감이고, 줄마다 일간 기록의 날짜 · 사유가 붙는다."""
+    monkeypatch.setenv("ASSET_APP_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLASK_SECRET_KEY", "t")
+    monkeypatch.chdir(tmp_path)
+    from application import create_app
+    from application.db import database_manager, reset_database_manager
+    from asset_sync.config import load_config
+
+    reset_database_manager()
+    try:
+        app = create_app()
+        config, manager = load_config(), database_manager()
+        put_itsm(config, manager, PREV_END, BASE_ASSETS + [OLD_ASSET])
+        put_vcenter(config, manager, PREV_END, BASE_VMS + [OLD_VM])
+        # 10/08: 신규 등록 1대 + 폐기 1대 + 대기로만 들어온 1대(대수 밖)
+        put_itsm(config, manager, DAY_ITSM, BASE_ASSETS + [
+            asset("CM099", "newsrv", "10.0.0.99"),
+            asset("CM098", "oldsrv", "10.0.0.98", "CMSTA060"),
+            asset("CM097", "stbsrv", "10.0.0.97", "CMSTA050"),
+        ])
+        client = app.test_client()
+        with client.session_transaction() as session:
+            session["user"] = {"id": 1, "username": "hong", "role": "user", "name": "홍"}
+        body = client.get("/api/asset-sync/asset-movements?start=2026-10-05&end=2026-10-11").get_json()
+        assert body["status"] == "SUCCESS", body
+        moves = body["movements"]
+        assert (moves["created"]["total"], moves["removed"]["total"], moves["net"]) == (1, 1, 0)
+        assert moves["before_total"] == 4 and moves["after_total"] == 4
+        created, removed = moves["created"]["items"][0], moves["removed"]["items"][0]
+        assert (created["cm_id"], created["changed_on"], created["reason"]) == ("CM099", DAY_ITSM, "ITSM 신규 등록")
+        assert created["hostname"] == "newsrv" and created["primary_ip"] == "10.0.0.99"
+        assert (removed["cm_id"], removed["changed_on"]) == ("CM098", DAY_ITSM)
+        assert "매각/폐기" in removed["reason"]
+
+        # 월간 화면도 같은 목록 · 같은 사유
+        monthly = client.get("/api/asset-sync/server-status?month=2026-10").get_json()["movements"]
+        assert [i["cm_id"] for i in monthly["created"]["items"]] == ["CM099"]
+        assert monthly["removed"]["items"][0]["reason"] == removed["reason"]
+        assert client.get("/api/asset-sync/asset-movements?start=x&end=y").status_code == 400
+    finally:
+        reset_database_manager()

@@ -140,6 +140,13 @@ vcenter:
   - .korealife.dom
   timeout_seconds: 1800
   retry_count: 1
+  # 일간 점검의 [현재 VM 상태 보기]. 전원이 바뀐 VM 만, 그 VM 의 통합기 1대에만 붙는다.
+  # AUTO: REST(1~3초) 먼저, 안 되면 PowerCLI(모듈 로딩 때문에 10~25초).
+  # REST: REST 만 · POWERCLI: 배치와 같은 PowerCLI 만.
+  live_power_method: AUTO
+  live_power_rest_timeout_seconds: 10
+  live_power_timeout_seconds: 90
+  live_power_script: scripts/get_vm_power_state.ps1
   default_port: 443
   default_auth_mode: CREDENTIAL
   default_username: ''

@@ -89,7 +89,7 @@ def _as_int(value: Any) -> int | None:
 class _Context:
     """한 번의 조회에 쓰는 밑자료. 줄마다 다시 읽지 않는다."""
 
-    def __init__(self, service: "ChangeDigestService") -> None:
+    def __init__(self, service: "ChangeDigestService", start: str = "") -> None:
         repo = service.repo
         snapshot = repo.latest_snapshot("ITSM")
         self.itsm_snapshot = snapshot
@@ -100,6 +100,20 @@ class _Context:
         self.index = asset_matching.build_index(
             {str(a.get("cm_id")): service._as_match_record(a) for a in assets}
         )
+        # 기간 첫날의 ITSM 에는 있었는데 지금은 지워진 자산. 지나간 날의 'VM 삭제' 줄이
+        # ITSM 짝을 잃지 않게 한다. 지금 ITSM 만 보면, 레코드를 지운 뒤에 그날을 다시
+        # 열었을 때 'ITSM 자산이 없어 대수 그대로' 라고 잘못 나온다.
+        self.past_assets: dict[str, dict[str, Any]] = {}
+        past = repo.snapshot_on_or_before("ITSM", str(start)[:10]) if start else None
+        if past and snapshot and int(past["id"]) != int(snapshot["id"]):
+            self.past_assets = {
+                str(a.get("cm_id")): a
+                for a in load_itsm_records(service.config, repo, int(past["id"]))
+                if str(a.get("cm_id")) not in self.assets
+            }
+        self.past_index = asset_matching.build_index(
+            {cm_id: service._as_match_record(a) for cm_id, a in self.past_assets.items()}
+        ) if self.past_assets else None
         rv_snapshot = repo.latest_snapshot("RVTOOLS")
         self.vms = repo.load_rv_records(int(rv_snapshot["id"])) if rv_snapshot else {}
         # identity_map 은 cm_id → vm_uuid 로 들고 있다. 여기서는 그 반대가 필요하다.
@@ -126,7 +140,7 @@ class ChangeDigestService:
         include_trivial: bool = False,
     ) -> dict[str, Any]:
         events = self.repo.changes(source, 100000, start, end)
-        context = _Context(self)
+        context = _Context(self, start)
         rows = self._fold(events, context, include_trivial=include_trivial)
         for row in rows:
             self._attach_identity(row, context)
@@ -359,6 +373,11 @@ class ChangeDigestService:
         if not asset and row.get("itsm_cm_id") and "ITSM" in payloads:
             # ITSM 에서 지워진 자산은 지금 스냅샷에 없다. 이벤트의 원본을 쓴다.
             asset = {"raw": payloads["ITSM"]}
+        if not asset and row["server_key"].startswith("ITSM:"):
+            # 그날 이후 ITSM 에서 지워진 자산. 기간 첫날 스냅샷의 값으로 보여준다.
+            asset = context.past_assets.get(row["server_key"][5:]) or {}
+            if asset:
+                row["itsm_cm_id"] = row.get("itsm_cm_id") or row["server_key"][5:]
         vm = context.vms.get(str(row.get("vm_key") or "")) or payloads.get("RVTOOLS") or {}
         # vCenter 쪽 변경만 있고 ITSM 자산이 있는 서버면, 그 자산도 함께 보여준다.
         if not asset and row["server_key"].startswith("ITSM:"):
@@ -447,7 +466,24 @@ class ChangeDigestService:
         }
         if not probe["normalized_hostname"] and not probe["ip_addresses"]:
             return None
-        return asset_matching.find(vm_key, probe, context.index).key
+        found = asset_matching.find(vm_key, probe, context.index).key
+        if found or context.past_index is None:
+            return found
+        return asset_matching.find(vm_key, probe, context.past_index).key
+
+    def _removed_vm_note(self, row: dict[str, Any], context: _Context, basis: str) -> str:
+        """VM 이 사라진 날의 대수 설명. 대수는 늘 ITSM 쪽이 바뀐 날 움직인다."""
+        cm_id = str(row.get("itsm_cm_id") or "")
+        if not cm_id:
+            return "ITSM 자산이 없어 서버 대수는 그대로입니다."
+        current = context.assets.get(cm_id)
+        if current is None:
+            return (f"ITSM 자산({cm_id})과 짝이었고, 지금은 ITSM 에서도 지워졌습니다. 서버 대수는"
+                    " 이날이 아니라 ITSM 에서 지운 날 반영됩니다.")
+        if not self.scope.counts_status(current.get("status_code")):
+            return (f"ITSM 자산({cm_id})은 지금 집계 기준({basis}) 밖입니다. 서버 대수는 이날이 아니라"
+                    " ITSM 상태를 바꾼 날 반영됩니다.")
+        return "vCenter 에서만 사라졌습니다. ITSM 상태를 바꾸는 날 서버 대수가 줄어듭니다."
 
     # ── ITSM 에 반영됐나 ────────────────────────────────────────────────
     def _attach_reflection(self, row: dict[str, Any], context: _Context) -> None:
@@ -589,8 +625,7 @@ class ChangeDigestService:
                     " ITSM 에 등록 · 운영 전환된 날 잡힙니다." if row.get("itsm_cm_id")
                     else "ITSM 에 자산이 없어 서버 대수에 들어가지 않습니다. 등록하는 날 대수에 잡힙니다.")
         elif "RV_REMOVED" in types:
-            note = ("vCenter 에서만 사라졌습니다. ITSM 상태를 바꾸는 날 서버 대수가 줄어듭니다."
-                    if row.get("itsm_cm_id") else "ITSM 자산이 없어 서버 대수는 그대로입니다.")
+            note = self._removed_vm_note(row, context, basis)
         else:
             note = "내용만 바뀌어 서버 대수는 그대로입니다."
 

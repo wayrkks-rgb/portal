@@ -164,7 +164,54 @@ class ServerStatusService:
         return {
             "created": {**self._breakdown(created), "items": self._movement_items(created)},
             "removed": {**self._breakdown(removed), "items": self._movement_items(removed)},
+            # 순증감 = 생성 - 삭제. 화면이 "몇 대 늘고 몇 대 빠져서 이 숫자" 로 읽게 한다.
+            "before_total": len(before_by_id),
+            "after_total": len(current_by_id),
+            "net": len(created) - len(removed),
         }
+
+    @staticmethod
+    def annotate_movements(movements: dict[str, Any] | None, digest_rows: list[dict[str, Any]]) -> None:
+        """변동 대상마다 **언제 · 왜** 를 일간 증감에서 찾아 붙인다.
+
+        목록은 기간 첫날과 끝날의 ITSM 을 견준 것이고, 날짜와 사유는 일간 보고의 같은
+        서버 줄에서 온다. 둘이 같은 판정(집계 기준)을 쓰므로 서로 어긋나지 않는다.
+        """
+        if not movements:
+            return
+        found: dict[tuple[str, int], dict[str, Any]] = {}
+        for row in digest_rows or []:
+            effect = int(row.get("count_effect") or 0)
+            cm_id = str(row.get("itsm_cm_id") or "")
+            if not effect or not cm_id:
+                continue
+            key = (cm_id, 1 if effect > 0 else -1)
+            held = found.get(key)
+            if held is None or str(row.get("day") or "") > str(held.get("day") or ""):
+                found[key] = row
+        for side, sign in (("created", 1), ("removed", -1)):
+            for item in (movements.get(side) or {}).get("items") or []:
+                row = found.get((str(item.get("cm_id") or ""), sign))
+                if row is None:
+                    item["changed_on"] = None
+                    item["reason"] = ("일간 기록 없음 — 배치가 빠진 날 바뀌었거나 수동 포함 · 제외로 바뀐 것입니다")
+                    continue
+                item["changed_on"] = row.get("day")
+                item["reason"] = ServerStatusService._movement_reason(row)
+
+    @staticmethod
+    def _movement_reason(row: dict[str, Any]) -> str:
+        types = set(row.get("event_types") or [])
+        if "ITSM_ASSET_CREATED" in types:
+            return "ITSM 신규 등록"
+        if "ITSM_RECORD_REMOVED" in types:
+            return "ITSM 레코드 삭제"
+        summary = str(row.get("summary") or "")
+        for head in ("생성 · ", "삭제 · ", "생성", "삭제"):
+            if summary.startswith(head):
+                summary = summary[len(head):]
+                break
+        return summary.strip() or str(row.get("count_note") or "")
 
     def _movement_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """변동 내역 한 줄씩. 읽기 쉬운 순서(위치 → 구분 → 호스트명)로 세운다."""

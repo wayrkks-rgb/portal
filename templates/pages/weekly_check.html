@@ -33,6 +33,21 @@
     <div class="card">
       <div class="flex justify-between items-center mb-4" style="flex-wrap:wrap;gap:8px">
         <div class="card-title" style="margin-bottom:0;white-space:nowrap">
+          <span class="icon">📋</span> 이번 주 자산 생성 · 삭제</div>
+        <input class="form-input" id="weekly-movement-search" style="width:220px"
+               placeholder="호스트명 · IP · 업무명 검색" oninput="renderWeeklyMovements()">
+      </div>
+      <div class="text-xs text-muted mb-4">
+        지난주 일요일과 이번 주 일요일(또는 오늘)의 ITSM 자산을 견준 결과입니다. 월간 점검의 변동 내역과 같은
+        계산이고, 날짜 · 사유는 그 서버가 대수에 들어오거나 빠진 날의 일간 기록입니다.
+        <span id="weekly-movement-basis"></span>
+      </div>
+      <div id="weekly-movement-items"></div>
+    </div>
+
+    <div class="card">
+      <div class="flex justify-between items-center mb-4" style="flex-wrap:wrap;gap:8px">
+        <div class="card-title" style="margin-bottom:0;white-space:nowrap">
           <span class="icon">📄</span> 주간 변경 내역 (서버 단위)</div>
         <div class="flex gap-2 items-center" style="flex-wrap:wrap">
           <label class="text-xs flex items-center gap-2">

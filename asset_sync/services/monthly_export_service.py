@@ -150,12 +150,16 @@ class MonthlyCheckExportService:
             sheet.append([])
             sheet.append(["변동 대상 목록"])
             sheet.cell(row=sheet.max_row, column=1).font = Font(bold=True, size=12)
+            sheet.append([
+                f"순증감 {int(movements.get('net') or 0):+d}대 = 생성 {int((movements.get('created') or {}).get('total') or 0)}대"
+                f" - 삭제 {int((movements.get('removed') or {}).get('total') or 0)}대"
+            ])
             columns = [
-                ("구분", None), ("자산번호", "cm_id"), ("호스트명", "hostname"),
+                ("구분", None), ("날짜", "changed_on"), ("자산번호", "cm_id"), ("호스트명", "hostname"),
                 ("IP", "primary_ip"), ("업무명", "service_name"), ("위치", "location"),
                 ("물리/논리", "kind"), ("OS 묶음", "os_group"), ("OS", "os_family"),
                 ("OS 버전", "os_version"), ("EOSL 연도", "eosl_year"),
-                ("EOSL 원본값", "eosl_value"), ("상태", "status_label"),
+                ("EOSL 원본값", "eosl_value"), ("상태", "status_label"), ("사유", "reason"),
             ]
             sheet.append([name for name, _ in columns])
             _style_header(sheet, sheet.max_row)
