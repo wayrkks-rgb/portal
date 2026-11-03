@@ -486,7 +486,9 @@ function renderChangeDigestGroups(holderId, rows, options) {
 // 칸은 자산 대수를 눌렀을 때 보이는 정보(자산번호 · 호스트명 · IP · 업무명 …)와 같다.
 const MOVEMENT_SECTIONS = [['created', '생성', 'text-success'], ['changed', '변경', ''], ['removed', '삭제', 'text-error']];
 
-function movementMatches(item, term) {
+function movementMatches(item, term, effect) {
+  const pending = item.source === 'VCENTER' && !item.itsm_reflection_ok;
+  if (!effectMatches(effect, Number(item.count_effect || 0), pending)) return false;
   if (!term) return true;
   return [item.cm_id, item.hostname, item.primary_ip, item.service_name, item.os_family,
     item.os_group, item.location, item.reason]
@@ -535,7 +537,7 @@ function renderAssetMovementGroups(holderId, movements, options) {
   let shownCount = 0, totalCount = 0;
   const sections = MOVEMENT_SECTIONS.map(([key, label, cls]) => {
     const all = ((movements[key] || {}).items) || [];
-    const items = all.filter(item => movementMatches(item, term));
+    const items = all.filter(item => movementMatches(item, term, opts.effect));
     shownCount += items.length; totalCount += all.length;
     const body = items.map(item => `<tr>
         <td class="mono text-xs" style="white-space:nowrap">${syncEscape(item.changed_on || '-')}</td>
@@ -566,11 +568,11 @@ function renderAssetMovementGroups(holderId, movements, options) {
           ? '기간 중 바뀌었다가 처음 상태로 돌아온 서버(꺼짐→켜짐 등). 서버 상태는 그대로라 생성 · 삭제에 넣지 않습니다'
           : `대수 반영 ${Number((movements[key] || {}).counted ?? all.length)}건
           · vCenter 만 바뀜(대수 그대로) ${Number((movements[key] || {}).vcenter_only || 0)}건`}</span>
-        ${term && items.length !== all.length ? `<span class="text-xs text-muted">검색으로 ${items.length}대 표시</span>` : ''}
+        ${(term || opts.effect) && items.length !== all.length ? `<span class="text-xs text-warning">조건에 맞는 ${items.length.toLocaleString()}건만 표시</span>` : ''}
       </div>
       ${items.length
         ? `<div class="table-wrap" style="max-height:420px;overflow:auto"><table class="table-sticky"><thead>${head}</thead><tbody>${body}</tbody></table></div>`
-        : `<div class="text-xs text-muted" style="padding:6px 2px">${all.length ? '검색 결과가 없습니다.' : '없음'}</div>`}
+        : `<div class="text-xs text-muted" style="padding:6px 2px">${all.length ? '조건에 맞는 것이 없습니다.' : '없음'}</div>`}
     </div>`;
   }).join('');
   holder.innerHTML = movementEquation(movements, opts.previousLabel)
@@ -651,6 +653,35 @@ function renderDigestPendingNotice(holderId, digest, options) {
 }
 
 // 화면이 고른 조건대로 걸러낸다. 분류·출처·검색·ITSM 미반영만.
+// ── 대수 반영 필터 (일 · 주 · 월 공용) ──
+// 생성 300 · 삭제 200 처럼 길어지면 '실제로 대수를 움직인 것' 과 '반영이 안 된 것' 을 따로 봐야 한다.
+const EFFECT_FILTERS = [
+  ['', '대수 반영: 전체'],
+  ['counted', '대수 반영된 것만 (+1 / −1)'],
+  ['not_counted', '대수 그대로인 것만'],
+  ['pending', 'ITSM 반영 필요만'],
+];
+
+function effectFilterOptions() {
+  return EFFECT_FILTERS.map(([value, label]) => `<option value="${value}">${label}</option>`).join('');
+}
+
+function effectMatches(effect, countEffect, pending) {
+  if (!effect) return true;
+  if (effect === 'counted') return countEffect !== 0;
+  if (effect === 'not_counted') return countEffect === 0;
+  if (effect === 'pending') return Boolean(pending);
+  return true;
+}
+
+// 화면에 있는 대수 반영 select 들을 채운다. 각 화면 HTML 에 옵션을 따로 적지 않게 한다.
+function fillEffectFilters() {
+  document.querySelectorAll('select[data-effect-filter]').forEach(select => {
+    if (!select.options.length) select.innerHTML = effectFilterOptions();
+  });
+}
+document.addEventListener('DOMContentLoaded', fillEffectFilters);
+
 function filterDigestRows(rows, filter) {
   const want = filter || {};
   const term = String(want.q || '').trim().toLowerCase();
@@ -661,6 +692,7 @@ function filterDigestRows(rows, filter) {
     if (want.pending && row.reflection !== 'NOT_REFLECTED') return false;
     // 대수를 움직인 것만 보기. 월간 대수와 맞대어 볼 때 쓴다.
     if (want.counting && !Number(row.count_effect || 0)) return false;
+    if (!effectMatches(want.effect, Number(row.count_effect || 0), row.reflection === 'NOT_REFLECTED')) return false;
     if (!term) return true;
     const hay = [row.label, row.hostname, row.primary_ip, row.asset_key, row.vm_key,
                  row.vm_name, row.esxi_host, row.esxi_label, row.cluster_label,

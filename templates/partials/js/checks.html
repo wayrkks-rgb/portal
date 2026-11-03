@@ -97,6 +97,7 @@ function renderDailyDigest() {
     source: (document.getElementById('daily-digest-source') || {}).value,
     q: (document.getElementById('daily-digest-search') || {}).value,
     pending: (document.getElementById('daily-digest-pending') || {}).checked,
+    effect: (document.getElementById('daily-digest-effect') || {}).value,
   });
   renderChangeDigestGroups('daily-digest-groups', shown, {kind, empty: '없음'});
   renderDailyPowerBox(rows);
@@ -429,7 +430,8 @@ function traceWeeklyAsset() {
 function renderWeeklyMovements() {
   if (!weeklyMovements) return;
   const term = (document.getElementById('weekly-movement-search') || {}).value || '';
-  renderAssetMovementGroups('weekly-movement-items', weeklyMovements, {term, previousLabel: '지난주'});
+  const effect = (document.getElementById('weekly-movement-effect') || {}).value || '';
+  renderAssetMovementGroups('weekly-movement-items', weeklyMovements, {term, effect, previousLabel: '지난주'});
 }
 
 // 생성·삭제로 세는 이벤트. 나머지는 변경으로 본다.
@@ -476,6 +478,7 @@ function renderWeeklyDetail() {
     source: document.getElementById('weekly-detail-source').value,
     q: document.getElementById('weekly-detail-search').value,
     pending: (document.getElementById('weekly-detail-pending') || {}).checked,
+    effect: (document.getElementById('weekly-detail-effect') || {}).value,
   });
   renderChangeDigestGroups('weekly-digest-groups', shown, {kind, empty: '없음'});
   renderDigestPendingNotice('weekly-digest-pending-notice', weeklyDigest,

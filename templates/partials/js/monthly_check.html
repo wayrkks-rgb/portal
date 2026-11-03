@@ -141,12 +141,13 @@ function renderMovementItems() {
   // [생성] · [삭제] 로 나눠 그린다. 주간 화면과 같은 함수를 쓴다(common.html).
   const counted = renderAssetMovementGroups('monthly-movement-items', monthlyMovements, {
     term, excludable: true, previousLabel: '전월',
+    effect: (document.getElementById('monthly-movement-effect') || {}).value || '',
     empty: '비교할 전월 스냅샷이 없습니다.',
   });
   const shownEl = document.getElementById('monthly-movement-shown');
   if (shownEl) {
     shownEl.textContent = counted.total
-      ? `${counted.shown.toLocaleString()} / ${counted.total.toLocaleString()}대 표시`
+      ? `${counted.shown.toLocaleString()} / ${counted.total.toLocaleString()}건 표시`
       : '';
   }
 }

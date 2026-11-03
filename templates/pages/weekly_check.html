@@ -34,6 +34,7 @@
       <div class="flex justify-between items-center mb-4" style="flex-wrap:wrap;gap:8px">
         <div class="card-title" style="margin-bottom:0;white-space:nowrap">
           <span class="icon">📋</span> 이번 주 자산 생성 · 삭제</div>
+<select class="form-select" id="weekly-movement-effect" data-effect-filter style="width:200px" onchange="renderWeeklyMovements()"></select>
         <input class="form-input" id="weekly-movement-search" style="width:220px"
                placeholder="호스트명 · IP · 업무명 검색" oninput="renderWeeklyMovements()">
       </div>
@@ -67,6 +68,7 @@
             <option value="removed">삭제</option>
             <option value="changed">자원·정보 변경</option>
           </select>
+<select class="form-select" id="weekly-detail-effect" data-effect-filter style="width:200px" onchange="renderWeeklyDetail()"></select>
           <select class="form-select" id="weekly-detail-source" style="width:130px" onchange="renderWeeklyDetail()">
             <option value="">출처 전체</option>
             <option value="ITSM">ITSM</option>
