@@ -26,6 +26,16 @@ scripts\run_daily_batch.bat
 type logs\daily_batch_console.log
 ```
 
+`.bat` 은 **cmd 가 실행하는 파일**이다. 앞에 `python` 을 붙이거나 PyCharm 의 ▶ Run 으로
+돌리면 파이썬이 배치 파일을 파이썬 코드로 읽어 `SyntaxError: leading zeros in decimal integer
+literals ...`(2번째 줄의 `07:00`) 가 난다. 배치는 실행조차 안 된 것이다.
+
+| 어디서 | 이렇게 |
+| --- | --- |
+| 명령 프롬프트(cmd) | `scripts\run_daily_batch.bat` |
+| PowerShell | `cmd /c scripts\run_daily_batch.bat` |
+| PyCharm | 아래 **Terminal** 탭에서 위 명령 (▶ Run 버튼 아님) |
+
 로그의 마지막 `===== BATCH START ... =====` 부터 `===== BATCH END ... / exit N =====`
 까지가 한 번의 실행이다.
 
