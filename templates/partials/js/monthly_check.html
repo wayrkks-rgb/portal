@@ -142,6 +142,7 @@ function renderMovementItems() {
   const counted = renderAssetMovementGroups('monthly-movement-items', monthlyMovements, {
     term, excludable: true, previousLabel: '전월',
     effect: (document.getElementById('monthly-movement-effect') || {}).value || '',
+    transitionSelect: 'monthly-movement-transition',
     empty: '비교할 전월 스냅샷이 없습니다.',
   });
   const shownEl = document.getElementById('monthly-movement-shown');

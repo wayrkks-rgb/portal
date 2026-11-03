@@ -154,21 +154,45 @@ class ServerStatusService:
         자산에서 빼야 하는지 둬야 하는지 판단할 수 없다. 그래서 실물 목록도 같이
         돌려준다.
         """
-        current, _ = self.select(snapshot_id)
-        before, _ = self.select(previous_snapshot_id)
+        current, current_out = self.select(snapshot_id)
+        before, before_out = self.select(previous_snapshot_id)
         current_by_id = {item["cm_id"]: item for item in current}
         before_by_id = {item["cm_id"]: item for item in before}
+        # 집계 밖 자산까지 포함한 전후 모습. '대기 → 운영' 처럼 무엇에서 무엇으로 바뀌었는지 적는다.
+        current_all = {**{i["cm_id"]: i for i in current_out}, **current_by_id}
+        before_all = {**{i["cm_id"]: i for i in before_out}, **before_by_id}
 
         created = [current_by_id[key] for key in current_by_id.keys() - before_by_id.keys()]
         removed = [before_by_id[key] for key in before_by_id.keys() - current_by_id.keys()]
+        created_items = self._movement_items(created)
+        removed_items = self._movement_items(removed)
+        for row in created_items + removed_items:
+            key = row.get("cm_id")
+            old, new = before_all.get(key), current_all.get(key)
+            row["status_before_label"] = self._state_label(old, "ITSM 에 없음")
+            row["status_after_label"] = self._state_label(new, "ITSM 에서 삭제")
+            row["transition"] = f"{row['status_before_label']} → {row['status_after_label']}"
         return {
-            "created": {**self._breakdown(created), "items": self._movement_items(created)},
-            "removed": {**self._breakdown(removed), "items": self._movement_items(removed)},
+            "created": {**self._breakdown(created), "items": created_items},
+            "removed": {**self._breakdown(removed), "items": removed_items},
             # 순증감 = 생성 - 삭제. 화면이 "몇 대 늘고 몇 대 빠져서 이 숫자" 로 읽게 한다.
             "before_total": len(before_by_id),
             "after_total": len(current_by_id),
             "net": len(created) - len(removed),
         }
+
+    @staticmethod
+    def _state_label(item: dict[str, Any] | None, absent: str) -> str:
+        """상태 이름. 상태가 아닌 이유(수동 제외 · 값 비어 있음 등)로 빠졌으면 그 이유도 붙인다."""
+        if item is None:
+            return absent
+        name = ASSET_STATUS.get(str(item.get("status_code") or ""), str(item.get("status_code") or "상태 없음"))
+        reason = item.get("exclude_reason")
+        if item.get("manual"):
+            return f"{name} · 수동 {'포함' if item.get('included') else '제외'}"
+        if reason and reason != "STATUS":
+            return f"{name} · {item.get('exclude_label') or reason}"
+        return name
 
     def missing_report(self, snapshot_id: int) -> dict[str, Any]:
         """집계 대상 중 EOSL 현황 조사에 필요한 정보가 빈 자산.
@@ -307,6 +331,10 @@ class ServerStatusService:
                 "itsm_action": last.get("itsm_action") or "",
                 "reflection_note": last.get("reflection_note") or "",
             }
+            itsm_now = last.get("itsm_status_label") or "ITSM 자산 없음"
+            base["status_before_label"] = base["status_after_label"] = itsm_now
+            base["transition"] = (f"ITSM {itsm_now} 그대로 (vCenter 만 바뀜)" if cm_id
+                                  else "ITSM 자산 없음 (vCenter 만)")
             if effect == 0 and vm_net == 0:
                 changed_items.append({**base, "reason": "처음과 끝이 같음 — " + cls._period_path(rows),
                                       "itsm_reflection": "-", "itsm_action": "", "itsm_reflection_ok": True})

@@ -473,7 +473,7 @@ function renderChangeDigestGroups(holderId, rows, options) {
         ${notes.length ? `<span class="text-xs text-muted">${syncEscape(notes.join(' · '))}</span>` : ''}
       </div>
       ${items.length
-        ? `<div class="table-wrap" style="max-height:420px;overflow:auto"><table class="table-sticky">${
+        ? `<div class="table-wrap" style="max-height:420px;overflow:auto"><table class="table-sticky" style="min-width:1400px">${
             digestTableInner(items, {withKind: false})}</table></div>`
         : `<div class="text-xs text-muted" style="padding:6px 2px">${syncEscape(opts.empty || '없음')}</div>`}
     </div>`;
@@ -486,9 +486,16 @@ function renderChangeDigestGroups(holderId, rows, options) {
 // 칸은 자산 대수를 눌렀을 때 보이는 정보(자산번호 · 호스트명 · IP · 업무명 …)와 같다.
 const MOVEMENT_SECTIONS = [['created', '생성', 'text-success'], ['changed', '변경', ''], ['removed', '삭제', 'text-error']];
 
-function movementMatches(item, term, effect) {
+const MOVEMENT_STATE_HEADS = {
+  created: ['생성 전 상태', '생성 후 상태'],
+  changed: ['처음 상태', '끝 상태'],
+  removed: ['삭제 전 상태', '삭제 후 상태'],
+};
+
+function movementMatches(item, term, effect, transition) {
   const pending = item.source === 'VCENTER' && !item.itsm_reflection_ok;
   if (!effectMatches(effect, Number(item.count_effect || 0), pending)) return false;
+  if (transition && `${item._section}|${item.transition}` !== transition) return false;
   if (!term) return true;
   return [item.cm_id, item.hostname, item.primary_ip, item.service_name, item.os_family,
     item.os_group, item.location, item.reason]
@@ -525,10 +532,32 @@ function movementCount(item) {
   return `<span class="${effect > 0 ? 'text-success' : 'text-error'}"><strong>${effect > 0 ? '+1' : '−1'}</strong></span>`;
 }
 
+// '대기 → 운영' 처럼 상태가 무엇에서 무엇으로 바뀌었는지로 거른다. 선택지는 실제 데이터에서 만든다.
+function fillTransitionFilter(selectId, movements) {
+  const select = document.getElementById(selectId);
+  if (!select) return '';
+  const current = select.value;
+  const counts = {};
+  MOVEMENT_SECTIONS.forEach(([key, label]) => (((movements || {})[key] || {}).items || []).forEach(item => {
+    if (!item.transition) return;
+    const id = `${key}|${item.transition}`;   // 같은 문구라도 생성 · 변경 · 삭제는 따로 센다
+    counts[id] = counts[id] || {label: `[${label}] ${item.transition}`, n: 0};
+    counts[id].n += 1;
+  }));
+  const order = Object.fromEntries(MOVEMENT_SECTIONS.map(([key], i) => [key, i]));
+  const entries = Object.entries(counts).sort((a, b) =>
+    (order[a[0].split('|')[0]] - order[b[0].split('|')[0]]) || (b[1].n - a[1].n));
+  select.innerHTML = '<option value="">상태 변화: 전체</option>' + entries.map(([id, v]) =>
+    `<option value="${syncEscape(id)}">${syncEscape(v.label)} · ${v.n}건</option>`).join('');
+  select.value = entries.some(([id]) => id === current) ? current : '';
+  return select.value;
+}
+
 function renderAssetMovementGroups(holderId, movements, options) {
   const holder = document.getElementById(holderId);
   if (!holder) return {shown: 0, total: 0};
   const opts = options || {};
+  if (opts.transitionSelect) opts.transition = fillTransitionFilter(opts.transitionSelect, movements);
   if (!movements) {
     holder.innerHTML = `<div class="text-muted text-sm">${syncEscape(opts.empty || '비교할 이전 스냅샷이 없습니다.')}</div>`;
     return {shown: 0, total: 0};
@@ -537,7 +566,7 @@ function renderAssetMovementGroups(holderId, movements, options) {
   let shownCount = 0, totalCount = 0;
   const sections = MOVEMENT_SECTIONS.map(([key, label, cls]) => {
     const all = ((movements[key] || {}).items) || [];
-    const items = all.filter(item => movementMatches(item, term, opts.effect));
+    const items = all.filter(item => movementMatches({...item, _section: key}, term, opts.effect, opts.transition));
     shownCount += items.length; totalCount += all.length;
     const body = items.map(item => `<tr>
         <td class="mono text-xs" style="white-space:nowrap">${syncEscape(item.changed_on || '-')}</td>
@@ -550,8 +579,9 @@ function renderAssetMovementGroups(holderId, movements, options) {
         <td>${syncEscape(item.os_group || '-')}
           ${item.os_version ? `<div class="text-xs text-muted">${syncEscape(item.os_family || '')} ${syncEscape(item.os_version)}</div>` : ''}</td>
         <td>${item.eosl_year == null ? '<span class="text-muted">미사용</span>' : syncEscape(String(item.eosl_year))}</td>
-        <td class="text-xs">${syncEscape(item.status_label || item.status_code || '-')}</td>
-        <td class="text-xs">${syncEscape(item.reason || '-')}
+        <td class="text-xs">${syncEscape(item.status_before_label || '-')}</td>
+        <td class="text-xs"><strong>${syncEscape(item.status_after_label || item.status_label || '-')}</strong></td>
+        <td class="text-xs" style="min-width:180px">${syncEscape(item.reason || '-')}
           ${item.vcenter_note ? `<div class="text-muted">${syncEscape(item.vcenter_note)}</div>` : ''}</td>
         <td class="text-xs">${movementReflection(item)}</td>
         <td class="text-xs">${movementCount(item)}</td>
@@ -559,7 +589,8 @@ function renderAssetMovementGroups(holderId, movements, options) {
           ? `<button class="btn btn-secondary btn-sm" onclick="excludeOneAsset('${syncEscape(item.cm_id)}','${syncEscape(item.hostname || '')}')">제외</button>` : ''}</td>` : ''}
       </tr>`).join('');
     const head = `<tr><th>날짜</th><th>자산번호</th><th>호스트명</th><th>IP</th><th>업무명</th><th>위치</th>
-      <th>물리/논리</th><th>OS</th><th>EOSL</th><th>${key === 'removed' ? '삭제 전 상태' : '상태'}</th><th>사유</th>
+      <th>물리/논리</th><th>OS</th><th>EOSL</th><th style="white-space:nowrap">${MOVEMENT_STATE_HEADS[key][0]}</th>
+      <th style="white-space:nowrap">${MOVEMENT_STATE_HEADS[key][1]}</th><th>사유</th>
       <th style="white-space:nowrap">ITSM 반영</th><th style="white-space:nowrap">대수 반영</th>${opts.excludable ? '<th></th>' : ''}</tr>`;
     return `<div style="margin-bottom:18px">
       <div class="flex items-center gap-2" style="margin-bottom:6px">
@@ -568,10 +599,10 @@ function renderAssetMovementGroups(holderId, movements, options) {
           ? '기간 중 바뀌었다가 처음 상태로 돌아온 서버(꺼짐→켜짐 등). 서버 상태는 그대로라 생성 · 삭제에 넣지 않습니다'
           : `대수 반영 ${Number((movements[key] || {}).counted ?? all.length)}건
           · vCenter 만 바뀜(대수 그대로) ${Number((movements[key] || {}).vcenter_only || 0)}건`}</span>
-        ${(term || opts.effect) && items.length !== all.length ? `<span class="text-xs text-warning">조건에 맞는 ${items.length.toLocaleString()}건만 표시</span>` : ''}
+        ${(term || opts.effect || opts.transition) && items.length !== all.length ? `<span class="text-xs text-warning">조건에 맞는 ${items.length.toLocaleString()}건만 표시</span>` : ''}
       </div>
       ${items.length
-        ? `<div class="table-wrap" style="max-height:420px;overflow:auto"><table class="table-sticky"><thead>${head}</thead><tbody>${body}</tbody></table></div>`
+        ? `<div class="table-wrap" style="max-height:420px;overflow:auto"><table class="table-sticky" style="min-width:1600px"><thead>${head}</thead><tbody>${body}</tbody></table></div>`
         : `<div class="text-xs text-muted" style="padding:6px 2px">${all.length ? '조건에 맞는 것이 없습니다.' : '없음'}</div>`}
     </div>`;
   }).join('');

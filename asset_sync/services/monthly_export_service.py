@@ -164,7 +164,8 @@ class MonthlyCheckExportService:
                 ("IP", "primary_ip"), ("업무명", "service_name"), ("위치", "location"),
                 ("물리/논리", "kind"), ("OS 묶음", "os_group"), ("OS", "os_family"),
                 ("OS 버전", "os_version"), ("EOSL 연도", "eosl_year"),
-                ("EOSL 원본값", "eosl_value"), ("상태", "status_label"), ("사유", "reason"),
+                ("EOSL 원본값", "eosl_value"), ("변경 전 상태", "status_before_label"),
+                ("변경 후 상태", "status_after_label"), ("사유", "reason"),
                 ("ITSM 반영", "itsm_reflection"), ("해야 할 일", "itsm_action"), ("대수 반영", "count_effect"),
                 ("필수 정보 누락", "missing"),
             ]

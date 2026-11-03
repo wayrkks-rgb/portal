@@ -579,3 +579,27 @@ def test_trace_explains_each_reason(portal) -> None:
     assert kept["manual_rule"]["mode"] == "INCLUDE"
 
     assert trace(config, manager, "nobody")["status"] == "NOT_FOUND"
+
+
+def test_movements_show_status_before_and_after(portal) -> None:
+    """운영만 셀 때: 대기→운영은 [생성], 운영→대기는 [삭제]. 무엇에서 무엇으로 바뀌었는지 적는다."""
+    config, manager = portal
+    put_itsm(config, manager, PREV_END, [
+        asset("CM001", "srv1", "10.0.0.1", "CMSTA050"),     # 대기
+        asset("CM002", "srv2", "10.0.0.2"),                 # 운영
+        asset("CM003", "srv3", "10.0.0.3"),                 # 운영 → 삭제될 것
+    ])
+    put_itsm(config, manager, DAY_ITSM, [
+        asset("CM001", "srv1", "10.0.0.1"),                 # 대기 → 운영
+        asset("CM002", "srv2", "10.0.0.2", "CMSTA050"),     # 운영 → 대기
+        asset("CM004", "srv4", "10.0.0.4"),                 # 신규
+    ])
+    with manager.connect() as conn:
+        repo = AssetRepository(conn)
+        now = repo.snapshot_on_or_before("ITSM", MONTH_END)
+        before = repo.snapshot_on_or_before("ITSM", PREV_END)
+        moves = ServerStatusService(config, repo).movements(int(now["id"]), int(before["id"]))
+    created = {i["cm_id"]: i["transition"] for i in moves["created"]["items"]}
+    removed = {i["cm_id"]: i["transition"] for i in moves["removed"]["items"]}
+    assert created == {"CM001": "대기 → 운영", "CM004": "ITSM 에 없음 → 운영"}
+    assert removed == {"CM002": "운영 → 대기", "CM003": "운영 → ITSM 에서 삭제"}

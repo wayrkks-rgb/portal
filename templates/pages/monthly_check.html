@@ -203,6 +203,7 @@
           <button class="btn btn-secondary btn-sm" onclick="openMovementBrowser('created')">신규 전체 보기</button>
           <button class="btn btn-secondary btn-sm" onclick="openMovementBrowser('removed')">삭제 전체 보기</button>
 <select class="form-select" id="monthly-movement-effect" data-effect-filter style="width:210px" onchange="renderMovementItems()"></select>
+<select class="form-select" id="monthly-movement-transition" style="width:230px" onchange="renderMovementItems()"><option value="">상태 변화: 전체</option></select>
           <input class="form-input" id="monthly-movement-search" style="width:220px"
                  placeholder="호스트명·IP·업무명 검색" oninput="renderMovementItems()">
           <span class="text-xs text-muted" id="monthly-movement-shown"></span>

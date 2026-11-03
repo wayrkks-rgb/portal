@@ -431,7 +431,8 @@ function renderWeeklyMovements() {
   if (!weeklyMovements) return;
   const term = (document.getElementById('weekly-movement-search') || {}).value || '';
   const effect = (document.getElementById('weekly-movement-effect') || {}).value || '';
-  renderAssetMovementGroups('weekly-movement-items', weeklyMovements, {term, effect, previousLabel: '지난주'});
+  renderAssetMovementGroups('weekly-movement-items', weeklyMovements,
+    {term, effect, previousLabel: '지난주', transitionSelect: 'weekly-movement-transition'});
 }
 
 // 생성·삭제로 세는 이벤트. 나머지는 변경으로 본다.
