@@ -55,6 +55,7 @@ class DiffService:
         elif source == "RVTOOLS":
             current = self.repo.load_rv_records(current_snapshot_id)
             old = self.repo.load_rv_records(previous_snapshot_id)
+            self._fill_failed_scopes(old, previous_snapshot)
             run = self.repo.conn.execute(
                 "SELECT * FROM collection_run WHERE id=?",
                 (current_snapshot["collection_run_id"],),
@@ -69,6 +70,45 @@ class DiffService:
             "previous_snapshot_id": previous_snapshot_id,
             "events": events,
         }
+
+    #: 통합기 장애가 이어졌을 때 되짚어 볼 스냅샷 수. 그보다 길면 그 통합기는 새로 붙은 것으로 본다.
+    GAP_LOOKBACK = 120
+
+    def _run_failed_scopes(self, snapshot: Any) -> set[str]:
+        row = self.repo.conn.execute(
+            "SELECT failed_scope_json FROM collection_run WHERE id=?", (snapshot["collection_run_id"],)
+        ).fetchone()
+        try:
+            return set(json.loads(row["failed_scope_json"] or "[]")) if row else set()
+        except (TypeError, ValueError):
+            return set()
+
+    def _fill_failed_scopes(self, old: dict[str, dict[str, Any]], previous_snapshot: Any) -> None:
+        """직전 수집에서 실패한 통합기의 VM 을, 그 통합기가 마지막으로 성공한 스냅샷에서 채운다.
+
+        통합기가 응답하지 않은 회차에는 그 VM 들이 빠진 채 저장된다(삭제 대신 COLLECTION_GAP 으로
+        남긴다). 그런데 다음 회차에 통합기가 돌아오면, 빠진 회차와 견주기 때문에 그 통합기의 VM
+        전부가 '새로 생김(RV_NEW)' 으로 잡혔다 -- 가짜 생성이다. 장애 전 마지막 모습과 견주면
+        실제로 그사이 생기거나 지워지거나 꺼진 것만 남는다.
+        """
+        missing = self._run_failed_scopes(previous_snapshot)
+        if not missing:
+            return
+        rows = self.repo.conn.execute(
+            "SELECT id, collection_run_id FROM snapshot WHERE source='RVTOOLS' AND id < ?"
+            " AND status IN ('SUCCESS','PARTIAL_SUCCESS') ORDER BY collected_at DESC, id DESC LIMIT ?",
+            (int(previous_snapshot["id"]), self.GAP_LOOKBACK),
+        ).fetchall()
+        for row in rows:
+            if not missing:
+                break
+            recovered = missing - self._run_failed_scopes(row)
+            if not recovered:
+                continue
+            for key, record in self.repo.load_rv_records(int(row["id"])).items():
+                if str(record.get("vcenter") or "") in recovered and key not in old:
+                    old[key] = record
+            missing -= recovered
 
     def _itsm_events(
         self,

@@ -257,3 +257,36 @@ def test_the_intraday_batch_file_is_safe_for_cmd() -> None:
     assert all(byte < 128 for byte in data), "cmd 는 UTF-8 배치를 깨뜨린다. ASCII 로 둔다"
     text = data.decode("ascii")
     assert "jobs\\intraday_collect.py" in text and "logs\\intraday_console.log" in text
+
+
+# ── 통합기 장애 뒤 복구: 가짜 생성이 없어야 하고, 그사이 실제 변화는 잡혀야 한다 ────────────
+def put_scoped(config, manager, stamp, records, ok, failed):
+    with manager.connect() as conn:
+        repo = AssetRepository(conn)
+        previous = repo.latest_snapshot("RVTOOLS")
+        status = "PARTIAL_SUCCESS" if failed else "SUCCESS"
+        run = repo.start_collection_run("RVTOOLS", stamp)
+        repo.finish_collection_run(run, status, len(records), stamp, ok, failed)
+        snap = repo.create_snapshot("RVTOOLS", stamp[:10], stamp, run, status, len(records), stamp)
+        repo.insert_rv_records(snap, records)
+        if previous:
+            return [(e["event_type"], e["asset_key"]) for e in DiffService(config, repo).compare_rvtools(snap)["events"]]
+        return []
+
+
+def vc2(key: str, power: str = "poweredon") -> dict:
+    return dict(vm(power, key), vcenter="VC2", vm_name=key.upper(), normalized_hostname=key,
+                dns_name=key, primary_ip=f"10.0.2.{len(key)}", ip_addresses=[f"10.0.2.{len(key)}"])
+
+
+def test_a_recovered_vcenter_does_not_create_fake_new_vms(env) -> None:
+    config, manager = env
+    put_scoped(config, manager, "2026-11-01T07:00:00", [vm(), vc2("db1"), vc2("db2"), vc2("db3")], ["VC1", "VC2"], [])
+    gap = put_scoped(config, manager, "2026-11-02T07:00:00", [vm()], ["VC1"], ["VC2"])
+    assert sorted(gap) == [("COLLECTION_GAP", "db1"), ("COLLECTION_GAP", "db2"), ("COLLECTION_GAP", "db3")]
+    # 하루 더 장애(연속 실패)도 되짚는다
+    put_scoped(config, manager, "2026-11-03T07:00:00", [vm()], ["VC1"], ["VC2"])
+    # 복구: db1 그대로, db2 는 그사이 꺼짐, db3 는 그사이 지워짐, db4 는 그사이 새로 생김
+    back = put_scoped(config, manager, "2026-11-04T07:00:00",
+                      [vm(), vc2("db1"), vc2("db2", "poweredoff"), vc2("db4")], ["VC1", "VC2"], [])
+    assert sorted(back) == [("RV_NEW", "db4"), ("RV_POWER_OFF", "db2"), ("RV_REMOVED", "db3")]
