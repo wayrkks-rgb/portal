@@ -201,7 +201,17 @@ scheduler:
   enabled: true
   daily_time: 07:00
   task_name: AssetDailyCollection
+  # 업무 시간 중 수시 수집(인벤토리만). 바뀐 것이 있을 때만 저장한다.
+  # 켠 뒤 작업 등록: scripts\register_daily_task.bat --intraday (관리자 권한)
+  intraday:
+    enabled: false
+    interval_minutes: 60      # 15 · 30 · 60 · 120
+    start_time: '08:00'
+    end_time: '20:00'
+    task_name: AssetIntradayCollection
 retention:
+  # 수시 수집 스냅샷은 이 날 수가 지나면 그날 마지막 것만 남긴다(변경 이력은 그대로).
+  intraday_keep_days: 14
   raw_snapshot_days: 365
   change_event_days: 1095
   source_excel_days: 365

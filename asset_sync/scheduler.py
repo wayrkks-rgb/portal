@@ -87,6 +87,81 @@ def batch_path(root: Path) -> Path:
     return root / "scripts" / "run_daily_batch.bat"
 
 
+# ── 수시 수집 (업무 시간 중 30분 · 1시간 간격) ────────────────────────────
+DEFAULT_INTRADAY_TASK = "AssetIntradayCollection"
+INTRADAY_INTERVALS = (15, 30, 60, 120)
+
+
+def intraday_path(root: Path) -> Path:
+    return root / "scripts" / "run_intraday_collect.bat"
+
+
+def intraday_settings(scheduler_cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """수시 수집 설정. 기본은 꺼짐이다(켜기 전에 DB 크기 · 소스 부하를 확인하라는 뜻)."""
+    section = dict((scheduler_cfg or {}).get("intraday") or {})
+    interval = int(section.get("interval_minutes") or 60)
+    if interval not in INTRADAY_INTERVALS:
+        raise ScheduleError(f"수시 수집 간격은 {', '.join(map(str, INTRADAY_INTERVALS))}분 중 하나여야 합니다: {interval}")
+    start = normalize_time(section.get("start_time") or "08:00")
+    end = normalize_time(section.get("end_time") or "20:00")
+    if end <= start:
+        raise ScheduleError(f"수시 수집 끝 시각({end})이 시작 시각({start})보다 늦어야 합니다.")
+    return {
+        "enabled": bool(section.get("enabled", False)),
+        "interval_minutes": interval,
+        "start_time": start,
+        "end_time": end,
+        "task_name": normalize_task_name(section.get("task_name") or DEFAULT_INTRADAY_TASK),
+    }
+
+
+def in_window(settings_: Mapping[str, Any], now: Any) -> bool:
+    """지금이 수시 수집 시간대인가. 작업이 잘못 등록돼도 배치가 스스로 판단한다."""
+    hhmm = now.strftime("%H:%M")
+    return str(settings_["start_time"]) <= hhmm <= str(settings_["end_time"])
+
+
+def apply_intraday(root: Path, wanted: Mapping[str, Any]) -> dict[str, Any]:
+    """화면에서 저장한 수시 수집 설정을 Windows 작업에 반영한다. 실패해도 예외를 올리지 않는다."""
+    result: dict[str, Any] = {"applied": False, "action": None, "error": None}
+    if not is_windows():
+        result["error"] = "Windows 가 아니어서 작업 스케줄러를 갱신하지 않았습니다."
+        return result
+    try:
+        if wanted.get("enabled"):
+            register_intraday(root, wanted)
+            result.update(applied=True, action="REGISTERED")
+        elif describe(str(wanted["task_name"])).get("registered"):
+            unregister(str(wanted["task_name"]))
+            result.update(applied=True, action="REMOVED")
+    except ScheduleError as exc:
+        result["error"] = str(exc)
+    return result
+
+
+def register_intraday(root: Path, wanted: Mapping[str, Any], *, force: bool = True) -> dict[str, Any]:
+    """매일 시작 시각부터 끝 시각까지 N분마다 도는 작업을 만든다(schtasks /RI /DU)."""
+    target = intraday_path(root)
+    if not target.is_file():
+        raise ScheduleError(f"배치 파일이 없습니다: {target}")
+    start_h, start_m = map(int, str(wanted["start_time"]).split(":"))
+    end_h, end_m = map(int, str(wanted["end_time"]).split(":"))
+    minutes = (end_h * 60 + end_m) - (start_h * 60 + start_m)
+    argv = [
+        "schtasks", "/Create", "/TN", str(wanted["task_name"]),
+        "/TR", f'"{target}"',
+        "/SC", "DAILY", "/ST", str(wanted["start_time"]),
+        "/RI", str(int(wanted["interval_minutes"])), "/DU", f"{minutes // 60:02d}:{minutes % 60:02d}",
+        "/RU", "SYSTEM", "/RL", "HIGHEST",
+    ]
+    if force:
+        argv.append("/F")
+    code, output = _run(argv)
+    if code != 0:
+        raise ScheduleError(f"수시 수집 작업 등록 실패: {output or '권한을 확인하세요(관리자로 실행).'}")
+    return {"task_name": wanted["task_name"], "argv": argv, "output": output}
+
+
 def describe(task_name: str) -> dict[str, Any]:
     """등록된 작업의 상태를 읽는다. 없으면 registered=False 다."""
     task_name = normalize_task_name(task_name)

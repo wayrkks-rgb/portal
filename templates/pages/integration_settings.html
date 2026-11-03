@@ -234,6 +234,23 @@ DR vCenter,&lt;VCENTER_ADDRESS_002&gt;,DR"></textarea>
         <div class="form-group"><label class="form-label">작업명</label><input class="form-input" id="int-schedule-name" value="AssetDailyCollection"></div>
         <div class="form-group"><label class="form-label">로그 마스킹</label><select class="form-select" id="int-mask-logs"><option value="true">사용</option><option value="false">사용 안 함</option></select></div>
       </div>
+      <div class="grid-4">
+        <div class="form-group"><label class="form-label">수시 수집 (업무 시간)</label>
+          <select class="form-select" id="int-intraday-enabled">
+            <option value="false">사용 안 함</option><option value="true">사용</option>
+          </select></div>
+        <div class="form-group"><label class="form-label">간격</label>
+          <select class="form-select" id="int-intraday-interval">
+            <option value="15">15분</option><option value="30">30분</option><option value="60" selected>1시간</option><option value="120">2시간</option>
+          </select></div>
+        <div class="form-group"><label class="form-label">시작 시각</label><input type="time" class="form-input" id="int-intraday-start" value="08:00"></div>
+        <div class="form-group"><label class="form-label">끝 시각</label><input type="time" class="form-input" id="int-intraday-end" value="20:00"></div>
+      </div>
+      <div class="text-xs text-muted mb-4">
+        수시 수집은 vCenter · ITSM 인벤토리만 다시 읽어 <strong>바뀐 것이 있을 때만</strong> 저장합니다. 일부 통합기 실패 ·
+        건수 이상이면 저장하지 않습니다(가짜 생성 · 삭제 방지). 자원사용률은 07:00 일일 배치에서만 모읍니다.
+        수시 스냅샷은 14일(retention.intraday_keep_days)이 지나면 그날 마지막 것만 남기고 정리합니다(변경 이력은 그대로).
+      </div>
       <div class="flex justify-between items-center" style="gap:10px;flex-wrap:wrap">
         <div id="int-schedule-task" class="text-xs text-muted">작업 스케줄러 상태를 확인하는 중…</div>
         <button type="button" class="btn btn-secondary btn-sm" onclick="loadScheduleStatus()">상태 새로고침</button>

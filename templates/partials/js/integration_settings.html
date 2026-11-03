@@ -733,7 +733,13 @@ function buildRuntimePayload(){
     scheduler:{
       enabled:document.getElementById('int-schedule-enabled').value==='true',
       daily_time:document.getElementById('int-schedule-time').value,
-      task_name:document.getElementById('int-schedule-name').value.trim()
+      task_name:document.getElementById('int-schedule-name').value.trim(),
+      intraday:{
+        enabled:document.getElementById('int-intraday-enabled').value==='true',
+        interval_minutes:Number(document.getElementById('int-intraday-interval').value),
+        start_time:document.getElementById('int-intraday-start').value,
+        end_time:document.getElementById('int-intraday-end').value
+      }
     }
   };
 }
@@ -794,6 +800,11 @@ async function loadIntegrationSettings(showMessage=false){
   renderAssetBasis(res.asset_basis);
   document.getElementById('int-schedule-time').value=res.scheduler.daily_time||'07:00';
   document.getElementById('int-schedule-name').value=res.scheduler.task_name||'AssetDailyCollection';
+  const intraday=res.scheduler.intraday||{};
+  document.getElementById('int-intraday-enabled').value=String(Boolean(intraday.enabled));
+  document.getElementById('int-intraday-interval').value=String(intraday.interval_minutes||60);
+  document.getElementById('int-intraday-start').value=intraday.start_time||'08:00';
+  document.getElementById('int-intraday-end').value=intraday.end_time||'20:00';
   loadScheduleStatus();
   loadDisplayNames();
   applyHmcSettings(res.hmc||{});
@@ -921,6 +932,12 @@ async function saveRuntimeSettings(){
   const enabled=res.scheduler?.enabled!==false;
   const details=[enabled?'일일 배치 사용 중입니다.':'일일 배치를 끈 상태입니다. 이 시각에 수집이 돌지 않습니다.'];
   if(task.error)details.push(`Windows 작업 갱신 실패: ${task.error} → scripts\\register_daily_task.bat 을 관리자 권한으로 실행하세요.`);
+  const intradayTask=res.scheduler?.intraday_task||{};
+  const intraday=res.scheduler?.intraday||{};
+  if(intraday.enabled)details.push(`수시 수집: ${intraday.start_time}~${intraday.end_time} 동안 ${intraday.interval_minutes}분마다.`);
+  if(intradayTask.error)details.push(`수시 수집 작업 갱신 실패: ${intradayTask.error} → scripts\\register_daily_task.bat --intraday 를 관리자 권한으로 실행하세요.`);
+  else if(intradayTask.action==='REGISTERED')details.push('수시 수집 Windows 작업을 등록했습니다.');
+  else if(intradayTask.action==='REMOVED')details.push('수시 수집 Windows 작업을 해제했습니다.');
   else if(task.applied)details.push(task.action==='CREATED'?'Windows 작업을 새로 등록했습니다.':'Windows 작업 시각을 갱신했습니다.');
   setActionResult('runtime-action-result',{
     state:task.error?'error':'success',

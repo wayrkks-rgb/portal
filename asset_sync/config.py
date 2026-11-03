@@ -257,6 +257,8 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             "eos_near_days": 180,
         },
         "retention": {
+            # 수시 수집(30분 · 1시간) 스냅샷을 그날 마지막 하나만 남기기까지 둘 날 수.
+            "intraday_keep_days": 14,
             "raw_snapshot_days": 365,
             "change_event_days": 1095,
             "source_excel_days": 365,
@@ -274,6 +276,14 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             "enabled": True,
             "daily_time": "07:00",
             "task_name": "AssetDailyCollection",
+            # 업무 시간 중 수시 수집. 인벤토리만 다시 읽고, 바뀐 것이 있을 때만 저장한다.
+            "intraday": {
+                "enabled": False,
+                "interval_minutes": 60,
+                "start_time": "08:00",
+                "end_time": "20:00",
+                "task_name": "AssetIntradayCollection",
+            },
         },
         # AIX HMC. vCenter 와 달리 별도 프로그램 없이 HTTPS 로 직접 읽는다.
         # 계정·비밀번호는 config/app_config.local.yaml 에만 저장한다.

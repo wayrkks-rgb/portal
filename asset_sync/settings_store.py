@@ -243,6 +243,7 @@ class LocalSettingsStore:
                 "enabled": bool(cfg.scheduler.get("enabled", True)),
                 "daily_time": str(cfg.scheduler.get("daily_time", "07:00")),
                 "task_name": str(cfg.scheduler.get("task_name", "AssetDailyCollection")),
+                "intraday": self._public_intraday(cfg),
             },
             "hmc": {
                 "enabled": bool(cfg.hmc.get("enabled", False)),
@@ -600,6 +601,14 @@ class LocalSettingsStore:
             path.mkdir(parents=True, exist_ok=True)
         return self.public_settings()
 
+    @staticmethod
+    def _public_intraday(cfg: Any) -> dict[str, Any]:
+        try:
+            return schedule_module.intraday_settings(cfg.scheduler)
+        except schedule_module.ScheduleError as exc:
+            return {"enabled": False, "error": str(exc), "interval_minutes": 60,
+                    "start_time": "08:00", "end_time": "20:00", "task_name": "AssetIntradayCollection"}
+
     def save_runtime(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Save scheduler/security settings independently."""
         scheduler = dict(payload.get("scheduler") or {})
@@ -613,7 +622,19 @@ class LocalSettingsStore:
         except schedule_module.ScheduleError as exc:
             raise SettingsValidationError(str(exc)) from exc
         local_yaml = _read_yaml_dict(self.app_local_path)
+        # 수시 수집 설정. 화면이 보내지 않았으면 저장돼 있던 것을 그대로 둔다(덮어써서 지우지 않는다).
+        intraday_in = scheduler.get("intraday")
+        if intraday_in is None:
+            intraday_in = dict((local_yaml.get("scheduler") or {}).get("intraday") or {})
+        intraday = None
+        if intraday_in:
+            try:
+                intraday = schedule_module.intraday_settings({"intraday": intraday_in})
+            except schedule_module.ScheduleError as exc:
+                raise SettingsValidationError(str(exc)) from exc
         local_yaml["scheduler"] = dict(wanted)
+        if intraday is not None:
+            local_yaml["scheduler"]["intraday"] = dict(intraday)
         local_yaml["security"] = {
             "mask_ip_in_logs": bool(security.get("mask_ip_in_logs", True)),
             "mask_hostname_in_logs": bool(security.get("mask_hostname_in_logs", True)),
@@ -629,6 +650,8 @@ class LocalSettingsStore:
         result["scheduler"]["task"] = schedule_module.apply_time(
             self.root, wanted["task_name"], wanted["daily_time"]
         )
+        if intraday is not None:
+            result["scheduler"]["intraday_task"] = schedule_module.apply_intraday(self.root, intraday)
         return result
 
     def clear_asset_source(self) -> dict[str, Any]:

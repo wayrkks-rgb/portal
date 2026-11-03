@@ -133,14 +133,22 @@ class SnapshotService:
             raise SnapshotValidationError(f"vCenter 정상 레코드가 최소 기준({minimum}) 미만입니다: {len(normalized)}")
         return normalized, {"duplicates": duplicates}
 
+    @staticmethod
+    def itsm_checksum(records: list[dict[str, Any]]) -> str:
+        return stable_hash({r["CM_ID"]: r["record_hash"] for r in records})
+
+    @staticmethod
+    def rv_checksum(records: list[dict[str, Any]]) -> str:
+        return stable_hash({r["asset_key"]: r["record_hash"] for r in records})
+
     def save_itsm_snapshot(self, run_id: int, records: list[dict[str, Any]], collected_at: datetime, status: str = "SUCCESS") -> int:
-        checksum = stable_hash({r["CM_ID"]: r["record_hash"] for r in records})
+        checksum = self.itsm_checksum(records)
         snapshot_id = self.repo.create_snapshot("ITSM", collected_at.date().isoformat(), collected_at.isoformat(), run_id, status, len(records), checksum)
         self.repo.insert_itsm_records(snapshot_id, records)
         return snapshot_id
 
     def save_rv_snapshot(self, run_id: int, records: list[dict[str, Any]], collected_at: datetime, status: str = "SUCCESS") -> int:
-        checksum = stable_hash({r["asset_key"]: r["record_hash"] for r in records})
+        checksum = self.rv_checksum(records)
         snapshot_id = self.repo.create_snapshot("RVTOOLS", collected_at.date().isoformat(), collected_at.isoformat(), run_id, status, len(records), checksum)
         self.repo.insert_rv_records(snapshot_id, records)
         return snapshot_id

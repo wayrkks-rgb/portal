@@ -57,7 +57,14 @@ VM_RANK_NAMES = {0: "없음", 1: "전원 꺼짐", 2: "전원 켜짐"}
 
 
 def vm_step(row: dict[str, Any]) -> tuple[int, int] | None:
-    """일간 한 줄의 vCenter 쪽 (전, 후). vCenter 생성 · 삭제 · 전원 변화가 없으면 None."""
+    """일간 한 줄의 vCenter 쪽 (전, 후). vCenter 생성 · 삭제 · 전원 변화가 없으면 None.
+
+    하루에 여러 번 바뀐 줄(수시 수집)은 그날 처음 상태와 마지막 상태로 미리 계산해 둔
+    ``vm_step`` 을 쓴다.
+    """
+    if row.get("vm_step"):
+        before, after = row["vm_step"]
+        return int(before), int(after)
     types = set(row.get("event_types") or [])
     if "RV_NEW" in types:
         now_off = str(row.get("power_state") or "").lower() == "poweredoff"
@@ -69,6 +76,19 @@ def vm_step(row: dict[str, Any]) -> tuple[int, int] | None:
     if "RV_POWER_OFF" in types:
         return VM_RANK["on"], VM_RANK["off"]
     return None
+
+
+VM_EVENT_TYPES = ("RV_NEW", "RV_REMOVED", "RV_POWER_ON", "RV_POWER_OFF")
+
+
+def _event_step(event_type: str, power_now: Any) -> tuple[int, int]:
+    if event_type == "RV_NEW":
+        return VM_RANK["absent"], VM_RANK["off"] if str(power_now or "").lower() == "poweredoff" else VM_RANK["on"]
+    if event_type == "RV_REMOVED":
+        return VM_RANK["on"], VM_RANK["absent"]
+    if event_type == "RV_POWER_ON":
+        return VM_RANK["off"], VM_RANK["on"]
+    return VM_RANK["on"], VM_RANK["off"]
 
 
 #: 묶음 이벤트. 항목별 이벤트와 같은 내용을 한 번 더 적는 것이라 줄로 세지 않는다.
@@ -172,7 +192,7 @@ class ChangeDigestService:
             self._attach_identity(row, context)
             self._attach_reflection(row, context)
             self._attach_count_effect(row, context)
-            for internal in ("_itsm_record", "_vm_record", "_payloads", "_itsm_changes", "_seen"):
+            for internal in ("_itsm_record", "_vm_record", "_payloads", "_itsm_changes", "_seen", "_vm_seq"):
                 row.pop(internal, None)
         if fold == "period":
             # 주간처럼 여러 날을 볼 때는 서버 1대 = 1줄. 같은 서버가 [삭제](월) 와 [생성](화) 에
@@ -253,6 +273,8 @@ class ChangeDigestService:
                 order.append(key)
             row = buckets[key]
             row["event_types"].append(event_type)
+            if event_type in VM_EVENT_TYPES:
+                row.setdefault("_vm_seq", []).append((str(event.get("detected_at") or ""), event_type))
             if source not in row["sources"]:
                 row["sources"].append(source)
             if source == "ITSM":
@@ -596,7 +618,10 @@ class ChangeDigestService:
                         "ITSM 상태를 미사용·폐기로")
             return (REFLECTED, f"ITSM 상태가 이미 {status_name(status)}입니다(집계 기준 {basis} 밖).", "")
 
-        if "RV_POWER_OFF" in types:
+        # 하루에 여러 번 바뀌었으면(수시 수집) 그날 마지막 전원 변화로 본다.
+        seq = sorted(row.get("_vm_seq") or [])
+        last_power = next((t for _, t in reversed(seq) if t in ("RV_POWER_ON", "RV_POWER_OFF")), None)
+        if last_power == "RV_POWER_OFF":
             if asset is None:
                 return (NO_ASSET, "전원이 꺼진 VM 의 ITSM 자산을 찾지 못했습니다.", "정합성 화면에서 짝을 지어 주세요")
             if self.scope.counts_status(status):
@@ -605,7 +630,7 @@ class ChangeDigestService:
                         "계속 끌 서버면 ITSM 상태를 미사용으로")
             return (REFLECTED, f"ITSM 상태가 이미 {status_name(status)}입니다(집계 기준 {basis} 밖).", "")
 
-        if "RV_POWER_ON" in types:
+        if last_power == "RV_POWER_ON":
             if asset is None:
                 return (NOT_REFLECTED, "전원이 켜진 VM 인데 ITSM 에 자산이 없습니다.", "ITSM 에 자산 등록")
             if not self.scope.counts_status(status):
@@ -704,7 +729,9 @@ class ChangeDigestService:
         elif "RV_REMOVED" in types:
             note = self._removed_vm_note(row, context, basis)
         elif "RV_POWER_OFF" in types or "RV_POWER_ON" in types:
-            word = "꺼졌습니다" if "RV_POWER_OFF" in types else "켜졌습니다"
+            seq = sorted(row.get("_vm_seq") or [])
+            last = next((t for _, t in reversed(seq) if t in ("RV_POWER_ON", "RV_POWER_OFF")), "RV_POWER_OFF")
+            word = "꺼졌습니다" if last == "RV_POWER_OFF" else "켜졌습니다"
             itsm = (f"ITSM 은 지금 {status_name(row.get('itsm_status'))}" if row.get("itsm_cm_id")
                     else "ITSM 에 자산이 없습니다")
             note = (f"vCenter 에서 전원이 {word}. 서버 대수는 ITSM 상태가 바뀌어야 움직이므로 그대로입니다"
@@ -712,18 +739,30 @@ class ChangeDigestService:
         else:
             note = "내용만 바뀌어 서버 대수는 그대로입니다."
 
+        # vCenter 쪽 그날 순변화. 하루에 여러 번 바뀌었으면(수시 수집) 처음과 끝을 견준다.
+        seq = sorted(row.get("_vm_seq") or [])
+        steps = [_event_step(event_type, row.get("power_state")) for _, event_type in seq]
+        vm_net = (steps[-1][1] - steps[0][0]) if steps else 0
+        if steps:
+            row["vm_step"] = [steps[0][0], steps[-1][1]]
+            row["vm_last_event"] = seq[-1][1]
+
         # 생성 · 변경 · 삭제. ITSM 이 대수를 움직였으면 그것이 먼저다.
         if effect > 0:
             kind = CREATED
         elif effect < 0:
             kind = REMOVED
-        elif "RV_NEW" in types or "RV_POWER_ON" in types:
+        elif vm_net > 0:
             # vCenter 쪽 생성 · 삭제(전원 포함)는 생성 · 삭제로 보인다. 대수는 ITSM 이 바뀌어야 움직인다.
             kind = CREATED
-        elif "RV_REMOVED" in types or "RV_POWER_OFF" in types:
+        elif vm_net < 0:
             kind = REMOVED
         else:
             kind = CHANGED
+            if len(seq) > 1:
+                # 수시 수집으로 하루에 여러 번 본 경우. 꺼졌다 다시 켜졌으면 서버 상태는 그대로다.
+                path = " → ".join(VM_RANK_NAMES[s] for s in [steps[0][0]] + [st[1] for st in steps])
+                note = f"하루 안에 vCenter {path}. 처음과 끝이 같아 생성 · 삭제가 아니라 변경으로 둡니다."
         row["kind"] = kind
         row["kind_label"] = KIND_LABELS[kind]
         row["summary_prefix"] = prefix

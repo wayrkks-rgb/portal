@@ -47,9 +47,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="일일 수집 배치 작업 등록 관리")
     parser.add_argument("--status", action="store_true", help="등록 상태만 확인한다")
     parser.add_argument("--delete", action="store_true", help="등록을 해제한다")
+    parser.add_argument("--intraday", action="store_true",
+                        help="일일 배치 대신 수시 수집(업무 시간 중 N분마다) 작업을 다룬다")
     args = parser.parse_args()
 
     config = load_config()
+    if args.intraday:
+        return intraday(config, args)
     try:
         wanted = scheduler.settings(config.scheduler)
     except scheduler.ScheduleError as exc:
@@ -88,6 +92,36 @@ def main() -> int:
     print("[등록 결과]")
     show(scheduler.describe(wanted["task_name"]))
     print("\n지금 바로 한 번 돌려보려면: scripts\\run_auto_now.bat")
+    return 0
+
+
+def intraday(config, args) -> int:
+    try:
+        wanted = scheduler.intraday_settings(config.scheduler)
+    except scheduler.ScheduleError as exc:
+        print(f"[실패] 수시 수집 설정이 올바르지 않습니다: {exc}", file=sys.stderr)
+        return 1
+    print(f"작업 이름   {wanted['task_name']}")
+    print(f"실행        매일 {wanted['start_time']} ~ {wanted['end_time']}, {wanted['interval_minutes']}분마다")
+    print(f"수시 수집   {'켜짐' if wanted['enabled'] else '꺼짐 (설정 scheduler.intraday.enabled 또는 관리 → 연계 설정)'}")
+    print(f"실행 대상   {scheduler.intraday_path(ROOT)}\n")
+    if args.status:
+        show(scheduler.describe(wanted["task_name"]))
+        return 0
+    if not scheduler.is_windows():
+        print("[실패] Windows 에서만 등록할 수 있습니다.", file=sys.stderr)
+        return 1
+    try:
+        if args.delete or not wanted["enabled"]:
+            scheduler.unregister(wanted["task_name"])
+            print(f"[완료] {wanted['task_name']} 등록을 해제했습니다.")
+            return 0
+        scheduler.register_intraday(ROOT, wanted)
+    except scheduler.ScheduleError as exc:
+        print(f"[실패] {exc}", file=sys.stderr)
+        return 1
+    print("[완료] 수시 수집 작업을 등록했습니다. 결과는 logs\\intraday_console.log 에 남습니다.")
+    show(scheduler.describe(wanted["task_name"]))
     return 0
 
 

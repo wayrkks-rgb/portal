@@ -35,7 +35,8 @@ class CollectionService:
         self.config = config
         self.manager = manager
 
-    def collect_itsm(self, mode: str | None = None, files: list[Path] | None = None) -> dict[str, Any]:
+    def collect_itsm(self, mode: str | None = None, files: list[Path] | None = None,
+                     *, intraday: bool = False) -> dict[str, Any]:
         started = datetime.now()
         selected_mode = str(mode or self.config.itsm.get("collection_mode", "ORACLE")).upper()
         with self.manager.connect() as conn:
@@ -58,6 +59,16 @@ class CollectionService:
                 snapshot_service = SnapshotService(self.config, repo)
                 records, validation = snapshot_service.normalize_itsm(raw)
                 baseline = self._check_baseline(repo, "ITSM", len(records))
+                if intraday:
+                    skip = self._intraday_skip(
+                        repo, "ITSM", snapshot_service.itsm_checksum(records),
+                        held=("조회 SQL 이 바뀜" if query_changed else
+                              "수집 건수가 기준 미만" if baseline.get("critical") else ""),
+                    )
+                    if skip:
+                        return self._intraday_skipped(repo, run_id, "ITSM", skip, len(records), selected_mode,
+                                                      {"collector": collector_metadata, "validation": validation,
+                                                       "baseline": baseline})
                 snapshot_id = snapshot_service.save_itsm_snapshot(run_id, records, datetime.now())
                 if query_changed:
                     diff = {
@@ -87,6 +98,7 @@ class CollectionService:
                         "collector": collector_metadata,
                         "query_changed": query_changed,
                         "baseline": baseline,
+                        "trigger": "INTRADAY" if intraday else "DAILY",
                     },
                 )
                 return {
@@ -114,7 +126,8 @@ class CollectionService:
                 conn.commit()
                 raise
 
-    def collect_vcenter(self, mode: str | None = None, files: list[Path] | None = None) -> dict[str, Any]:
+    def collect_vcenter(self, mode: str | None = None, files: list[Path] | None = None,
+                        *, intraday: bool = False) -> dict[str, Any]:
         """Collect vCenter inventory through PowerCLI and compare with the prior snapshot.
 
         The SQLite source identifier remains RVTOOLS for backward compatibility with
@@ -152,6 +165,17 @@ class CollectionService:
                     if failed_scopes or baseline.get("warning") or baseline.get("critical")
                     else "SUCCESS"
                 )
+                if intraday:
+                    skip = self._intraday_skip(
+                        repo, "RVTOOLS", snapshot_service.rv_checksum(records),
+                        held=("일부 통합기 수집 실패: " + ", ".join(failed_scopes) if failed_scopes else
+                              "수집 건수가 기준 미만" if baseline.get("critical") else ""),
+                    )
+                    if skip:
+                        return self._intraday_skipped(repo, run_id, "RVTOOLS", skip, len(records), selected_mode,
+                                                      {"collector": collector_metadata, "validation": validation,
+                                                       "baseline": baseline}, status=status,
+                                                      success_scopes=success_scopes, failed_scopes=failed_scopes)
                 snapshot_id = snapshot_service.save_rv_snapshot(run_id, records, datetime.now(), status)
                 if baseline.get("critical"):
                     diff = {
@@ -173,6 +197,7 @@ class CollectionService:
                         "validation": validation,
                         "baseline": baseline,
                         "mode": selected_mode,
+                        "trigger": "INTRADAY" if intraday else "DAILY",
                     },
                 )
                 return {
@@ -203,6 +228,69 @@ class CollectionService:
     def collect_rvtools(self, mode: str | None = None, files: list[Path] | None = None) -> dict[str, Any]:
         """Backward-compatible alias. New code should call collect_vcenter()."""
         return self.collect_vcenter(mode=mode, files=files)
+
+    # ── 수시 수집 ─────────────────────────────────────────────────────────
+    @staticmethod
+    def _intraday_skip(repo: AssetRepository, source: str, checksum: str, *, held: str = "") -> str:
+        """수시 수집에서 이번 결과를 저장하지 않을 이유. 저장하면 빈 문자열.
+
+        - 바뀐 것이 없으면 저장하지 않는다. 매번 전체 사본을 쌓으면 DB 가 하루 수백 MB 씩 큰다.
+        - 일부 통합기 실패 · 건수 이상 · 조회 SQL 변경이면 저장하지 않는다. 다음 수시 수집이나
+          07:00 일일 배치가 다시 본다(수시 수집 때문에 가짜 삭제 · 생성이 생기면 안 된다).
+        """
+        if held:
+            return f"보류: {held}"
+        latest = repo.latest_snapshot(source)
+        if latest is not None and str(latest["checksum"]) == checksum:
+            return "바뀐 것 없음"
+        return ""
+
+    @staticmethod
+    def _intraday_skipped(
+        repo: AssetRepository, run_id: int, source: str, reason: str, count: int, mode: str,
+        metadata: dict[str, Any], *, status: str = "SUCCESS",
+        success_scopes: list[str] | None = None, failed_scopes: list[str] | None = None,
+    ) -> dict[str, Any]:
+        latest = repo.latest_snapshot(source)
+        repo.finish_collection_run(
+            run_id, status, count, datetime.now().isoformat(),
+            success_scopes if success_scopes is not None else ["ALL"], failed_scopes or [],
+            metadata={**metadata, "mode": mode, "trigger": "INTRADAY", "stored": False, "skip_reason": reason},
+        )
+        return {
+            "status": status, "mode": mode, "run_id": run_id, "count": count, "stored": False,
+            "skip_reason": reason, "snapshot_id": int(latest["id"]) if latest is not None else None,
+            "baseline": metadata.get("baseline") or {},
+        }
+
+    def run_intraday(self) -> dict[str, Any]:
+        """업무 시간 중 30분 · 1시간마다 도는 수시 수집. 인벤토리(vCenter · ITSM)와 비교만 한다.
+
+        자원사용률 · 일일 배치 기록은 하루 단위이므로 07:00 일일 배치에만 둔다.
+        """
+        itsm_mode = str(self.config.itsm.get("collection_mode", "ORACLE")).upper()
+        rv_mode = str(self.config.rvtools.get("collection_mode", "POWERCLI")).upper()
+        results: dict[str, Any] = {"trigger": "INTRADAY"}
+        for key, collect, mode in (("vcenter", self.collect_vcenter, rv_mode), ("itsm", self.collect_itsm, itsm_mode)):
+            try:
+                results[key] = collect(mode=mode, intraday=True)
+            except Exception as exc:  # 한쪽이 실패해도 다른 쪽은 돈다.
+                LOGGER.exception("수시 수집 실패: %s", key)
+                results[key] = {"status": "FAILED", "error": str(exc), "stored": False}
+        stored = [key for key in ("vcenter", "itsm") if results[key].get("status") != "FAILED"
+                  and results[key].get("stored", True)]
+        ok = all(results[key].get("status") in {"SUCCESS", "PARTIAL_SUCCESS"} for key in ("vcenter", "itsm"))
+        if stored and ok and results["itsm"].get("snapshot_id") and results["vcenter"].get("snapshot_id"):
+            with self.manager.connect() as conn:
+                results["reconciliation"] = ReconciliationService(self.config, AssetRepository(conn)).reconcile(
+                    int(results["itsm"]["snapshot_id"]), int(results["vcenter"]["snapshot_id"])
+                )
+        else:
+            results["reconciliation"] = {"status": "SKIPPED", "reason": "저장한 것이 없거나 한쪽 수집이 실패했습니다."}
+        results["stored"] = stored
+        results["status"] = ("FAILED" if all(results[k].get("status") == "FAILED" for k in ("vcenter", "itsm"))
+                             else "SUCCESS" if ok else "PARTIAL_SUCCESS")
+        return results
 
     def run_daily(self, demo: bool = False) -> dict[str, Any]:
         """Run the 07:00 automation pipeline and persist one parent batch record."""

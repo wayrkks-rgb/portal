@@ -19,6 +19,20 @@ from asset_sync.services.collection_service import CollectionService
 LOGGER = logging.getLogger(__name__)
 
 
+def _thin_intraday(config, manager) -> None:
+    """오래된 수시 수집 스냅샷을 그날 마지막 것만 남기고 정리한다. 실패해도 배치는 성공이다."""
+    from asset_sync.repositories import AssetRepository
+    from asset_sync.services.retention_service import RetentionService
+
+    try:
+        with manager.connect() as conn:
+            report = RetentionService(config, AssetRepository(conn)).thin_intraday()
+        if any(report["deleted"].values()):
+            LOGGER.info("수시 수집 스냅샷 정리: %s (기준일 %s 이전)", report["deleted"], report["cutoff"])
+    except Exception:
+        LOGGER.exception("수시 수집 스냅샷 정리 실패(다음 배치에서 다시 합니다)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="ITSM/vCenter PowerCLI daily collection")
     parser.add_argument("--demo", action="store_true", help="Oracle/vCenter 접속 없이 synthetic 데이터로 전체 흐름 검증")
@@ -45,6 +59,7 @@ def main() -> None:
     try:
         with DatabaseLock(manager, "daily_batch", lease_seconds=lock_seconds):
             result = CollectionService(config, manager).run_daily(demo=args.demo)
+            _thin_intraday(config, manager)
     except LockNotAcquired as exc:
         print(json.dumps({"status": "SKIPPED", "reason": str(exc)}, ensure_ascii=False))
         raise SystemExit(0)
