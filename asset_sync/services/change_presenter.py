@@ -25,6 +25,9 @@ from ..normalization.code_maps import (
 CODE_LABELS: dict[str, str] = {
     **ASSET_STATUS, **SERVER_CATEGORY, **ENVIRONMENT,
     **ASSET_CATEGORY, **NETWORK, **OS_CODES,
+    # vCenter 전원 상태. 수집 경로에 따라 대소문자가 다르게 온다.
+    "poweredOn": "켜짐", "poweredOff": "꺼짐", "suspended": "일시중지",
+    "poweredon": "켜짐", "poweredoff": "꺼짐",
 }
 
 #: 필드명을 화면 문구로. 여기 없는 필드는 원래 이름을 그대로 쓴다.
@@ -72,15 +75,14 @@ def label_field(name: Any) -> str:
 
 
 def label_value(value: Any) -> str:
-    """코드값이면 라벨을, 아니면 원래 값을 돌려준다.
+    """코드값이면 이름을, 아니면 원래 값을 돌려준다.
 
-    라벨을 붙일 때 코드도 같이 남긴다. 담당자가 ITSM 화면에서 코드로 찾는 일이 있다.
+    화면 · 보고에는 이름만 쓴다(운영 · 미사용 …). 코드(CMSTA020)는 읽는 사람에게 뜻이 없다.
     """
     if value is None:
         return ""
     text = str(value).strip()
-    label = CODE_LABELS.get(text)
-    return f"{label}({text})" if label else text
+    return CODE_LABELS.get(text) or text
 
 
 def _memory_display(value: Any, unit: str) -> str:

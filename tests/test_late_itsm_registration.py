@@ -282,3 +282,129 @@ def test_period_movements_list_who_and_when(tmp_path, monkeypatch) -> None:
         assert client.get("/api/asset-sync/asset-movements?start=x&end=y").status_code == 400
     finally:
         reset_database_manager()
+
+
+# ── 문구는 코드가 아니라 상태 이름, 대수 그대로인 삭제엔 그날 · 지금 상태 ─────────────
+def test_notes_use_status_names_and_explain_unchanged_counts(portal) -> None:
+    config, manager = portal
+    unused = asset("CM098", "oldsrv", "10.0.0.98", "CMSTA020")       # 처음부터 미사용
+    put_itsm(config, manager, PREV_END, BASE_ASSETS + [unused])
+    put_vcenter(config, manager, PREV_END, BASE_VMS + [OLD_VM])
+    put_itsm(config, manager, DAY_VM, BASE_ASSETS + [unused])
+    put_vcenter(config, manager, DAY_VM, BASE_VMS)                  # VM 만 사라짐
+    row = day_digest(config, manager, DAY_VM)["rows"][0]
+    text = row["reflection_note"] + row["count_note"]
+    assert "CMSTA" not in text
+    assert row["reflection_note"].startswith("ITSM 상태가 이미 미사용입니다")
+    assert "이날도 ITSM 상태가 미사용" in row["count_note"] and "무관" in row["count_note"]
+    assert row["itsm_status_label"] == "미사용"
+
+
+def test_was_operating_that_day_and_changed_later(portal) -> None:
+    config, manager = portal
+    setup_removal(config, manager, [])                               # 10/05 VM 사라짐, ITSM 운영
+    put_itsm(config, manager, DAY_ITSM, BASE_ASSETS + [asset("CM098", "oldsrv", "10.0.0.98", "CMSTA020")])
+    put_vcenter(config, manager, DAY_ITSM, BASE_VMS)
+    note = day_digest(config, manager, DAY_VM)["rows"][0]["count_note"]
+    assert "이날 ITSM 은 운영" in note and "지금 ITSM 상태는 미사용" in note
+
+
+@pytest.mark.parametrize("codes, kind, effect", [
+    (["CMSTA010"], "REMOVED", -1),                 # 운영만 셀 때: 운영 → 대기 는 삭제
+    (["CMSTA010", "CMSTA050"], "CHANGED", 0),      # 운영+대기 를 셀 때: 그냥 변경
+])
+def test_the_chosen_basis_decides_created_and_removed(portal, codes, kind, effect) -> None:
+    config, manager = portal
+    put_itsm(config, manager, PREV_END, BASE_ASSETS)
+    put_itsm(config, manager, DAY_ITSM, BASE_ASSETS[:2] + [asset("CM003", "srv3", "10.0.0.3", "CMSTA050")])
+    row = day_digest(config, manager, DAY_ITSM, codes)["rows"][0]
+    assert (row["kind"], row["count_effect"]) == (kind, effect)
+    assert "대기" in row["summary"] and "CMSTA" not in row["summary"]
+
+
+# ── 변동 내역은 ITSM 기준, vCenter 에만 생긴 것은 [ITSM 미반영] 으로 ─────────────
+def test_pending_list_is_rejudged_each_time(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ASSET_APP_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLASK_SECRET_KEY", "t")
+    monkeypatch.chdir(tmp_path)
+    from application import create_app
+    from application.db import database_manager, reset_database_manager
+    from asset_sync.config import load_config
+
+    reset_database_manager()
+    try:
+        app = create_app()
+        config, manager = load_config(), database_manager()
+        put_itsm(config, manager, PREV_END, BASE_ASSETS)
+        put_vcenter(config, manager, PREV_END, BASE_VMS)
+        put_itsm(config, manager, DAY_VM, BASE_ASSETS)
+        put_vcenter(config, manager, DAY_VM, BASE_VMS + [NEW_VM])      # vCenter 에만 생김
+        client = app.test_client()
+        with client.session_transaction() as session:
+            session["user"] = {"id": 1, "username": "hong", "role": "user", "name": "홍"}
+
+        moves = client.get("/api/asset-sync/server-status?month=2026-10").get_json()["movements"]
+        assert moves["created"]["total"] == 0                          # 대수(ITSM) 엔 아직 없음
+        assert [(p["hostname"], p["kind"], p["itsm_action"]) for p in moves["pending"]] == [
+            ("newsrv", "CREATED", "ITSM 에 자산 등록")]
+
+        # ITSM 에 넣으면 다음 조회에서 미반영이 사라지고 [생성] 으로 옮겨 간다.
+        put_itsm(config, manager, DAY_ITSM, BASE_ASSETS + [asset("CM099", "newsrv", "10.0.0.99")])
+        moves = client.get("/api/asset-sync/server-status?month=2026-10").get_json()["movements"]
+        assert moves["pending"] == []
+        assert [i["cm_id"] for i in moves["created"]["items"]] == ["CM099"]
+    finally:
+        reset_database_manager()
+
+
+# ── 필수 정보 누락 ──────────────────────────────────────────────────────
+def test_missing_required_info_is_flagged_everywhere(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ASSET_APP_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLASK_SECRET_KEY", "t")
+    monkeypatch.chdir(tmp_path)
+    from application import create_app
+    from application.db import database_manager, reset_database_manager
+    from asset_sync.config import load_config
+
+    reset_database_manager()
+    try:
+        app = create_app()
+        config, manager = load_config(), database_manager()
+        bad = asset("CM099", "newsrv", "10.0.0.99")
+        bad["raw"].update({"CM_OS_VERSION": "", "CM_EOL_DT": "미정"})   # 버전 없음, EOSL 못 읽음
+        no_eosl = asset("CM098", "eolsrv", "10.0.0.98")
+        no_eosl["raw"]["CM_EOL_DT"] = ""
+        put_itsm(config, manager, PREV_END, BASE_ASSETS)
+        put_itsm(config, manager, DAY_ITSM, BASE_ASSETS + [bad, no_eosl])
+        client = app.test_client()
+        with client.session_transaction() as session:
+            session["user"] = {"id": 1, "username": "hong", "role": "user", "name": "홍"}
+
+        body = client.get("/api/asset-sync/server-status?month=2026-10").get_json()
+        missing = body["missing"]
+        assert missing["count"] == 2 and missing["checked"] == 5
+        by_id = {item["cm_id"]: item["missing"] for item in missing["items"]}
+        assert by_id["CM098"] == ["EOSL"]
+        assert "EOSL 형식(미정)" in by_id["CM099"]
+        assert missing["by_field"]["EOSL"] == 1 and missing["by_field"]["EOSL 형식"] == 1
+        # 변동 내역 줄에도 같은 표시
+        created = {i["cm_id"]: i for i in body["movements"]["created"]["items"]}
+        assert created["CM098"]["missing"] == ["EOSL"]
+        # 일간 줄에도
+        digest = client.get(f"/api/asset-sync/change-digest?start={DAY_ITSM}T00:00:00&end={DAY_ITSM}T23:59:59").get_json()
+        rows = {r["itsm_cm_id"]: r for r in digest["rows"]}
+        assert rows["CM098"]["missing"] == ["EOSL"] and digest["summary"]["missing_required"] == 2
+        # Excel 시트
+        export = client.get("/api/asset-sync/server-status/export?month=2026-10&section=missing")
+        assert export.status_code == 200, export.get_data(as_text=True)[:300]
+    finally:
+        reset_database_manager()
+
+
+def test_a_deleted_record_is_not_flagged_as_missing_os(portal) -> None:
+    """지워진 자산은 원본(raw)만 남는다. OS 코드를 이름으로 못 바꾸면 'OS 누락' 으로 잘못 뜬다."""
+    config, manager = portal
+    setup_removal(config, manager, [])
+    put_itsm(config, manager, DAY_ITSM, BASE_ASSETS)          # CM098 레코드 삭제
+    row = day_digest(config, manager, DAY_ITSM)["rows"][0]
+    assert row["count_effect"] == -1 and row["missing"] == []

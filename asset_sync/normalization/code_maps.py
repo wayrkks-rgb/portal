@@ -11,3 +11,11 @@ OS_CODES = {
     "CMCIOSCD070": "AIX", "CMCIOSCD080": "ESXi", "CMCIOSCD090": "XenOS",
     "CMCIOSCD100": "NUTANIX", "CMCIOSCD110": "Appliance", "CMCIOSCD120": "기타",
 }
+
+
+def status_name(code: object) -> str:
+    """ITSM 상태 코드 → 이름(운영 · 대기 · 미사용 · 매각/폐기). 모르는 코드는 그대로."""
+    text = str(code or "").strip()
+    if not text:
+        return "상태 없음"
+    return ASSET_STATUS.get(text, text)

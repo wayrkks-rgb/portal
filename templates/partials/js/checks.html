@@ -112,6 +112,7 @@ function renderDailyDigest() {
       ? `${dailyDigestDate} · 서버 ${Number(summary.servers || 0).toLocaleString()}대`
         + ` · 줄 ${rows.length.toLocaleString()}개 (표시 ${shown.length.toLocaleString()})`
         + (summary.itsm_pending ? ` · ITSM 미반영 ${Number(summary.itsm_pending).toLocaleString()}건` : '')
+        + (summary.missing_required ? ` · ⚠ 필수 정보 누락 ${Number(summary.missing_required).toLocaleString()}대` : '')
         + digestCountBasis(summary)
         + (summary.trivial_hidden ? ` · 경미 ${Number(summary.trivial_hidden).toLocaleString()}건 숨김` : '')
       : `${dailyDigestDate} 에 바뀐 서버가 없습니다.`);
@@ -481,6 +482,7 @@ function renderWeeklyDetail() {
       ? `서버 ${Number(summary.servers || 0).toLocaleString()}대 · 줄 ${rows.length.toLocaleString()}개`
         + ` (표시 ${shown.length.toLocaleString()})`
         + (summary.itsm_pending ? ` · ITSM 미반영 ${Number(summary.itsm_pending).toLocaleString()}건` : '')
+        + (summary.missing_required ? ` · ⚠ 필수 정보 누락 ${Number(summary.missing_required).toLocaleString()}대` : '')
         + digestCountBasis(summary)
         + (summary.trivial_hidden ? ` · 경미 ${Number(summary.trivial_hidden).toLocaleString()}건 숨김` : '')
       : '이 주에 바뀐 서버가 없습니다.';

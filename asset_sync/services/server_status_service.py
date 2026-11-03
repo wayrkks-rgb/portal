@@ -142,7 +142,7 @@ class ServerStatusService:
     MOVEMENT_FIELDS = (
         "cm_id", "hostname", "primary_ip", "service_name", "location",
         "os_group", "os_family", "os_version", "eosl_year", "eosl_value",
-        "status_code", "physical",
+        "status_code", "physical", "missing",
     )
 
     def movements(self, snapshot_id: int, previous_snapshot_id: int) -> dict[str, Any]:
@@ -168,6 +168,34 @@ class ServerStatusService:
             "before_total": len(before_by_id),
             "after_total": len(current_by_id),
             "net": len(created) - len(removed),
+        }
+
+    def missing_report(self, snapshot_id: int) -> dict[str, Any]:
+        """집계 대상 중 EOSL 현황 조사에 필요한 정보가 빈 자산.
+
+        EOSL · OS 가 비면 EOSL 표에서 '미사용' · '기타' 로 조용히 빠진다. 표만 보면 그게
+        실제 값인지 누락인지 알 수 없으므로 따로 모아 보여준다.
+        """
+        included, _ = self.select(snapshot_id)
+        by_field: Counter[str] = Counter()
+        items: list[dict[str, Any]] = []
+        for item in included:
+            missing = item.get("missing") or []
+            if not missing:
+                continue
+            for name in missing:
+                by_field["EOSL 형식" if name.startswith("EOSL 형식") else name] += 1
+            row = {key: item.get(key) for key in self.MOVEMENT_FIELDS}
+            row["kind"] = "물리서버" if item.get("physical") else "논리서버"
+            row["status_label"] = ASSET_STATUS.get(str(item.get("status_code") or ""), "")
+            items.append(row)
+        items.sort(key=lambda r: (-len(r["missing"]), str(r.get("hostname") or ""), str(r.get("cm_id") or "")))
+        return {
+            "checked": len(included),
+            "count": len(items),
+            "by_field": dict(by_field.most_common()),
+            "required": dict(self.criteria.public()["required_fields"]),
+            "items": items,
         }
 
     @staticmethod

@@ -29,6 +29,7 @@ SECTIONS: dict[str, str] = {
     "server_physical": "서버현황(물리)",
     "movements": "자산 변동 내역",
     "eosl": "EOSL 현황",
+    "missing": "필수 정보 누락",
     "excluded": "제외한 대상",
     "assets": "자산 목록",
 }
@@ -160,13 +161,54 @@ class MonthlyCheckExportService:
                 ("물리/논리", "kind"), ("OS 묶음", "os_group"), ("OS", "os_family"),
                 ("OS 버전", "os_version"), ("EOSL 연도", "eosl_year"),
                 ("EOSL 원본값", "eosl_value"), ("상태", "status_label"), ("사유", "reason"),
+                ("필수 정보 누락", "missing"),
             ]
             sheet.append([name for name, _ in columns])
             _style_header(sheet, sheet.max_row)
             for label, item in items:
                 sheet.append([
-                    label if key is None else item.get(key) for _, key in columns
+                    label if key is None else (
+                        ", ".join(item.get(key) or []) if key == "missing" else item.get(key))
+                    for _, key in columns
                 ])
+        # 대수에 아직 안 들어간 것. vCenter 에서만 바뀌고 ITSM 에 반영되지 않았다.
+        pending = movements.get("pending") or []
+        if pending:
+            sheet.append([])
+            sheet.append([f"ITSM 미반영 {len(pending)}건 (vCenter 에만 바뀌어 서버 대수에 아직 안 들어감)"])
+            sheet.cell(row=sheet.max_row, column=1).font = Font(bold=True, size=12)
+            heads = [("날짜", "day"), ("vCenter", "kind_label"), ("호스트명", "hostname"), ("VM", "vm_name"),
+                     ("업무명", "service_name"), ("IP", "primary_ip"), ("통합기", "vcenter_label"),
+                     ("ITSM 자산번호", "itsm_cm_id"), ("ITSM 상태", "itsm_status_label"),
+                     ("해야 할 일", "itsm_action"), ("판정", "reflection_note")]
+            sheet.append([name for name, _ in heads])
+            _style_header(sheet, sheet.max_row)
+            for row in pending:
+                sheet.append([row.get(key) for _, key in heads])
+        _fit(sheet)
+
+    def _write_missing(self, sheet: Any) -> None:
+        """EOSL 현황 조사에 필요한 값이 빈 자산. ITSM 담당자에게 채워 달라고 넘길 목록이다."""
+        data = self.status.get("missing") or {}
+        sheet["A1"] = "필수 정보 누락 자산"
+        sheet["A1"].font = Font(bold=True, size=13)
+        by_field = " · ".join(f"{k} {v}대" for k, v in (data.get("by_field") or {}).items())
+        sheet["A2"] = (f"기준일 {self.status.get('as_of') or '-'} · 집계 대상 {int(data.get('checked') or 0):,}대 중"
+                       f" {int(data.get('count') or 0):,}대" + (f" · {by_field}" if by_field else ""))
+        sheet["A2"].font = Font(size=10, color="666666")
+        sheet.append([])
+        columns = [
+            ("비어 있는 정보", "missing"), ("자산번호", "cm_id"), ("호스트명", "hostname"), ("IP", "primary_ip"),
+            ("업무명", "service_name"), ("위치", "location"), ("물리/논리", "kind"), ("OS", "os_family"),
+            ("OS 버전", "os_version"), ("EOSL 값", "eosl_value"), ("상태", "status_label"),
+        ]
+        sheet.append([name for name, _ in columns])
+        _style_header(sheet, sheet.max_row)
+        for item in data.get("items") or []:
+            sheet.append([
+                ", ".join(item.get(key) or []) if key == "missing" else item.get(key)
+                for _, key in columns
+            ])
         _fit(sheet)
 
     def _write_eosl(self, sheet: Any) -> None:
@@ -434,6 +476,8 @@ class MonthlyCheckExportService:
                 self._write_movements(sheet)
             elif name == "eosl":
                 self._write_eosl(sheet)
+            elif name == "missing":
+                self._write_missing(sheet)
             elif name == "excluded":
                 excluded = (self.status.get("excluded") or {}).get("items") or []
                 self._write_assets(

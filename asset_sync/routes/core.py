@@ -128,15 +128,31 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         return render_template("main.html", user=session["user"], page="monthly_check")
 
     def _annotate(conn: Any, movements: dict[str, Any], start: date, end: date) -> None:
-        """변동 대상에 일간 보고의 날짜 · 사유를 붙인다. 실패해도 목록은 그대로 낸다."""
+        """변동 내역에 일간 보고의 날짜 · 사유를 붙이고, ITSM 미반영 목록을 더한다.
+
+        변동 내역(생성 · 삭제)은 **ITSM 기준**이다. ITSM 에 반영돼야 들어온다. vCenter 에만
+        생기거나 사라진 서버는 대수에 아직 안 들어갔으므로 따로 '미반영' 으로 보여준다.
+        반영 여부는 조회할 때마다 지금 ITSM 과 다시 견준다 -- 그사이 ITSM 에 넣었으면
+        목록에서 빠진다. 실패해도 대수 화면은 막지 않는다.
+        """
+        from ..services.change_digest_service import NOT_REFLECTED
+
         try:
             rows = ChangeDigestService(cfg, AssetRepository(conn), scope_for(conn)).digest(
-                f"{start.isoformat()}T00:00:00", f"{end.isoformat()}T23:59:59", source="ITSM",
+                f"{start.isoformat()}T00:00:00", f"{end.isoformat()}T23:59:59",
             )["rows"]
         except Exception:  # 날짜 · 사유는 덧붙이는 정보다. 대수 화면을 막지 않는다.
             LOGGER.exception("변동 내역에 날짜 · 사유를 붙이지 못했습니다")
             return
         ServerStatusService.annotate_movements(movements, rows)
+        keep = ("day", "kind", "kind_label", "hostname", "vm_name", "primary_ip", "service_name",
+                "itsm_cm_id", "itsm_status_label", "vcenter_label", "reflection_note", "itsm_action",
+                "missing", "vm_key")
+        movements["pending"] = [
+            {key: row.get(key) for key in keep}
+            for row in rows
+            if row.get("reflection") == NOT_REFLECTED and row.get("kind") in ("CREATED", "REMOVED")
+        ]
 
     def _monthly_status(conn: Any, base_day: date) -> tuple[dict[str, Any] | None, Any]:
         """월간 점검 결과 한 벌. 화면과 엑셀이 **같은 계산**을 쓰도록 여기서만 만든다.
@@ -155,6 +171,7 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         previous_id = int(previous["id"]) if previous else None
         result = service.status(int(current["id"]), previous_id)
         result["eosl"] = service.eosl(int(current["id"]), previous_snapshot_id=previous_id)
+        result["missing"] = service.missing_report(int(current["id"]))
         if previous:
             result["movements"] = service.movements(int(current["id"]), int(previous["id"]))
             _annotate(conn, result["movements"], base_day.replace(day=1), base_day)

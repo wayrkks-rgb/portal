@@ -104,7 +104,7 @@ function assetBrowserRow(row) {
   }
   return `<td class="mono">${syncEscape(row.cm_id || '-')}</td>
     <td>${syncEscape(row.service_name || '-')}</td>
-    <td>${syncEscape(row.hostname || '-')}</td>
+    <td>${syncEscape(row.hostname || '-')}${missingBadge(row.missing)}</td>
     <td class="mono">${syncEscape(row.primary_ip || '-')}</td>
     <td>${syncEscape(row.location || '-')}<div class="text-xs text-muted">${syncEscape(row.place || '')}</div></td>
     <td>${row.physical ? '물리' : '논리'}</td>

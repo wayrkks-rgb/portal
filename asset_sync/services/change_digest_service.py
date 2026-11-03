@@ -28,6 +28,7 @@ import json
 from collections import defaultdict
 from typing import Any
 
+from ..normalization.code_maps import status_name
 from . import asset_matching
 from .asset_scope import AssetScope, load_itsm_records
 from .change_presenter import present
@@ -119,6 +120,9 @@ class _Context:
         # identity_map 은 cm_id → vm_uuid 로 들고 있다. 여기서는 그 반대가 필요하다.
         self.by_vm_uuid = {v: k for k, v in repo.identity_maps().items()}
         self.names = DisplayNameService(repo).resolver(service.config)
+        #: 날짜 → {자산번호: 그날 ITSM 상태}. VM 이 사라진 날 ITSM 이 어땠는지 볼 때 쓴다.
+        self.day_status: dict[str, dict[str, str]] = {}
+        self.repo = repo
         self.tolerance = int(service.config.matching.get("memory_tolerance_mb", 1))
 
 
@@ -167,6 +171,7 @@ class ChangeDigestService:
                 "rows": len(rows),
                 "trivial_hidden": sum(int(r.get("trivial_count") or 0) for r in rows),
                 "itsm_pending": len(pending),
+                "missing_required": sum(1 for r in rows if r.get("missing")),
                 # 일간에서 본 증감이 월간 대수에 얼마나 반영되는지. 세 숫자가
                 # 일·주·월을 한 몸으로 읽게 해 준다.
                 "count_added": sum(1 for value in effects if value > 0),
@@ -408,6 +413,8 @@ class ChangeDigestService:
             "itsm_cpu": itsm_cpu,
             "itsm_memory_mb": itsm_memory,
             "itsm_status": asset.get("status_code") or raw.get("CM_STA_CD"),
+            "itsm_status_label": (status_name(asset.get("status_code") or raw.get("CM_STA_CD"))
+                                  if (asset or raw) else None),
             "vm_name": vm.get("vm_name"),
             "vm_cpu": _as_int(vm.get("cpus")),
             "vm_memory_mb": _as_int(vm.get("memory_mb")),
@@ -420,6 +427,8 @@ class ChangeDigestService:
             "cluster_label": context.names.name("CLUSTER", cluster, vcenter_id) or None,
             "_itsm_record": asset,
             "_vm_record": vm,
+            # EOSL 조사에 필요한 ITSM 값이 빈 것. 일 · 주 · 월이 같은 판정을 쓴다.
+            "missing": self.scope.describe_itsm(asset)["missing"] if raw else [],
         })
 
     def _vm_for_asset(self, asset: dict[str, Any], context: _Context) -> dict[str, Any] | None:
@@ -480,10 +489,33 @@ class ChangeDigestService:
         if current is None:
             return (f"ITSM 자산({cm_id})과 짝이었고, 지금은 ITSM 에서도 지워졌습니다. 서버 대수는"
                     " 이날이 아니라 ITSM 에서 지운 날 반영됩니다.")
-        if not self.scope.counts_status(current.get("status_code")):
-            return (f"ITSM 자산({cm_id})은 지금 집계 기준({basis}) 밖입니다. 서버 대수는 이날이 아니라"
-                    " ITSM 상태를 바꾼 날 반영됩니다.")
-        return "vCenter 에서만 사라졌습니다. ITSM 상태를 바꾸는 날 서버 대수가 줄어듭니다."
+        now_code = current.get("status_code")
+        if not self.scope.counts_status(now_code):
+            then_code = self._status_on(context, str(row.get("day") or ""), cm_id)
+            now_text = f"지금 ITSM 상태는 {status_name(now_code)}입니다"
+            if then_code and not self.scope.counts_status(then_code):
+                return (f"이날도 ITSM 상태가 {status_name(then_code)}여서 집계 기준({basis}) 밖이었습니다."
+                        f" 서버 대수와 무관합니다({now_text}).")
+            if then_code:
+                return (f"이날 ITSM 은 {status_name(then_code)}(집계 기준 안)였고 {now_text}."
+                        " 대수는 이날이 아니라 ITSM 상태를 바꾼 날 하나 줄었습니다.")
+            return (f"{now_text}(집계 기준 {basis} 밖). 대수는 이날이 아니라 ITSM 상태가 바뀐 날"
+                    " 반영됩니다.")
+        return (f"vCenter 에서만 사라졌습니다. ITSM 은 아직 {status_name(now_code)}라, ITSM 상태를 바꾸는 날"
+                " 서버 대수가 줄어듭니다.")
+
+    def _status_on(self, context: _Context, day: str, cm_id: str) -> str:
+        """그날(그날까지 마지막) ITSM 스냅샷에서의 상태 코드. 없으면 빈 문자열."""
+        if not day:
+            return ""
+        if day not in context.day_status:
+            snapshot = context.repo.snapshot_on_or_before("ITSM", day[:10])
+            rows = context.repo.conn.execute(
+                "SELECT cm_id, status_code FROM itsm_asset_snapshot WHERE snapshot_id=?",
+                (int(snapshot["id"]),),
+            ).fetchall() if snapshot else []
+            context.day_status[day] = {str(r["cm_id"]): str(r["status_code"] or "") for r in rows}
+        return context.day_status[day].get(cm_id, "")
 
     # ── ITSM 에 반영됐나 ────────────────────────────────────────────────
     def _attach_reflection(self, row: dict[str, Any], context: _Context) -> None:
@@ -525,18 +557,18 @@ class ChangeDigestService:
                         "ITSM 에 자산 등록")
             if not self.scope.counts_status(status):
                 return (NOT_REFLECTED,
-                        f"ITSM 자산은 있으나 상태가 집계 기준({basis})이 아닙니다({status}).",
+                        f"ITSM 자산은 있으나 상태가 {status_name(status)}라 집계 기준({basis}) 밖입니다.",
                         "ITSM 상태를 운영으로")
-            return (REFLECTED, f"ITSM 에 집계 기준({basis}) 자산으로 있습니다.", "")
+            return (REFLECTED, f"ITSM 에 {status_name(status)} 상태로 있습니다(집계 기준 {basis} 안).", "")
 
         if "RV_REMOVED" in types:
             if asset is None:
                 return (REFLECTED, "ITSM 에도 없습니다.", "")
             if self.scope.counts_status(status):
                 return (NOT_REFLECTED,
-                        f"vCenter 에서 사라졌는데 ITSM 은 아직 집계 기준({basis}) 상태입니다.",
+                        f"vCenter 에서 사라졌는데 ITSM 은 아직 {status_name(status)}입니다(집계 기준 {basis} 안).",
                         "ITSM 상태를 미사용·폐기로")
-            return (REFLECTED, f"ITSM 상태가 이미 {status} 입니다.", "")
+            return (REFLECTED, f"ITSM 상태가 이미 {status_name(status)}입니다(집계 기준 {basis} 밖).", "")
 
         if asset is None:
             return (NO_ASSET, "짝이 되는 ITSM 자산을 찾지 못했습니다.",
@@ -621,8 +653,9 @@ class ChangeDigestService:
         elif "RV_NEW" in types:
             # 짝이 되는 ITSM 자산이 '지금' 있어도, 그 자산이 이날 있었다는 뜻은 아니다
             # (며칠 뒤 등록했을 수 있다). 대수는 ITSM 쪽 등록·운영 전환일에 잡힌다.
-            note = (f"ITSM 자산({row['itsm_cm_id']})과 짝이 맞습니다. 운영 대수는 VM 이 생긴 날이 아니라"
-                    " ITSM 에 등록 · 운영 전환된 날 잡힙니다." if row.get("itsm_cm_id")
+            note = (f"ITSM 자산({row['itsm_cm_id']}, 지금 {status_name(row.get('itsm_status'))})과 짝이 맞습니다."
+                    " 운영 대수는 VM 이 생긴 날이 아니라 ITSM 에 등록 · 운영 전환된 날 잡힙니다."
+                    if row.get("itsm_cm_id")
                     else "ITSM 에 자산이 없어 서버 대수에 들어가지 않습니다. 등록하는 날 대수에 잡힙니다.")
         elif "RV_REMOVED" in types:
             note = self._removed_vm_note(row, context, basis)
@@ -684,22 +717,21 @@ class ChangeDigestService:
         decision = self.scope.decide_itsm(record)
         # '제외 포함 보기' 에서는 included 가 늘 참이다. 사유로 판단한다.
         counted = bool(decision.included and not decision.reason)
-        return counted, self.scope.reason_label(decision.reason) if decision.reason else ""
+        return counted, (self.scope.reason_label(decision.reason, raw.get("CM_STA_CD"))
+                         if decision.reason else "")
 
     @staticmethod
     def _status_move(before: dict[str, Any], after: dict[str, Any]) -> str:
         old, new = before.get("CM_STA_CD"), after.get("CM_STA_CD")
         if not old or not new or old == new:
             return ""
-        from ..normalization.code_maps import ASSET_STATUS
-
-        return f" (상태 {ASSET_STATUS.get(old, old)} → {ASSET_STATUS.get(new, new)})"
+        return f" (상태 {status_name(old)} → {status_name(new)})"
 
     # ── 엑셀 ────────────────────────────────────────────────────────────
     EXPORT_COLUMNS = (
         ("일시", "detected_at"), ("구분", "kind_label"), ("서버", "label"),
         ("호스트명", "hostname"), ("IP", "primary_ip"),
-        ("ITSM 자산번호", "itsm_cm_id"), ("ITSM 상태", "itsm_status"),
+        ("ITSM 자산번호", "itsm_cm_id"), ("ITSM 상태", "itsm_status_label"), ("필수 정보 누락", "missing"),
         ("ITSM CPU", "itsm_cpu"), ("ITSM 메모리(MB)", "itsm_memory_mb"),
         ("VM 이름", "vm_name"), ("VM CPU", "vm_cpu"), ("VM 메모리(MB)", "vm_memory_mb"),
         ("통합기", "vcenter_label"), ("클러스터", "cluster_label"), ("ESXi", "esxi_label"),
@@ -737,7 +769,10 @@ class ChangeDigestService:
             cell.fill = PatternFill("solid", fgColor="ED7D31")
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         for row in rows:
-            sheet.append([row.get(key) for _, key in cls.EXPORT_COLUMNS])
+            sheet.append([
+                ", ".join(map(str, value)) if isinstance(value, list) else value
+                for value in (row.get(key) for _, key in cls.EXPORT_COLUMNS)
+            ])
         sheet.freeze_panes = sheet.cell(head + 1, 1).coordinate
         last = sheet.cell(head, len(cls.EXPORT_COLUMNS)).column_letter
         sheet.auto_filter.ref = f"A{head}:{last}{sheet.max_row}"

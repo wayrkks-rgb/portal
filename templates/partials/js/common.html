@@ -406,9 +406,13 @@ function digestReflection(row) {
 function digestTableInner(rows, options) {
   const opts = options || {};
   const withKind = opts.withKind !== false;
-  const cols = withKind ? 7 : 6;
+  const cols = withKind ? 10 : 9;
+  // 월간 변동 내역처럼 호스트명 · 업무명 · IP 를 칸으로 나눈다. 한 칸에 몰아 두면
+  // 어떤 서버인지 읽기 어렵다.
   return `<thead><tr>
-    <th>일시</th>${withKind ? '<th>구분</th>' : ''}<th>서버</th><th>지금 값 · 통합기</th>
+    <th>일시</th>${withKind ? '<th>구분</th>' : ''}<th style="white-space:nowrap">호스트명</th>
+    <th style="white-space:nowrap">업무명</th><th>IP</th>
+    <th style="white-space:nowrap">자산번호 · 상태</th><th>지금 값 · 통합기</th>
     <th>바뀐 내용</th><th>ITSM 반영</th><th>서버 대수</th>
   </tr></thead><tbody>${
     rows.length ? rows.map(row => `<tr>
@@ -416,9 +420,11 @@ function digestTableInner(rows, options) {
         <div class="text-xs text-muted">${syncEscape((row.sources || []).map(
           s => s === 'ITSM' ? 'ITSM' : 'vCenter').join(' + ') || '-')}</div></td>
       ${withKind ? `<td class="${DIGEST_KIND_CLASS[row.kind] || ''}"><strong>${syncEscape(row.kind_label)}</strong></td>` : ''}
-      <td><strong>${syncEscape(row.label || '-')}</strong>
-        <div class="text-xs text-muted">${syncEscape([row.hostname, row.primary_ip].filter(Boolean).join(' · ') || '-')}</div>
-        <div class="text-xs mono text-muted">${syncEscape(row.itsm_cm_id || row.vm_key || '-')}</div></td>
+      <td style="min-width:110px"><strong>${syncEscape(row.hostname || row.vm_name || '-')}</strong>${missingBadge(row.missing)}</td>
+      <td>${syncEscape(row.service_name || '-')}</td>
+      <td class="text-xs mono" style="white-space:nowrap">${syncEscape(row.primary_ip || '-')}</td>
+      <td class="text-xs" style="white-space:nowrap"><span class="mono">${syncEscape(row.itsm_cm_id || row.vm_key || '-')}</span>
+        ${row.itsm_status_label ? `<div class="text-muted">${syncEscape(row.itsm_status_label)}</div>` : ''}</td>
       <td>${digestFacts(row)}</td>
       <td class="text-xs">${digestFields(row)}</td>
       <td class="text-xs">${digestReflection(row)}</td>
@@ -427,6 +433,13 @@ function digestTableInner(rows, options) {
       : `<tr><td colspan="${cols}" style="text-align:center" class="text-muted">${
         syncEscape(opts.empty || '이 기간에 바뀐 서버가 없습니다.')}</td></tr>`
   }</tbody>`;
+}
+
+// EOSL 현황 조사에 필요한 ITSM 값이 빈 것. 일 · 주 · 월 화면이 같은 표시를 쓴다.
+function missingBadge(missing) {
+  if (!missing || !missing.length) return '';
+  return `<div class="text-xs text-warning" title="ITSM 에 채워야 EOSL · OS 현황에 바르게 잡힙니다">`
+    + `⚠ 필수 정보 누락: ${syncEscape(missing.join(', '))}</div>`;
 }
 
 // rows 를 그대로 받아 그린다. 걸러내기는 부르는 쪽이 한다.
@@ -492,6 +505,35 @@ function movementEquation(movements, previousLabel) {
     − <span class="text-error"><strong>삭제 ${removed.toLocaleString()}대</strong></span></div>`;
 }
 
+// vCenter 에서는 생기거나 사라졌는데 ITSM 에 아직 반영 안 된 서버. 대수에 안 들어갔다.
+function movementPendingSection(pending, term) {
+  if (!Array.isArray(pending)) return '';
+  const rows = pending.filter(row => !term || [row.hostname, row.vm_name, row.primary_ip, row.service_name,
+    row.itsm_cm_id, row.vcenter_label].some(v => String(v || '').toLowerCase().includes(term)));
+  const body = rows.map(row => `<tr>
+      <td class="mono text-xs">${syncEscape(row.day || '-')}</td>
+      <td class="${row.kind === 'CREATED' ? 'text-success' : 'text-error'}"><strong>${syncEscape(row.kind_label || row.kind)}</strong></td>
+      <td><strong>${syncEscape(row.hostname || row.vm_name || '-')}</strong>
+        ${row.vm_name && row.vm_name !== row.hostname ? `<div class="text-xs text-muted">VM ${syncEscape(row.vm_name)}</div>` : ''}${missingBadge(row.missing)}</td>
+      <td>${syncEscape(row.service_name || '-')}</td>
+      <td class="text-xs mono">${syncEscape(row.primary_ip || '-')}</td>
+      <td class="text-xs">${syncEscape(row.vcenter_label || '-')}</td>
+      <td class="text-xs">${syncEscape(row.itsm_cm_id ? `${row.itsm_cm_id} · ${row.itsm_status_label || ''}` : '자산 없음')}</td>
+      <td class="text-xs text-warning"><strong>${syncEscape(row.itsm_action || '-')}</strong></td>
+      <td class="text-xs text-muted">${syncEscape(row.reflection_note || '')}</td>
+    </tr>`).join('');
+  return `<div style="margin-bottom:18px">
+    <div class="flex items-center gap-2" style="margin-bottom:6px">
+      <span class="text-warning" style="font-weight:700;font-size:15px">[ITSM 미반영] 총 ${pending.length.toLocaleString()}건</span>
+      <span class="text-xs text-muted">vCenter 에만 바뀌어 서버 대수에 아직 안 들어간 서버 · ITSM 에 반영하면 위 [생성] · [삭제] 로 옮겨 갑니다</span>
+    </div>
+    ${rows.length ? `<div class="table-wrap" style="max-height:360px;overflow:auto"><table class="table-sticky"><thead><tr>
+        <th>날짜</th><th>vCenter</th><th>호스트명</th><th>업무명</th><th>IP</th><th>통합기</th><th>ITSM</th><th>해야 할 일</th><th>지금 ITSM 과 견준 결과</th>
+      </tr></thead><tbody>${body}</tbody></table></div>`
+      : `<div class="text-xs text-muted" style="padding:6px 2px">${pending.length ? '검색 결과가 없습니다.' : '없음 — vCenter 의 생성 · 삭제가 모두 ITSM 에 반영됐습니다.'}</div>`}
+  </div>`;
+}
+
 function renderAssetMovementGroups(holderId, movements, options) {
   const holder = document.getElementById(holderId);
   if (!holder) return {shown: 0, total: 0};
@@ -509,7 +551,7 @@ function renderAssetMovementGroups(holderId, movements, options) {
     const body = items.map(item => `<tr>
         <td class="mono text-xs">${syncEscape(item.changed_on || '-')}</td>
         <td class="text-xs mono">${syncEscape(item.cm_id || '-')}</td>
-        <td><strong>${syncEscape(item.hostname || '(호스트명 없음)')}</strong></td>
+        <td><strong>${syncEscape(item.hostname || '(호스트명 없음)')}</strong>${missingBadge(item.missing)}</td>
         <td class="text-xs mono">${syncEscape(item.primary_ip || '-')}</td>
         <td>${syncEscape(item.service_name || '-')}</td>
         <td>${syncEscape(item.location || '-')}</td>
@@ -534,7 +576,10 @@ function renderAssetMovementGroups(holderId, movements, options) {
         : `<div class="text-xs text-muted" style="padding:6px 2px">${all.length ? '검색 결과가 없습니다.' : '없음'}</div>`}
     </div>`;
   }).join('');
-  holder.innerHTML = movementEquation(movements, opts.previousLabel) + sections;
+  holder.innerHTML = movementEquation(movements, opts.previousLabel)
+    + `<div class="text-xs text-muted" style="margin:-6px 0 12px">[생성] · [삭제] 는 <strong>ITSM 에 반영된 것</strong>만입니다(서버 대수 기준).
+       vCenter 에만 생기거나 사라진 서버는 아래 [ITSM 미반영] 에 있고, 볼 때마다 지금 ITSM 과 다시 견줍니다.</div>`
+    + sections + movementPendingSection(movements.pending, term);
   return {shown: shownCount, total: totalCount};
 }
 

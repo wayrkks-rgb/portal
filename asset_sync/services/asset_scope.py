@@ -26,7 +26,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 
-from ..normalization.code_maps import ASSET_STATUS, PLACE
+from ..normalization.code_maps import ASSET_STATUS, OS_CODES, PLACE
 from datetime import datetime
 from typing import Any, Iterable, Mapping
 
@@ -137,6 +137,21 @@ def _blank(value: Any) -> bool:
     return text == "" or text.lower() in {"-", "nan", "none", "null"}
 
 
+#: EOSL 현황 조사에 꼭 있어야 하는 ITSM 정보. 키 → 화면 이름.
+#: 설정 ``server_status.required_fields`` 로 줄이거나 순서를 바꿀 수 있다.
+REQUIRED_FIELD_LABELS: dict[str, str] = {
+    "hostname": "호스트명",
+    "primary_ip": "IP",
+    "service_name": "업무명",
+    "os_family": "OS",
+    "os_version": "OS 버전",
+    "eosl": "EOSL",
+    "place": "위치",
+    "server_category": "물리/논리",
+}
+DEFAULT_REQUIRED_FIELDS: tuple[str, ...] = tuple(REQUIRED_FIELD_LABELS)
+
+
 @dataclass(frozen=True)
 class Criteria:
     """집계 기준. 설정에서 만들고, 화면에 그대로 보여준다."""
@@ -152,6 +167,7 @@ class Criteria:
     active_status: tuple[str, ...] = ACTIVE_STATUS
     os_groups: tuple[tuple[str, tuple[str, ...]], ...] = DEFAULT_OS_GROUPS
     system_vm_patterns: tuple[str, ...] = DEFAULT_SYSTEM_VM_PATTERNS
+    required_fields: tuple[str, ...] = DEFAULT_REQUIRED_FIELDS
 
     @property
     def place_codes(self) -> dict[str, str]:
@@ -169,6 +185,7 @@ class Criteria:
             "active_status": list(self.active_status),
             "os_groups": {name: list(tokens) for name, tokens in self.os_groups},
             "system_vm_patterns": list(self.system_vm_patterns),
+            "required_fields": {key: REQUIRED_FIELD_LABELS[key] for key in self.required_fields},
             "other_group": OTHER_GROUP,
             "physical_code": PHYSICAL_CATEGORY,
             "logical_code": LOGICAL_CATEGORY,
@@ -221,7 +238,46 @@ def criteria_from(config: Any) -> Criteria:
             str(token) for token in
             (section.get("system_vm_patterns") or DEFAULT_SYSTEM_VM_PATTERNS)
         ),
+        required_fields=_configured_required(section.get("required_fields")),
     )
+
+
+def _configured_required(value: Any) -> tuple[str, ...]:
+    """모르는 키는 빼고 경고한다. 비우면 기본 목록을 쓴다."""
+    if not value:
+        return DEFAULT_REQUIRED_FIELDS
+    keys = [str(item).strip() for item in value if str(item).strip()]
+    unknown = [key for key in keys if key not in REQUIRED_FIELD_LABELS]
+    if unknown:
+        LOGGER.warning("server_status.required_fields 에 모르는 항목이 있어 뺍니다: %s (가능: %s)",
+                       unknown, list(REQUIRED_FIELD_LABELS))
+    return tuple(dict.fromkeys(key for key in keys if key in REQUIRED_FIELD_LABELS)) or DEFAULT_REQUIRED_FIELDS
+
+
+def _os_name(code: Any) -> str | None:
+    text = str(code or "").strip()
+    return OS_CODES.get(text, text) or None
+
+
+def missing_required(item: Mapping[str, Any], criteria: "Criteria") -> list[str]:
+    """``describe_itsm`` 한 건에서 비어 있는 필수 정보의 이름. EOSL 은 형식도 본다."""
+    raw = item.get("raw") or {}
+    missing: list[str] = []
+    for key in criteria.required_fields:
+        if key == "eosl":
+            if _blank(item.get("eosl_value")):
+                missing.append("EOSL")
+            elif item.get("eosl_year") is None:
+                missing.append(f"EOSL 형식({item.get('eosl_value')})")
+        elif key == "place":
+            if _blank(item.get("place")):
+                missing.append(REQUIRED_FIELD_LABELS[key])
+        elif key == "server_category":
+            if _blank(raw.get("CM_SVR_CAT_CD")):
+                missing.append(REQUIRED_FIELD_LABELS[key])
+        elif _blank(item.get(key)):
+            missing.append(REQUIRED_FIELD_LABELS[key])
+    return missing
 
 
 def _configured_basis(value: Any) -> tuple[str, ...]:
@@ -396,11 +452,19 @@ class AssetScope:
         codes = list(self.basis_codes)
         return f"{column} IN ({','.join('?' * len(codes))})", codes
 
-    def reason_label(self, reason: str | None) -> str:
-        """제외 사유를 지금 기준에 맞춰 적는다. STATUS 는 기준이 바뀌면 문구도 바뀐다."""
+    def reason_label(self, reason: str | None, status: Any = None) -> str:
+        """제외 사유를 지금 기준에 맞춰 적는다. STATUS 는 기준이 바뀌면 문구도 바뀐다.
+
+        ``status`` 를 주면 지금 상태 이름을 함께 적는다. '기준 밖' 만으로는 미사용인지
+        폐기인지 알 수 없다.
+        """
         if not reason:
             return ""
         if reason == "STATUS":
+            if status:
+                from ..normalization.code_maps import status_name
+
+                return f"상태가 {status_name(status)}라 집계 기준({self.basis_label}) 밖"
             return f"상태가 집계 기준({self.basis_label})이 아님"
         return REASON_LABELS.get(reason, reason)
 
@@ -515,8 +579,9 @@ class AssetScope:
             "location": location(raw, self.criteria),
             "physical": is_physical(record),
             "status_code": record.get("status_code"),
-            "os_family": record.get("os_family"),
-            "os_group": os_group(record.get("os_family"), self.criteria),
+            # 지워진 자산처럼 원본(raw)만 있을 때는 OS 코드를 이름으로 바꿔 쓴다.
+            "os_family": record.get("os_family") or _os_name(raw.get("CM_OS")),
+            "os_group": os_group(record.get("os_family") or _os_name(raw.get("CM_OS")), self.criteria),
             "os_version": record.get("os_version") or raw.get("CM_OS_VERSION"),
             "cpu_cores": record.get("cpu_cores"),
             "memory_mb": record.get("memory_mb"),
@@ -534,6 +599,9 @@ class AssetScope:
             name: raw.get(name) for name in self.criteria.exclude_when_all_empty
         }
         item["place"] = raw.get(self.criteria.location_field)
+        item["raw"] = raw
+        # EOSL 현황 조사에 필요한 값이 비었는가. 일 · 주 · 월 화면이 같은 판정을 쓴다.
+        item["missing"] = missing_required(item, self.criteria)
         # ITSM 원본 전체. 엑셀로 뽑을 때 전 컬럼이 필요하다. 화면에 내려보낼 때는
         # 응답이 커지므로 떼어낸다(라우트에서 pop).
         item["raw"] = dict(raw)

@@ -20,10 +20,11 @@ ITSM_ASSET = {
 }
 
 
-def test_a_code_becomes_a_label_but_keeps_the_code():
-    """담당자가 ITSM 화면에서 코드로 찾는 일이 있어 코드도 남긴다."""
-    assert label_value("CMSTA060") == "매각/폐기(CMSTA060)"
-    assert label_value("CMSVRCATCD020") == "논리(CMSVRCATCD020)"
+def test_a_code_becomes_its_name_only():
+    """보고 화면에는 이름만 쓴다. 코드(CMSTA020)는 읽는 사람에게 뜻이 없다."""
+    assert label_value("CMSTA060") == "매각/폐기"
+    assert label_value("CMSTA020") == "미사용"
+    assert label_value("CMSVRCATCD020") == "논리"
 
 
 def test_a_plain_value_is_left_alone():
@@ -47,8 +48,8 @@ def test_a_created_asset_is_summarised_not_dumped():
     summary = event["new_display"]
     assert "PRD-PAY-01" in summary
     assert "10.20.30.40" in summary
-    assert "운영(CMSTA010)" in summary
-    assert "논리(CMSVRCATCD020)" in summary
+    assert "운영" in summary and "CMSTA010" not in summary
+    assert "논리" in summary and "CMSVRCATCD" not in summary
     assert len(summary) < 200, f"요약이 아니라 덤프다: {summary}"
     # 원본은 사라지지 않고 접힌 자리에 남는다.
     assert event["detail"]["new"]["CM_DESCR"] == ITSM_ASSET["CM_DESCR"]
@@ -73,8 +74,8 @@ def test_a_status_change_shows_both_labels():
         "field_name": "CM_STA_CD", "old_value": "CMSTA010", "new_value": "CMSTA060",
     })
     assert event["field_label"] == "상태"
-    assert event["old_display"] == "운영(CMSTA010)"
-    assert event["new_display"] == "매각/폐기(CMSTA060)"
+    assert event["old_display"] == "운영"
+    assert event["new_display"] == "매각/폐기"
 
 
 def test_memory_values_carry_their_unit():

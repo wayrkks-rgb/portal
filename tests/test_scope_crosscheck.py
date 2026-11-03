@@ -390,16 +390,13 @@ def test_the_export_puts_the_verdict_and_the_action_first(portal, tmp_path: Path
     assert "확인 필요" in str(sheet["A2"].value)
 
 
-def test_the_card_is_wired_on_the_screen() -> None:
-    """양쪽 id 가 맞아야 그려진다. 한쪽만 고치면 조용히 빈 화면이 된다."""
+def test_the_card_is_off_the_monthly_screen() -> None:
+    """월간 화면에서 뺐다(쓸모없이 자리만 차지한다는 요청). API 는 남겨 둔다."""
     page = (ROOT / "templates" / "pages" / "monthly_check.html").read_text(encoding="utf-8")
     script = (ROOT / "templates" / "partials" / "js" / "monthly_check.html").read_text(
         encoding="utf-8")
-    for element_id in ("crosscheck-table", "crosscheck-counts", "crosscheck-alert",
-                       "crosscheck-basis", "crosscheck-search", "crosscheck-all"):
-        assert f'id="{element_id}"' in page, f"{element_id} 가 화면에 없다"
-        assert f"'{element_id}'" in script, f"{element_id} 를 스크립트가 안 찾는다"
-    assert "/api/asset-sync/scope-crosscheck" in script
-    assert "loadCrossCheck" in script
-    # 그 자리에서 자산을 뺄 수 있어야 한다.
-    assert "excludeOneAsset" in script.split("function renderCrossCheckAgain", 1)[1]
+    assert "crosscheck-table" not in page and "확인이 필요한 서버" not in page
+    assert "loadCrossCheck" not in script
+    # 그 자리는 필수 정보 누락 자산이 쓴다.
+    for element_id in ("monthly-missing-summary", "monthly-missing-table", "monthly-missing-search"):
+        assert f'id="{element_id}"' in page and f"'{element_id}'" in script
