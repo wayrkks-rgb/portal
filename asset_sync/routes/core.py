@@ -128,14 +128,12 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         return render_template("main.html", user=session["user"], page="monthly_check")
 
     def _annotate(conn: Any, movements: dict[str, Any], start: date, end: date) -> None:
-        """변동 내역에 일간 보고의 날짜 · 사유를 붙이고, ITSM 미반영 목록을 더한다.
+        """변동 내역에 일간 보고의 날짜 · 사유를 붙이고, vCenter 쪽 생성 · 삭제를 합친다.
 
-        변동 내역(생성 · 삭제)은 **ITSM 기준**이다. ITSM 에 반영돼야 들어온다. vCenter 에만
-        생기거나 사라진 서버는 대수에 아직 안 들어갔으므로 따로 '미반영' 으로 보여준다.
-        반영 여부는 조회할 때마다 지금 ITSM 과 다시 견준다 -- 그사이 ITSM 에 넣었으면
-        목록에서 빠진다. 실패해도 대수 화면은 막지 않는다.
+        대수(순증감)는 **ITSM 기준**이다. vCenter 에서만 생기거나 사라진 서버(전원 켜짐/꺼짐
+        포함)는 목록에는 들어가되 대수는 그대로이고, 'ITSM 반영' 칸에 반영 여부가 적힌다.
+        반영 여부는 조회할 때마다 지금 ITSM 과 다시 견준다. 실패해도 대수 화면은 막지 않는다.
         """
-        from ..services.change_digest_service import NOT_REFLECTED
 
         try:
             rows = ChangeDigestService(cfg, AssetRepository(conn), scope_for(conn)).digest(
@@ -145,14 +143,7 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
             LOGGER.exception("변동 내역에 날짜 · 사유를 붙이지 못했습니다")
             return
         ServerStatusService.annotate_movements(movements, rows)
-        keep = ("day", "kind", "kind_label", "hostname", "vm_name", "primary_ip", "service_name",
-                "itsm_cm_id", "itsm_status_label", "vcenter_label", "reflection_note", "itsm_action",
-                "missing", "vm_key")
-        movements["pending"] = [
-            {key: row.get(key) for key in keep}
-            for row in rows
-            if row.get("reflection") == NOT_REFLECTED and row.get("kind") in ("CREATED", "REMOVED")
-        ]
+        ServerStatusService.merge_vcenter_movements(movements, rows)
 
     def _monthly_status(conn: Any, base_day: date) -> tuple[dict[str, Any] | None, Any]:
         """월간 점검 결과 한 벌. 화면과 엑셀이 **같은 계산**을 쓰도록 여기서만 만든다.
@@ -234,6 +225,24 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
             "previous_as_of": previous["snapshot_date"],
             "basis": service.scope.basis(),
         })
+
+    @bp.route("/api/asset-sync/asset-trace")
+    @login_required
+    def asset_trace() -> Any:
+        """서버 한 대가 기간 동안 왜 생성 · 삭제로 잡혔(안 잡혔)는지. 근거와 결론을 함께 준다."""
+        from ..services.asset_trace_service import AssetTraceService
+
+        query = str(request.args.get("q") or "").strip()
+        if not query:
+            return jsonify({"error": "자산번호 · 호스트명 · IP 중 하나를 적어 주세요."}), 400
+        try:
+            end = date.fromisoformat(str(request.args.get("end") or date.today().isoformat())[:10])
+            start = date.fromisoformat(str(request.args.get("start") or end.replace(day=1).isoformat())[:10])
+        except ValueError:
+            return jsonify({"error": "start · end 는 YYYY-MM-DD 로 주세요."}), 400
+        with manager.connect() as conn:
+            result = AssetTraceService(cfg, AssetRepository(conn), scope_for(conn)).trace(query, start, end)
+        return jsonify(result)
 
     @bp.route("/api/asset-sync/vm-power-now", methods=["POST"])
     @login_required
@@ -368,6 +377,7 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
                 start, end,
                 source=(source.upper() if source else None),
                 include_trivial=trivial,
+                fold="period" if request.args.get("fold") == "period" else "day",
             )
         if pending:
             from ..services.change_digest_service import NOT_REFLECTED
@@ -390,7 +400,8 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         pending = str(request.args.get("pending") or "").strip().lower() in {"1", "true"}
         with manager.connect() as conn:
             service = ChangeDigestService(cfg, AssetRepository(conn), scope_for(conn))
-            result = service.digest(start, end, source=(source.upper() if source else None))
+            result = service.digest(start, end, source=(source.upper() if source else None),
+                                    fold="period" if request.args.get("fold") == "period" else "day")
         rows = result["rows"]
         if pending:
             from ..services.change_digest_service import NOT_REFLECTED

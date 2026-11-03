@@ -43,6 +43,13 @@
         <span id="weekly-movement-basis"></span>
       </div>
       <div id="weekly-movement-items"></div>
+      <div class="flex gap-2 items-center" style="margin-top:12px;flex-wrap:wrap">
+        <strong class="text-sm">🔍 판정 추적</strong>
+        <input class="form-input" id="weekly-trace-q" style="width:240px" placeholder="자산번호 · 호스트명 · IP"
+               onkeyup="if(event.key==='Enter') traceWeeklyAsset()">
+        <button class="btn btn-secondary btn-sm" onclick="traceWeeklyAsset()">왜 이렇게 잡혔나</button>
+      </div>
+      <div id="weekly-trace-result"></div>
     </div>
 
     <div class="card">

@@ -144,16 +144,20 @@ class MonthlyCheckExportService:
         # 자산에서 빼야 하는지 둬야 하는지 판단할 수 없다. 한 줄씩 붙인다.
         items = [
             (label, item)
-            for key, label in (("created", "신규 생성"), ("removed", "삭제"))
+            for key, label in (("created", "신규 생성"), ("changed", "변경(처음=끝)"), ("removed", "삭제"))
             for item in ((movements.get(key) or {}).get("items") or [])
         ]
         if items:
             sheet.append([])
             sheet.append(["변동 대상 목록"])
             sheet.cell(row=sheet.max_row, column=1).font = Font(bold=True, size=12)
+            created_n = (movements.get("created") or {})
+            removed_n = (movements.get("removed") or {})
             sheet.append([
-                f"순증감 {int(movements.get('net') or 0):+d}대 = 생성 {int((movements.get('created') or {}).get('total') or 0)}대"
-                f" - 삭제 {int((movements.get('removed') or {}).get('total') or 0)}대"
+                f"순증감 {int(movements.get('net') or 0):+d}대 = 생성 {int(created_n.get('counted', created_n.get('total')) or 0)}대"
+                f" - 삭제 {int(removed_n.get('counted', removed_n.get('total')) or 0)}대 (대수 반영분)"
+                f" · vCenter 만 바뀜(대수 그대로): 생성 {int(created_n.get('vcenter_only') or 0)}건"
+                f" · 삭제 {int(removed_n.get('vcenter_only') or 0)}건"
             ])
             columns = [
                 ("구분", None), ("날짜", "changed_on"), ("자산번호", "cm_id"), ("호스트명", "hostname"),
@@ -161,6 +165,7 @@ class MonthlyCheckExportService:
                 ("물리/논리", "kind"), ("OS 묶음", "os_group"), ("OS", "os_family"),
                 ("OS 버전", "os_version"), ("EOSL 연도", "eosl_year"),
                 ("EOSL 원본값", "eosl_value"), ("상태", "status_label"), ("사유", "reason"),
+                ("ITSM 반영", "itsm_reflection"), ("해야 할 일", "itsm_action"), ("대수 반영", "count_effect"),
                 ("필수 정보 누락", "missing"),
             ]
             sheet.append([name for name, _ in columns])
@@ -171,20 +176,6 @@ class MonthlyCheckExportService:
                         ", ".join(item.get(key) or []) if key == "missing" else item.get(key))
                     for _, key in columns
                 ])
-        # 대수에 아직 안 들어간 것. vCenter 에서만 바뀌고 ITSM 에 반영되지 않았다.
-        pending = movements.get("pending") or []
-        if pending:
-            sheet.append([])
-            sheet.append([f"ITSM 미반영 {len(pending)}건 (vCenter 에만 바뀌어 서버 대수에 아직 안 들어감)"])
-            sheet.cell(row=sheet.max_row, column=1).font = Font(bold=True, size=12)
-            heads = [("날짜", "day"), ("vCenter", "kind_label"), ("호스트명", "hostname"), ("VM", "vm_name"),
-                     ("업무명", "service_name"), ("IP", "primary_ip"), ("통합기", "vcenter_label"),
-                     ("ITSM 자산번호", "itsm_cm_id"), ("ITSM 상태", "itsm_status_label"),
-                     ("해야 할 일", "itsm_action"), ("판정", "reflection_note")]
-            sheet.append([name for name, _ in heads])
-            _style_header(sheet, sheet.max_row)
-            for row in pending:
-                sheet.append([row.get(key) for _, key in heads])
         _fit(sheet)
 
     def _write_missing(self, sheet: Any) -> None:

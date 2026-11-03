@@ -207,6 +207,14 @@
           <span class="text-xs text-muted" id="monthly-movement-shown"></span>
         </div>
         <div id="monthly-movement-items"></div>
+        <div class="flex gap-2 items-center" style="margin-top:12px;flex-wrap:wrap">
+          <strong class="text-sm">🔍 판정 추적</strong>
+          <input class="form-input" id="monthly-trace-q" style="width:240px" placeholder="자산번호 · 호스트명 · IP"
+                 onkeyup="if(event.key==='Enter') traceMonthlyAsset()">
+          <button class="btn btn-secondary btn-sm" onclick="traceMonthlyAsset()">왜 이렇게 잡혔나</button>
+          <span class="text-xs text-muted">목록에 없거나 예상과 다르게 잡힌 서버의 날짜별 ITSM 상태 · 집계 여부 · 수집 결과를 봅니다</span>
+        </div>
+        <div id="monthly-trace-result"></div>
       </div>
 
       <div class="card">

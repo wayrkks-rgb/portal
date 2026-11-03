@@ -128,6 +128,14 @@ function renderMovements(movements) {
 // 빼야 하는지 둬야 하는지 판단할 수 없다. 한 줄씩 적는다.
 let monthlyMovements = null;
 
+// 그 달 1일 ~ 말일(이번 달이면 오늘)로 추적한다.
+function traceMonthlyAsset() {
+  const month = (document.getElementById('monthly-month') || {}).value || new Date().toISOString().slice(0, 7);
+  const [y, m] = month.split('-').map(Number);
+  const last = new Date(y, m, 0).getDate();
+  runAssetTrace('monthly-trace-q', 'monthly-trace-result', `${month}-01`, `${month}-${String(last).padStart(2, '0')}`);
+}
+
 function renderMovementItems() {
   const term = ((document.getElementById('monthly-movement-search') || {}).value || '').trim();
   // [생성] · [삭제] 로 나눠 그린다. 주간 화면과 같은 함수를 쓴다(common.html).

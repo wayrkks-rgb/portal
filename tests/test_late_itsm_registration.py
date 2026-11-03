@@ -344,15 +344,17 @@ def test_pending_list_is_rejudged_each_time(tmp_path, monkeypatch) -> None:
             session["user"] = {"id": 1, "username": "hong", "role": "user", "name": "홍"}
 
         moves = client.get("/api/asset-sync/server-status?month=2026-10").get_json()["movements"]
-        assert moves["created"]["total"] == 0                          # 대수(ITSM) 엔 아직 없음
-        assert [(p["hostname"], p["kind"], p["itsm_action"]) for p in moves["pending"]] == [
-            ("newsrv", "CREATED", "ITSM 에 자산 등록")]
+        assert moves["net"] == 0 and moves["created"]["counted"] == 0     # 대수(ITSM) 엔 아직 없음
+        [row] = moves["created"]["items"]                                # 그래도 [생성] 에는 보인다
+        assert (row["hostname"], row["source"], row["count_effect"]) == ("newsrv", "VCENTER", 0)
+        assert row["itsm_reflection"] == "ITSM 미반영" and row["itsm_action"] == "ITSM 에 자산 등록"
 
-        # ITSM 에 넣으면 다음 조회에서 미반영이 사라지고 [생성] 으로 옮겨 간다.
+        # ITSM 에 넣으면 다음 조회에서 같은 줄이 'ITSM 반영됨 · 대수 +1' 이 된다(한 줄로 합쳐짐).
         put_itsm(config, manager, DAY_ITSM, BASE_ASSETS + [asset("CM099", "newsrv", "10.0.0.99")])
         moves = client.get("/api/asset-sync/server-status?month=2026-10").get_json()["movements"]
-        assert moves["pending"] == []
-        assert [i["cm_id"] for i in moves["created"]["items"]] == ["CM099"]
+        [row] = moves["created"]["items"]
+        assert (row["cm_id"], row["source"], row["count_effect"]) == ("CM099", "ITSM", 1)
+        assert row["itsm_reflection"] == "ITSM 반영됨" and "VM 생성" in row["vcenter_note"]
     finally:
         reset_database_manager()
 
@@ -408,3 +410,172 @@ def test_a_deleted_record_is_not_flagged_as_missing_os(portal) -> None:
     put_itsm(config, manager, DAY_ITSM, BASE_ASSETS)          # CM098 레코드 삭제
     row = day_digest(config, manager, DAY_ITSM)["rows"][0]
     assert row["count_effect"] == -1 and row["missing"] == []
+
+
+
+# ── vCenter 전원 꺼짐 = 삭제, 켜짐 = 생성 (대수는 그대로, ITSM 반영 여부를 적는다) ─────
+def power_vm(key, host, ip, power):
+    return dict(vm(key, host, ip), power_state=power)
+
+
+def test_power_off_is_a_removal_that_does_not_move_the_count(portal) -> None:
+    config, manager = portal
+    put_itsm(config, manager, PREV_END, BASE_ASSETS)
+    put_vcenter(config, manager, PREV_END, BASE_VMS)
+    put_itsm(config, manager, DAY_VM, BASE_ASSETS)
+    put_vcenter(config, manager, DAY_VM, [power_vm("u1", "srv1", "10.0.0.1", "poweroff")] + BASE_VMS[1:])
+    row = day_digest(config, manager, DAY_VM)["rows"][0]
+    assert (row["kind"], row["count_effect"]) == ("REMOVED", 0)
+    assert row["reflection"] == NOT_REFLECTED and "ITSM 상태를 미사용으로" in row["itsm_action"]
+    assert "전원이 꺼졌습니다" in row["count_note"] and "그대로" in row["count_note"]
+
+    put_vcenter(config, manager, DAY_ITSM, BASE_VMS)                # 다시 켜짐
+    on = day_digest(config, manager, DAY_ITSM)["rows"][0]
+    assert (on["kind"], on["count_effect"], on["reflection"]) == ("CREATED", 0, REFLECTED)
+
+
+def test_weekly_and_monthly_list_power_changes_and_net_out_toggles(portal) -> None:
+    """꺼졌다 다시 켜진 VM 은 기간 처음과 끝이 같으므로 목록에서 뺀다. 꺼진 채 끝난 것만 [삭제]."""
+    from asset_sync.services.server_status_service import ServerStatusService as S
+
+    config, manager = portal
+    put_itsm(config, manager, PREV_END, BASE_ASSETS)
+    put_vcenter(config, manager, PREV_END, BASE_VMS)
+    put_vcenter(config, manager, DAY_VM, [power_vm("u1", "srv1", "10.0.0.1", "poweroff"),
+                                          power_vm("u2", "srv2", "10.0.0.2", "poweroff"), BASE_VMS[2]])
+    put_vcenter(config, manager, DAY_ITSM, [power_vm("u1", "srv1", "10.0.0.1", "poweroff"), BASE_VMS[1], BASE_VMS[2]])
+    with manager.connect() as conn:
+        repo = AssetRepository(conn)
+        rows = ChangeDigestService(config, repo).digest(f"{PREV_END[:8]}01T00:00:00", f"{MONTH_END}T23:59:59")["rows"]
+    moves = {"created": {"total": 0, "items": []}, "removed": {"total": 0, "items": []}, "net": 0}
+    S.merge_vcenter_movements(moves, rows)
+    assert [i["hostname"] for i in moves["removed"]["items"]] == ["srv1"]
+    assert moves["created"]["items"] == [] and moves["vcenter_toggled"] == 1
+    item = moves["removed"]["items"][0]
+    assert item["count_effect"] == 0 and item["itsm_reflection"] == "ITSM 미반영"
+    assert moves["removed"]["counted"] == 0 and moves["removed"]["vcenter_only"] == 1
+
+
+def test_power_off_and_itsm_unused_become_one_counted_row(portal) -> None:
+    from asset_sync.services.server_status_service import ServerStatusService as S
+
+    config, manager = portal
+    put_itsm(config, manager, PREV_END, BASE_ASSETS)
+    put_vcenter(config, manager, PREV_END, BASE_VMS)
+    put_vcenter(config, manager, DAY_VM, [power_vm("u1", "srv1", "10.0.0.1", "poweroff")] + BASE_VMS[1:])
+    put_itsm(config, manager, DAY_ITSM, [asset("CM001", "srv1", "10.0.0.1", "CMSTA020")] + BASE_ASSETS[1:])
+    with manager.connect() as conn:
+        repo = AssetRepository(conn)
+        service = ServerStatusService(config, repo)
+        now = repo.snapshot_on_or_before("ITSM", MONTH_END)
+        before = repo.snapshot_on_or_before("ITSM", PREV_END)
+        moves = service.movements(int(now["id"]), int(before["id"]))
+        rows = ChangeDigestService(config, repo).digest("2026-10-01T00:00:00", f"{MONTH_END}T23:59:59")["rows"]
+    S.annotate_movements(moves, rows)
+    S.merge_vcenter_movements(moves, rows)
+    [row] = moves["removed"]["items"]
+    assert (row["cm_id"], row["count_effect"], row["itsm_reflection"]) == ("CM001", -1, "ITSM 반영됨")
+    assert "전원 켜짐 → 전원 꺼짐" in row["vcenter_note"] and "미사용" in row["reason"]
+
+
+# ── 기간 안에서 서버 1대 = 한 곳 ───────────────────────────────────────
+def week_digest(config, manager, start, end):
+    with manager.connect() as conn:
+        return ChangeDigestService(config, AssetRepository(conn)).digest(
+            f"{start}T00:00:00", f"{end}T23:59:59", fold="period")
+
+
+def test_off_then_on_is_one_change_not_a_create_and_a_remove(portal) -> None:
+    """월요일 켜짐→꺼짐, 화요일 꺼짐→켜짐. 서버 상태는 그대로이므로 [변경] 한 곳에만."""
+    config, manager = portal
+    put_itsm(config, manager, PREV_END, BASE_ASSETS)
+    put_vcenter(config, manager, PREV_END, BASE_VMS)
+    put_vcenter(config, manager, "2026-10-05", [power_vm("u1", "srv1", "10.0.0.1", "poweroff")] + BASE_VMS[1:])
+    put_vcenter(config, manager, "2026-10-06", BASE_VMS)
+    # 하루씩 보면 그날의 사실 그대로: 월 = 삭제, 화 = 생성
+    assert day_digest(config, manager, "2026-10-05")["rows"][0]["kind"] == "REMOVED"
+    assert day_digest(config, manager, "2026-10-06")["rows"][0]["kind"] == "CREATED"
+    # 한 주로 보면 한 줄, 변경
+    week = week_digest(config, manager, "2026-10-05", "2026-10-11")
+    assert [(r["hostname"], r["kind"]) for r in week["rows"]] == [("srv1", "CHANGED")]
+    assert week["counts"]["CREATED"]["count"] == 0 and week["counts"]["REMOVED"]["count"] == 0
+    assert "처음과 끝이 같아" in week["rows"][0]["count_note"]
+
+
+def test_off_and_stays_off_is_only_a_removal(portal) -> None:
+    config, manager = portal
+    put_itsm(config, manager, PREV_END, BASE_ASSETS)
+    put_vcenter(config, manager, PREV_END, BASE_VMS)
+    put_vcenter(config, manager, "2026-10-05", [power_vm("u1", "srv1", "10.0.0.1", "poweroff")] + BASE_VMS[1:])
+    put_vcenter(config, manager, "2026-10-06", [dict(power_vm("u1", "srv1", "10.0.0.1", "poweroff"), cpus=8)] + BASE_VMS[1:])
+    week = week_digest(config, manager, "2026-10-05", "2026-10-11")
+    assert [(r["hostname"], r["kind"], r["count_effect"]) for r in week["rows"]] == [("srv1", "REMOVED", 0)]
+
+
+def test_monthly_lists_each_server_once(portal) -> None:
+    """켜졌다 꺼졌다 한 VM 은 [변경], ITSM 미사용 갔다 운영 복귀도 [변경], 꺼진 채 끝난 VM 은 [삭제]."""
+    from asset_sync.services.server_status_service import ServerStatusService as S
+
+    config, manager = portal
+    put_itsm(config, manager, PREV_END, BASE_ASSETS)
+    put_vcenter(config, manager, PREV_END, BASE_VMS)
+    put_itsm(config, manager, "2026-10-05", [BASE_ASSETS[0], asset("CM002", "srv2", "10.0.0.2", "CMSTA020"), BASE_ASSETS[2]])
+    put_vcenter(config, manager, "2026-10-05", [power_vm("u1", "srv1", "10.0.0.1", "poweroff"), BASE_VMS[1],
+                                                 power_vm("u3", "srv3", "10.0.0.3", "poweroff")])
+    put_itsm(config, manager, "2026-10-06", BASE_ASSETS)
+    put_vcenter(config, manager, "2026-10-06", [BASE_VMS[0], BASE_VMS[1], power_vm("u3", "srv3", "10.0.0.3", "poweroff")])
+    with manager.connect() as conn:
+        repo = AssetRepository(conn)
+        service = ServerStatusService(config, repo)
+        now = repo.snapshot_on_or_before("ITSM", MONTH_END)
+        before = repo.snapshot_on_or_before("ITSM", PREV_END)
+        moves = service.movements(int(now["id"]), int(before["id"]))
+        rows = ChangeDigestService(config, repo).digest("2026-10-01T00:00:00", f"{MONTH_END}T23:59:59")["rows"]
+    S.annotate_movements(moves, rows)
+    S.merge_vcenter_movements(moves, rows)
+    places: dict[str, list[str]] = {}
+    for side in ("created", "removed", "changed"):
+        for item in moves[side]["items"]:
+            places.setdefault(item["hostname"], []).append(side)
+    assert places == {"srv1": ["changed"], "srv2": ["changed"], "srv3": ["removed"]}
+    assert moves["net"] == 0 and moves["removed"]["counted"] == 0
+    srv2 = next(i for i in moves["changed"]["items"] if i["hostname"] == "srv2")
+    assert "처음과 끝이 같음" in srv2["reason"] and "삭제" in srv2["reason"] and "신규" in srv2["reason"]
+
+
+# ── 판정 추적: 왜 삭제로 (안) 잡혔나 ──────────────────────────────────────
+def trace(config, manager, query, start="2026-10-01", end=MONTH_END):
+    from asset_sync.services.asset_trace_service import AssetTraceService
+
+    with manager.connect() as conn:
+        return AssetTraceService(config, AssetRepository(conn)).trace(
+            query, date.fromisoformat(start), date.fromisoformat(end))
+
+
+def test_trace_explains_each_reason(portal) -> None:
+    from asset_sync.services.asset_scope import save_rules
+
+    config, manager = portal
+    put_itsm(config, manager, PREV_END, BASE_ASSETS + [asset("CM097", "oldsrv", "10.0.0.97", "CMSTA020")])
+    put_itsm(config, manager, DAY_ITSM, [asset("CM001", "srv1", "10.0.0.1", "CMSTA020")] + BASE_ASSETS[1:]
+             + [asset("CM097", "oldsrv", "10.0.0.97", "CMSTA020")])
+
+    removed = trace(config, manager, "srv1")["assets"][0]
+    assert removed["verdict"]["level"] == "ok" and "[삭제] −1" in removed["verdict"]["text"]
+    assert [(t["status_label"], t["counted"]) for t in removed["timeline"]] == [("운영", True), ("미사용", False)]
+    assert removed["events"][0]["text"] == "상태 운영 → 미사용"
+
+    already = trace(config, manager, "CM097")["assets"][0]
+    assert "기간 시작 전부터 집계 기준" in already["verdict"]["text"]
+
+    # 10/08 이후 수집이 없는데 11월을 보면: 기간 안에 수집이 없다고 알려 준다.
+    stale = trace(config, manager, "10.0.0.2", "2026-11-01", "2026-11-30")["assets"][0]
+    assert stale["verdict"]["level"] == "error" and "일배치를 확인" in stale["verdict"]["text"]
+
+    with manager.connect() as conn:
+        save_rules(AssetRepository(conn), "ITSM", [{"asset_key": "CM001"}], mode="INCLUDE", reason="테스트")
+    kept = trace(config, manager, "CM001")["assets"][0]
+    assert kept["verdict"]["level"] == "warn" and "수동 '포함'" in kept["verdict"]["text"]
+    assert kept["manual_rule"]["mode"] == "INCLUDE"
+
+    assert trace(config, manager, "nobody")["status"] == "NOT_FOUND"

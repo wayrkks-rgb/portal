@@ -228,6 +228,109 @@ class ServerStatusService:
                 item["reason"] = ServerStatusService._movement_reason(row)
 
     @staticmethod
+    def _period_path(rows: list[dict[str, Any]]) -> str:
+        # 줄의 요약은 이미 '삭제 · 전원 켜짐 → 꺼짐' 처럼 성격으로 시작한다. 그대로 잇는다.
+        return " → ".join(f"{str(r.get('day') or '')[5:]} {r.get('summary') or r.get('kind_label')}" for r in rows)
+
+    @classmethod
+    def merge_vcenter_movements(cls, movements: dict[str, Any] | None, digest_rows: list[dict[str, Any]]) -> None:
+        """기간 동안 **서버 1대 = 한 곳**(생성 · 삭제 · 변경)으로 목록을 만든다.
+
+        - 대수(순증감)는 ITSM 기준이다. ITSM 스냅샷 비교로 늘거나 빠진 서버가 [생성] · [삭제] 의
+          '대수 반영' 줄이다(지금과 같다).
+        - 대수는 그대로인데 vCenter 쪽(생성 · 삭제 · 전원)이 기간 처음보다 끝이 높거나 낮으면 [생성] ·
+          [삭제] 에 '대수 그대로' 로 넣고, ITSM 반영 칸에 지금 ITSM 과 견준 결과를 적는다.
+        - 처음과 끝이 같으면(꺼졌다 다시 켜짐, 미사용 갔다 운영 복귀) 서버 상태는 그대로이므로
+          [변경] 에만 경로를 남긴다. 같은 서버가 [생성] 과 [삭제] 에 동시에 나오지 않는다.
+        """
+        from .change_digest_service import VM_RANK_NAMES, vm_step
+
+        if not movements:
+            return
+        listed: dict[str, str] = {}
+        for side, sign in (("created", 1), ("removed", -1)):
+            for item in (movements.get(side) or {}).get("items") or []:
+                item.setdefault("source", "ITSM")
+                item["count_effect"] = sign
+                item["itsm_reflection"] = "ITSM 반영됨"
+                item["itsm_action"] = ""
+                listed[str(item.get("cm_id") or "")] = side
+        changed = movements.setdefault("changed", {"items": []})
+        changed_items = changed.setdefault("items", [])
+
+        per_server: dict[str, list[dict[str, Any]]] = {}
+        for row in sorted(digest_rows or [], key=lambda r: str(r.get("day") or "")):
+            if vm_step(row) or int(row.get("count_effect") or 0):
+                per_server.setdefault(str(row.get("server_key")), []).append(row)
+
+        for key, rows in per_server.items():
+            last = rows[-1]
+            cm_id = str(next((r.get("itsm_cm_id") for r in reversed(rows) if r.get("itsm_cm_id")), "") or "")
+            steps = [step for step in (vm_step(r) for r in rows) if step]
+            vm_net = (steps[-1][1] - steps[0][0]) if steps else 0
+            effect = sum(int(r.get("count_effect") or 0) for r in rows)
+            vm_text = ""
+            if steps:
+                start_rank, end_rank = steps[0][0], steps[-1][1]
+                if start_rank == 0 and end_rank > 0:
+                    vm_text = "vCenter VM 생성" + (" (전원 꺼짐)" if end_rank == 1 else "")
+                elif end_rank == 0 and start_rank > 0:
+                    vm_text = "vCenter VM 삭제"
+                else:
+                    vm_text = f"vCenter {VM_RANK_NAMES[start_rank]} → {VM_RANK_NAMES[end_rank]}"
+                if len(steps) > 1:
+                    vm_text += f" · 기간 중 {len(steps)}번 바뀜"
+            vm_day = next((r.get("day") for r in reversed(rows) if vm_step(r)), last.get("day"))
+            if cm_id and cm_id in listed:
+                # ITSM 비교로 이미 [생성] · [삭제] 에 있다. 한 곳에만 두고 vCenter 사실만 덧붙인다.
+                twin = next(i for i in movements[listed[cm_id]]["items"] if str(i.get("cm_id") or "") == cm_id)
+                if vm_text:
+                    twin["vcenter_note"] = f"{vm_day} {vm_text}"
+                continue
+            reflected = last.get("reflection") == "REFLECTED"
+            base = {
+                "source": "VCENTER" if steps and not effect else "ITSM",
+                "changed_on": last.get("day"),
+                "cm_id": cm_id or None,
+                "hostname": last.get("hostname") or last.get("vm_name"),
+                "vm_name": last.get("vm_name"),
+                "primary_ip": last.get("primary_ip"),
+                "service_name": last.get("service_name"),
+                "location": None, "kind": "VM" if steps else None,
+                "os_group": last.get("os"), "os_family": None, "os_version": None, "eosl_year": None,
+                "status_label": last.get("itsm_status_label") or ("ITSM 자산 없음" if not cm_id else ""),
+                "vcenter_label": last.get("vcenter_label"),
+                "missing": last.get("missing") or [],
+                "count_effect": 0,
+                "itsm_reflection": last.get("reflection_label") or ("반영됨" if reflected else "ITSM 미반영"),
+                "itsm_reflection_ok": reflected,
+                "itsm_action": last.get("itsm_action") or "",
+                "reflection_note": last.get("reflection_note") or "",
+            }
+            if effect == 0 and vm_net == 0:
+                changed_items.append({**base, "reason": "처음과 끝이 같음 — " + cls._period_path(rows),
+                                      "itsm_reflection": "-", "itsm_action": "", "itsm_reflection_ok": True})
+                continue
+            if effect != 0:
+                # ITSM 비교(대수)와 일간 합이 어긋난 경우. 수동 포함 · 제외를 나중에 바꿨을 때 생긴다.
+                changed_items.append({**base, "reason": "일간 증감과 월간 비교가 다름 — " + cls._period_path(rows)})
+                continue
+            side = "created" if vm_net > 0 else "removed"
+            block = movements.setdefault(side, {"total": 0, "items": []})
+            block.setdefault("items", []).append({**base, "reason": vm_text})
+
+        for side in ("created", "removed"):
+            block = movements.get(side) or {}
+            items = block.get("items") or []
+            block["counted"] = sum(1 for i in items if i.get("count_effect"))
+            block["vcenter_only"] = sum(1 for i in items if not i.get("count_effect"))
+            block["listed"] = len(items)
+            items.sort(key=lambda i: (0 if i.get("count_effect") else 1, str(i.get("changed_on") or ""),
+                                      str(i.get("hostname") or "")))
+        changed["listed"] = len(changed_items)
+        movements["vcenter_toggled"] = len(changed_items)
+
+    @staticmethod
     def _movement_reason(row: dict[str, Any]) -> str:
         types = set(row.get("event_types") or [])
         if "ITSM_ASSET_CREATED" in types:

@@ -383,7 +383,7 @@ async function loadWeeklyCheck() {
     // 두 번 받는 대신 한 번에 받아 둔다.
     const [raw, folded] = await Promise.all([
       apiFetch('/api/asset-sync/changes?' + query),
-      loadChangeDigest(`${localDate(monday)}T00:00:00`, `${localDate(sunday)}T23:59:59`)
+      loadChangeDigest(`${localDate(monday)}T00:00:00`, `${localDate(sunday)}T23:59:59`, null, 'period')
         .catch(() => null),
     ]);
     rows = raw;
@@ -419,6 +419,11 @@ async function loadWeeklyMovements(start, end) {
   const basis = document.getElementById('weekly-movement-basis');
   if (basis) basis.textContent = `비교: ${res.previous_as_of} → ${res.as_of} · 집계 기준 ${(res.basis || {}).label || ''}`;
   renderWeeklyMovements();
+}
+
+function traceWeeklyAsset() {
+  const { monday, sunday } = weekRange(weeklyOffset);
+  runAssetTrace('weekly-trace-q', 'weekly-trace-result', localDate(monday), localDate(sunday));
 }
 
 function renderWeeklyMovements() {
@@ -506,7 +511,7 @@ async function exportWeeklyDigest(pendingOnly) {
     ? (document.getElementById('weekly-detail-pending') || {}).checked
     : pendingOnly;
   const result = await exportChangeDigest(
-    `${localDate(monday)}T00:00:00`, `${localDate(sunday)}T23:59:59`, {pending});
+    `${localDate(monday)}T00:00:00`, `${localDate(sunday)}T23:59:59`, {pending, fold: 'period'});
   if (!result.ok) {
     alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(result.error)}</div>`;
   }

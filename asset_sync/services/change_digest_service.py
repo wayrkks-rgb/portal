@@ -50,6 +50,27 @@ KIND_OF = {
     "ITSM_STATUS_CHANGED": STATUS,
 }
 
+#: vCenter 쪽 상태의 높낮이. 없음 < 꺼짐 < 켜짐. 기간의 처음보다 끝이 높으면 생성, 낮으면 삭제,
+#: 같으면(꺼졌다 다시 켜짐 등) 서버 상태는 그대로이므로 변경이다.
+VM_RANK = {"absent": 0, "off": 1, "on": 2}
+VM_RANK_NAMES = {0: "없음", 1: "전원 꺼짐", 2: "전원 켜짐"}
+
+
+def vm_step(row: dict[str, Any]) -> tuple[int, int] | None:
+    """일간 한 줄의 vCenter 쪽 (전, 후). vCenter 생성 · 삭제 · 전원 변화가 없으면 None."""
+    types = set(row.get("event_types") or [])
+    if "RV_NEW" in types:
+        now_off = str(row.get("power_state") or "").lower() == "poweredoff"
+        return VM_RANK["absent"], VM_RANK["off"] if now_off else VM_RANK["on"]
+    if "RV_REMOVED" in types:
+        return VM_RANK["on"], VM_RANK["absent"]
+    if "RV_POWER_ON" in types:
+        return VM_RANK["off"], VM_RANK["on"]
+    if "RV_POWER_OFF" in types:
+        return VM_RANK["on"], VM_RANK["off"]
+    return None
+
+
 #: 묶음 이벤트. 항목별 이벤트와 같은 내용을 한 번 더 적는 것이라 줄로 세지 않는다.
 GROUP_EVENTS = {"ITSM_ASSET_UPDATED"}
 
@@ -142,6 +163,7 @@ class ChangeDigestService:
         *,
         source: str | None = None,
         include_trivial: bool = False,
+        fold: str = "day",
     ) -> dict[str, Any]:
         events = self.repo.changes(source, 100000, start, end)
         context = _Context(self, start)
@@ -152,6 +174,10 @@ class ChangeDigestService:
             self._attach_count_effect(row, context)
             for internal in ("_itsm_record", "_vm_record", "_payloads", "_itsm_changes", "_seen"):
                 row.pop(internal, None)
+        if fold == "period":
+            # 주간처럼 여러 날을 볼 때는 서버 1대 = 1줄. 같은 서버가 [삭제](월) 와 [생성](화) 에
+            # 둘 다 나오면 안 된다 -- 기간의 처음과 끝을 견주어 한 곳에만 둔다.
+            rows = self.fold_period(rows)
         counts: dict[str, int] = defaultdict(int)
         for row in rows:
             counts[row["kind"]] += 1
@@ -570,6 +596,24 @@ class ChangeDigestService:
                         "ITSM 상태를 미사용·폐기로")
             return (REFLECTED, f"ITSM 상태가 이미 {status_name(status)}입니다(집계 기준 {basis} 밖).", "")
 
+        if "RV_POWER_OFF" in types:
+            if asset is None:
+                return (NO_ASSET, "전원이 꺼진 VM 의 ITSM 자산을 찾지 못했습니다.", "정합성 화면에서 짝을 지어 주세요")
+            if self.scope.counts_status(status):
+                return (NOT_REFLECTED,
+                        f"전원이 꺼졌는데 ITSM 은 아직 {status_name(status)}입니다(집계 기준 {basis} 안).",
+                        "계속 끌 서버면 ITSM 상태를 미사용으로")
+            return (REFLECTED, f"ITSM 상태가 이미 {status_name(status)}입니다(집계 기준 {basis} 밖).", "")
+
+        if "RV_POWER_ON" in types:
+            if asset is None:
+                return (NOT_REFLECTED, "전원이 켜진 VM 인데 ITSM 에 자산이 없습니다.", "ITSM 에 자산 등록")
+            if not self.scope.counts_status(status):
+                return (NOT_REFLECTED,
+                        f"전원이 켜졌는데 ITSM 은 {status_name(status)}라 집계 기준({basis}) 밖입니다.",
+                        "ITSM 상태를 운영으로")
+            return (REFLECTED, f"ITSM 에 {status_name(status)} 상태로 있습니다(집계 기준 {basis} 안).", "")
+
         if asset is None:
             return (NO_ASSET, "짝이 되는 ITSM 자산을 찾지 못했습니다.",
                     "정합성 화면에서 짝을 지어 주세요")
@@ -659,6 +703,12 @@ class ChangeDigestService:
                     else "ITSM 에 자산이 없어 서버 대수에 들어가지 않습니다. 등록하는 날 대수에 잡힙니다.")
         elif "RV_REMOVED" in types:
             note = self._removed_vm_note(row, context, basis)
+        elif "RV_POWER_OFF" in types or "RV_POWER_ON" in types:
+            word = "꺼졌습니다" if "RV_POWER_OFF" in types else "켜졌습니다"
+            itsm = (f"ITSM 은 지금 {status_name(row.get('itsm_status'))}" if row.get("itsm_cm_id")
+                    else "ITSM 에 자산이 없습니다")
+            note = (f"vCenter 에서 전원이 {word}. 서버 대수는 ITSM 상태가 바뀌어야 움직이므로 그대로입니다"
+                    f"({itsm}).")
         else:
             note = "내용만 바뀌어 서버 대수는 그대로입니다."
 
@@ -667,9 +717,10 @@ class ChangeDigestService:
             kind = CREATED
         elif effect < 0:
             kind = REMOVED
-        elif "RV_NEW" in types:
+        elif "RV_NEW" in types or "RV_POWER_ON" in types:
+            # vCenter 쪽 생성 · 삭제(전원 포함)는 생성 · 삭제로 보인다. 대수는 ITSM 이 바뀌어야 움직인다.
             kind = CREATED
-        elif "RV_REMOVED" in types:
+        elif "RV_REMOVED" in types or "RV_POWER_OFF" in types:
             kind = REMOVED
         else:
             kind = CHANGED
@@ -726,6 +777,74 @@ class ChangeDigestService:
         if not old or not new or old == new:
             return ""
         return f" (상태 {status_name(old)} → {status_name(new)})"
+
+    @staticmethod
+    def fold_period(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """하루 단위 줄을 서버 단위로 접는다. 성격은 기간의 순변화로 정한다.
+
+        - 대수(ITSM) 순변화가 +면 생성, -면 삭제
+        - 대수 변화가 없으면 vCenter 쪽 순변화(없음 < 꺼짐 < 켜짐)로 생성 · 삭제
+        - 둘 다 처음과 끝이 같으면(꺼졌다 다시 켜짐, 미사용 갔다 운영 복귀) **변경**
+        """
+        groups: dict[str, list[dict[str, Any]]] = {}
+        order: list[str] = []
+        for row in sorted(rows, key=lambda r: (str(r.get("day") or ""), str(r.get("detected_at") or ""))):
+            key = str(row.get("server_key"))
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append(row)
+        folded: list[dict[str, Any]] = []
+        for key in order:
+            items = groups[key]
+            if len(items) == 1:
+                folded.append({**items[0], "days": [items[0].get("day")]})
+                continue
+            last = items[-1]
+            effect = sum(int(r.get("count_effect") or 0) for r in items)
+            steps = [step for step in (vm_step(r) for r in items) if step]
+            vm_net = (steps[-1][1] - steps[0][0]) if steps else 0
+            if effect > 0 or (effect == 0 and vm_net > 0):
+                kind = CREATED
+            elif effect < 0 or (effect == 0 and vm_net < 0):
+                kind = REMOVED
+            else:
+                kind = CHANGED
+            path = " → ".join(f"{str(r.get('day') or '')[5:]} {r.get('kind_label')}" for r in items)
+            moved = any(r.get("kind") in (CREATED, REMOVED) for r in items)
+            if kind == CHANGED and moved:
+                vm_text = (f" · vCenter {VM_RANK_NAMES[steps[0][0]]}에서 시작해 {VM_RANK_NAMES[steps[-1][1]]}로 끝남"
+                           if steps else "")
+                note = (f"기간 중 {path}{vm_text}. 처음과 끝이 같아 서버 상태는 그대로이므로 생성 · 삭제가 아니라"
+                        " 변경으로 둡니다.")
+            else:
+                note = str(last.get("count_note") or "")
+            fields: list[dict[str, Any]] = []
+            for r in items:
+                for field in r.get("fields") or []:
+                    fields.append({**field, "label": f"{str(r.get('day') or '')[5:]} {field.get('label')}"})
+            with_reflection = next((r for r in reversed(items) if r.get("reflection")), last)
+            merged = {
+                **last,
+                "kind": kind,
+                "kind_label": KIND_LABELS[kind],
+                "fields": fields,
+                "event_types": sorted({t for r in items for t in r.get("event_types") or []}),
+                "sources": sorted({src for r in items for src in r.get("sources") or []}),
+                "count_effect": effect,
+                "count_effect_label": {1: "자산 +1", -1: "자산 −1"}.get(effect, "대수 변화 없음"),
+                "count_note": note,
+                "summary": " ; ".join(f"{str(r.get('day') or '')[5:]} {r.get('summary')}" for r in items),
+                "days": [r.get("day") for r in items],
+                "trivial_count": sum(int(r.get("trivial_count") or 0) for r in items),
+                "reflection": with_reflection.get("reflection"),
+                "reflection_label": with_reflection.get("reflection_label"),
+                "reflection_note": with_reflection.get("reflection_note"),
+                "itsm_action": with_reflection.get("itsm_action"),
+            }
+            folded.append(merged)
+        folded.sort(key=lambda r: str(r.get("detected_at") or ""), reverse=True)
+        return folded
 
     # ── 엑셀 ────────────────────────────────────────────────────────────
     EXPORT_COLUMNS = (
