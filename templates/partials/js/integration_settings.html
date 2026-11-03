@@ -738,7 +738,8 @@ function buildRuntimePayload(){
         enabled:document.getElementById('int-intraday-enabled').value==='true',
         interval_minutes:Number(document.getElementById('int-intraday-interval').value),
         start_time:document.getElementById('int-intraday-start').value,
-        end_time:document.getElementById('int-intraday-end').value
+        end_time:document.getElementById('int-intraday-end').value,
+        weekdays_only:document.getElementById('int-intraday-weekdays').value==='true'
       }
     }
   };
@@ -805,6 +806,7 @@ async function loadIntegrationSettings(showMessage=false){
   document.getElementById('int-intraday-interval').value=String(intraday.interval_minutes||60);
   document.getElementById('int-intraday-start').value=intraday.start_time||'08:00';
   document.getElementById('int-intraday-end').value=intraday.end_time||'20:00';
+  document.getElementById('int-intraday-weekdays').value=String(intraday.weekdays_only!==false);
   loadScheduleStatus();
   loadDisplayNames();
   applyHmcSettings(res.hmc||{});
@@ -934,7 +936,7 @@ async function saveRuntimeSettings(){
   if(task.error)details.push(`Windows 작업 갱신 실패: ${task.error} → scripts\\register_daily_task.bat 을 관리자 권한으로 실행하세요.`);
   const intradayTask=res.scheduler?.intraday_task||{};
   const intraday=res.scheduler?.intraday||{};
-  if(intraday.enabled)details.push(`수시 수집: ${intraday.start_time}~${intraday.end_time} 동안 ${intraday.interval_minutes}분마다.`);
+  if(intraday.enabled)details.push(`수시 수집: ${intraday.weekdays_only!==false?'평일':'매일'} ${intraday.start_time}~${intraday.end_time} 동안 ${intraday.interval_minutes}분마다. 그 밖의 시간에는 돌지 않습니다.`);
   if(intradayTask.error)details.push(`수시 수집 작업 갱신 실패: ${intradayTask.error} → scripts\\register_daily_task.bat --intraday 를 관리자 권한으로 실행하세요.`);
   else if(intradayTask.action==='REGISTERED')details.push('수시 수집 Windows 작업을 등록했습니다.');
   else if(intradayTask.action==='REMOVED')details.push('수시 수집 Windows 작업을 해제했습니다.');

@@ -141,12 +141,17 @@ Get-ChildItem $dst -Recurse | Unblock-File
 
 켜는 법
 
-1. **관리 → 연계 설정 → 일일 실행 및 로그**에서 `수시 수집 = 사용`, 간격 · 시작 · 끝 시각을 고르고
+1. **관리 → 연계 설정 → 일일 실행 및 로그**에서 `수시 수집 = 사용`, 간격 · 시작 · 끝 시각 · 요일
+   (기본 평일만)을 고르고
    [실행 설정 저장]. 관리자 권한으로 띄운 WAS 면 Windows 작업도 함께 등록된다.
 2. 권한 때문에 등록이 안 되면 관리자 명령 프롬프트에서
    `scripts\register_daily_task.bat --intraday` (상태만: `--intraday --status`).
 3. 결과는 `logs\intraday_console.log`. 한 회차 = `===== INTRADAY START` ~ `===== INTRADAY END`.
    손으로 한 번: `scripts\run_intraday_collect.bat` (앞에 python 을 붙이지 않는다).
+
+업무 시간 밖에는 두 겹으로 막는다. ① Windows 작업 자체가 시작~끝 시각(평일만이면 월~금)에만
+돌도록 등록되고, ② 작업이 잘못 등록돼 다른 시간에 불려도 배치가 시각 · 요일을 보고 스스로 빠진다
+(로그에 `SKIPPED ... 수시 수집 시간 밖`). 07:00 일일 배치는 이 설정과 무관하게 매일 돈다.
 
 간격 고르기: 수집 한 번이 걸리는 시간(로그의 START ~ END)보다 간격이 충분히 길어야 한다.
 PowerCLI 모듈 로딩만 6~15초, 통합기 수와 ITSM 조회에 따라 수 분이 걸릴 수 있으므로 처음에는

@@ -246,6 +246,12 @@ DR vCenter,&lt;VCENTER_ADDRESS_002&gt;,DR"></textarea>
         <div class="form-group"><label class="form-label">시작 시각</label><input type="time" class="form-input" id="int-intraday-start" value="08:00"></div>
         <div class="form-group"><label class="form-label">끝 시각</label><input type="time" class="form-input" id="int-intraday-end" value="20:00"></div>
       </div>
+      <div class="grid-4">
+        <div class="form-group"><label class="form-label">요일</label>
+          <select class="form-select" id="int-intraday-weekdays">
+            <option value="true">평일만 (월~금)</option><option value="false">매일</option>
+          </select></div>
+      </div>
       <div class="text-xs text-muted mb-4">
         수시 수집은 vCenter · ITSM 인벤토리만 다시 읽어 <strong>바뀐 것이 있을 때만</strong> 저장합니다. 일부 통합기 실패 ·
         건수 이상이면 저장하지 않습니다(가짜 생성 · 삭제 방지). 자원사용률은 07:00 일일 배치에서만 모읍니다.

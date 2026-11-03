@@ -217,17 +217,24 @@ def test_intraday_settings_and_task_command(monkeypatch, tmp_path) -> None:
         scheduler.intraday_settings({"intraday": {"start_time": "20:00", "end_time": "08:00"}})
 
     from datetime import datetime
-    assert scheduler.in_window(wanted, datetime(2026, 11, 3, 12, 0))
-    assert not scheduler.in_window(wanted, datetime(2026, 11, 3, 7, 59))
+    assert scheduler.in_window(wanted, datetime(2026, 11, 3, 12, 0))         # 화요일 낮
+    assert not scheduler.in_window(wanted, datetime(2026, 11, 3, 7, 59))     # 업무 시작 전
+    assert not scheduler.in_window(wanted, datetime(2026, 11, 3, 19, 1))     # 업무 끝난 뒤
+    assert not scheduler.in_window(wanted, datetime(2026, 11, 7, 12, 0))     # 토요일
+    everyday = {**wanted, "weekdays_only": False}
+    assert scheduler.in_window(everyday, datetime(2026, 11, 7, 12, 0))
 
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "run_intraday_collect.bat").write_text("@echo off", encoding="ascii")
     seen = {}
-    monkeypatch.setattr(scheduler, "_run", lambda argv: (seen.setdefault("argv", argv), (0, "OK"))[1])
+    monkeypatch.setattr(scheduler, "_run", lambda argv: (seen.__setitem__("argv", argv), (0, "OK"))[1])
     scheduler.register_intraday(tmp_path, wanted)
     argv = seen["argv"]
     assert argv[argv.index("/RI") + 1] == "30" and argv[argv.index("/DU") + 1] == "10:30"
     assert argv[argv.index("/ST") + 1] == "08:30" and "SYSTEM" in argv
+    assert argv[argv.index("/SC") + 1] == "WEEKLY" and argv[argv.index("/D") + 1] == "MON,TUE,WED,THU,FRI"
+    scheduler.register_intraday(tmp_path, everyday)
+    assert seen["argv"][seen["argv"].index("/SC") + 1] == "DAILY" and "/D" not in seen["argv"]
 
 
 def test_saving_the_daily_card_keeps_intraday(tmp_path, monkeypatch) -> None:

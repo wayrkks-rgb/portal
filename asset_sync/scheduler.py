@@ -111,12 +111,16 @@ def intraday_settings(scheduler_cfg: Mapping[str, Any]) -> dict[str, Any]:
         "interval_minutes": interval,
         "start_time": start,
         "end_time": end,
+        # 업무 시간이라면 주말은 빼는 것이 보통이다. 매일 돌리려면 false.
+        "weekdays_only": bool(section.get("weekdays_only", True)),
         "task_name": normalize_task_name(section.get("task_name") or DEFAULT_INTRADAY_TASK),
     }
 
 
 def in_window(settings_: Mapping[str, Any], now: Any) -> bool:
     """지금이 수시 수집 시간대인가. 작업이 잘못 등록돼도 배치가 스스로 판단한다."""
+    if settings_.get("weekdays_only", True) and now.weekday() >= 5:   # 토(5) · 일(6)
+        return False
     hhmm = now.strftime("%H:%M")
     return str(settings_["start_time"]) <= hhmm <= str(settings_["end_time"])
 
@@ -150,7 +154,8 @@ def register_intraday(root: Path, wanted: Mapping[str, Any], *, force: bool = Tr
     argv = [
         "schtasks", "/Create", "/TN", str(wanted["task_name"]),
         "/TR", f'"{target}"',
-        "/SC", "DAILY", "/ST", str(wanted["start_time"]),
+        *(["/SC", "WEEKLY", "/D", "MON,TUE,WED,THU,FRI"] if wanted.get("weekdays_only", True) else ["/SC", "DAILY"]),
+        "/ST", str(wanted["start_time"]),
         "/RI", str(int(wanted["interval_minutes"])), "/DU", f"{minutes // 60:02d}:{minutes % 60:02d}",
         "/RU", "SYSTEM", "/RL", "HIGHEST",
     ]

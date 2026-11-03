@@ -208,6 +208,7 @@ scheduler:
     interval_minutes: 60      # 15 · 30 · 60 · 120
     start_time: '08:00'
     end_time: '20:00'
+    weekdays_only: true       # 토 · 일 은 쉰다. 매일 돌리려면 false
     task_name: AssetIntradayCollection
 retention:
   # 수시 수집 스냅샷은 이 날 수가 지나면 그날 마지막 것만 남긴다(변경 이력은 그대로).

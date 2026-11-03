@@ -282,6 +282,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                 "interval_minutes": 60,
                 "start_time": "08:00",
                 "end_time": "20:00",
+                "weekdays_only": True,
                 "task_name": "AssetIntradayCollection",
             },
         },

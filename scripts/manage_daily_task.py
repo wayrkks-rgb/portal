@@ -102,7 +102,8 @@ def intraday(config, args) -> int:
         print(f"[실패] 수시 수집 설정이 올바르지 않습니다: {exc}", file=sys.stderr)
         return 1
     print(f"작업 이름   {wanted['task_name']}")
-    print(f"실행        매일 {wanted['start_time']} ~ {wanted['end_time']}, {wanted['interval_minutes']}분마다")
+    print(f"실행        {'평일(월~금)' if wanted['weekdays_only'] else '매일'} {wanted['start_time']} ~ {wanted['end_time']}, "
+          f"{wanted['interval_minutes']}분마다")
     print(f"수시 수집   {'켜짐' if wanted['enabled'] else '꺼짐 (설정 scheduler.intraday.enabled 또는 관리 → 연계 설정)'}")
     print(f"실행 대상   {scheduler.intraday_path(ROOT)}\n")
     if args.status:
