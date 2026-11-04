@@ -755,7 +755,7 @@ async function exportChangeDigest(start, end, options) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   const disposition = response.headers.get('Content-Disposition') || '';
-  const match = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+  const match = disposition.match(/filename\*=UTF-8''([^;]+)/i) || disposition.match(/filename="?([^";]+)"?/i);
   link.href = url;
   link.download = match ? decodeURIComponent(match[1]) : '증감현황.xlsx';
   document.body.appendChild(link);

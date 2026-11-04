@@ -445,7 +445,7 @@ async function exportMonthlyReport() {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   const disposition = response.headers.get('Content-Disposition') || '';
-  const match = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+  const match = disposition.match(/filename\*=UTF-8''([^;]+)/i) || disposition.match(/filename="?([^";]+)"?/i);
   link.href = url;
   link.download = match ? decodeURIComponent(match[1]) : `월간보고_${month || ''}.xlsx`;
   document.body.appendChild(link);
@@ -480,7 +480,7 @@ async function exportMonthly(section) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   const disposition = response.headers.get('Content-Disposition') || '';
-  const match = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+  const match = disposition.match(/filename\*=UTF-8''([^;]+)/i) || disposition.match(/filename="?([^";]+)"?/i);
   link.href = url;
   link.download = match ? decodeURIComponent(match[1]) : `월간점검_${section}.xlsx`;
   document.body.appendChild(link);
@@ -751,14 +751,14 @@ function diskPair(assignedGb, usedGb, fillPct) {
 // 화면이 다시 그려져야 할 때(검색어·접기·변경분만) 쓰려고 마지막 자료를 들고 있는다.
 let monthlyIntegratedState = null;
 
-function renderMonthlyIntegrated(current, previous, range) {
-  monthlyIntegratedState = {current, previous, range};
+function renderMonthlyIntegrated(current, previous, range, labels) {
+  monthlyIntegratedState = {current, previous, range, labels: labels || {old: '전월', now: '당월'}};
   renderMonthlyIntegratedAgain();
 }
 
 function renderMonthlyIntegratedAgain() {
   if (!monthlyIntegratedState) return;
-  const {current, previous, range} = monthlyIntegratedState;
+  const {current, previous, range, labels} = monthlyIntegratedState;
   const table = document.getElementById('monthly-integrated-table');
   if (!table) return;
   const search = (document.getElementById('monthly-integrated-search') || {}).value || '';
@@ -771,6 +771,7 @@ function renderMonthlyIntegratedAgain() {
   let hostCount = 0;
   let shownHosts = 0;
   const shownNow = [];
+  const shownOld = [];
 
   groups.forEach(group => {
     hostCount += group.rows.length;
@@ -803,14 +804,17 @@ function renderMonthlyIntegratedAgain() {
     }
     shownHosts += pairs.length;
     nowRows.forEach(row => shownNow.push(row));
+    oldRows.forEach(row => shownOld.push(row));
   });
 
   const grand = monthlyFold(shownNow);
+  const grandOld = monthlyFold(shownOld);
   if (grand && body.length) {
     body.push(monthlyIntegratedRow(
       `<strong>합계</strong><div class="text-xs text-muted">ESXi ${shownHosts.toLocaleString()}대</div>`,
-      '', '', grand, null, 'row-total'));
+      '', '', grand, grandOld, 'row-total'));
   }
+  renderIntegratedDelta(shownNow, shownOld, labels);
 
   table.className = 'table-sticky';
   table.innerHTML = `<thead>
@@ -824,7 +828,7 @@ function renderMonthlyIntegratedAgain() {
       <th rowspan="2">사용률 MAX<div class="text-xs text-muted">CPU / MEM</div></th>
       <th rowspan="2">사용률 AVG<div class="text-xs text-muted">CPU / MEM</div></th>
     </tr>
-    <tr><th>전월</th><th>당월</th><th>전월</th><th>당월</th><th>전월</th><th>당월</th></tr>
+    <tr>${[1, 2, 3].map(() => `<th>${syncEscape(labels.old)}</th><th>${syncEscape(labels.now)}</th>`).join('')}</tr>
   </thead><tbody>${
     body.length ? body.join('')
       : `<tr><td colspan="13" style="text-align:center" class="text-muted">${
@@ -840,9 +844,12 @@ function renderMonthlyIntegratedAgain() {
       : '';
   }
   const previousHosts = ((previous && previous.hosts) || []).length;
-  document.getElementById('monthly-integrated-basis').textContent =
-    `${range.start} ~ ${range.end} 집계 · 클러스터 ${groups.length.toLocaleString()}개 · ESXi ${hostCount.toLocaleString()}대`
-    + (previousHosts ? ` · 전월 ESXi ${previousHosts.toLocaleString()}대와 비교` : ' · 비교할 전월 없음');
+  document.getElementById('monthly-integrated-basis').textContent = range.day
+    ? `${labels.now} 기준${range.actual && range.actual !== range.day ? `(그날 수집이 없어 ${range.actual} 값)` : ''}`
+      + ` ↔ ${labels.old}${range.compareActual && range.compareActual !== range.compareDay ? `(${range.compareActual} 값)` : ''}`
+      + ` · 클러스터 ${groups.length.toLocaleString()}개 · ESXi ${hostCount.toLocaleString()}대`
+    : `${range.start} ~ ${range.end} 집계 · 클러스터 ${groups.length.toLocaleString()}개 · ESXi ${hostCount.toLocaleString()}대`
+      + (previousHosts ? ` · 전월 ESXi ${previousHosts.toLocaleString()}대와 비교` : ' · 비교할 전월 없음');
 }
 
 // ── 데이터스토어 디스크 현황 ───────────────────────────────────────────
@@ -993,11 +1000,58 @@ function renderMonthlyIntegratedMoves(current) {
 
 // 통합서버 자원사용현황은 vCenter 자료다. ITSM 자산 목록과 출처가 달라
 // 보고서 쪽 추출(통합기·VM·변경이력)을 그 달 범위로 부른다.
+// 두 시점 사이에 무엇이 얼마나 바뀌었나. "한 달 사이 몇 대 늘었나" 를 한 줄로 답한다.
+function renderIntegratedDelta(nowRows, oldRows, labels) {
+  const holder = document.getElementById('monthly-integrated-delta');
+  if (!holder) return;
+  if (!oldRows.length || !nowRows.length) { holder.innerHTML = ''; return; }
+  const now = monthlyFold(nowRows), old = monthlyFold(oldRows);
+  const item = (label, a, b, unit, divide) => {
+    const x = Number(a || 0) / (divide || 1), y = Number(b || 0) / (divide || 1);
+    const d = Math.round((x - y) * 10) / 10;
+    const cls = d > 0 ? 'text-success' : (d < 0 ? 'text-error' : 'text-muted');
+    return `<span style="margin-right:16px">${label} <strong>${Math.round(y).toLocaleString()} → ${Math.round(x).toLocaleString()}${unit}</strong>
+      <span class="${cls}">(${d > 0 ? '+' : ''}${d.toLocaleString()}${unit})</span></span>`;
+  };
+  holder.innerHTML = `<div class="result-box" style="margin-top:0">
+    <div class="text-sm" style="margin-bottom:4px"><strong>${syncEscape(labels.old)} → ${syncEscape(labels.now)} 변경량</strong></div>
+    <div class="text-sm">${item('ESXi', nowRows.length, oldRows.length, '대')}${item('VM', now.vm_count, old.vm_count, '대')}
+      ${item('실제 CPU', now.allocated_cpu_cores, old.allocated_cpu_cores, 'C')}${item('실제 MEM', now.allocated_memory_mb, old.allocated_memory_mb, 'G', 1024)}
+      ${item('할당 CPU', now.assigned_cpu_cores, old.assigned_cpu_cores, 'C')}${item('할당 MEM', now.assigned_memory_mb, old.assigned_memory_mb, 'G', 1024)}</div>
+  </div>`;
+}
+
+// 월 집계 ↔ 기준일 비교. 기준일은 기본 '선택한 달 1일', 비교일은 '전달 1일'.
+function integratedModeChanged() {
+  const day = (document.getElementById('monthly-integrated-mode') || {}).value === 'day';
+  const days = document.getElementById('monthly-integrated-days');
+  if (days) days.style.display = day ? '' : 'none';
+  if (day) {
+    const month = document.getElementById('monthly-month').value || new Date().toISOString().slice(0, 7);
+    const dayInput = document.getElementById('monthly-integrated-day');
+    const compareInput = document.getElementById('monthly-integrated-compare-day');
+    if (!dayInput.value || !dayInput.value.startsWith(month)) dayInput.value = `${month}-01`;
+    if (!compareInput.value) {
+      const [y, m] = dayInput.value.split('-').map(Number);
+      const prev = new Date(y, m - 2, 1);
+      compareInput.value = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}-01`;
+    }
+  }
+  reloadMonthlyIntegrated();
+}
+
+function reloadMonthlyIntegrated() {
+  loadMonthlyIntegrated(document.getElementById('monthly-month').value);
+}
+
 async function exportMonthlyIntegrated() {
   const alertEl = document.getElementById('monthly-integrated-alert');
+  const byDay = (document.getElementById('monthly-integrated-mode') || {}).value === 'day';
+  const day = (document.getElementById('monthly-integrated-day') || {}).value;
   const range = monthRange(document.getElementById('monthly-month').value);
   alertEl.innerHTML = '<div class="alert alert-info"><span class="loading"></span> Excel 생성 중...</div>';
-  const response = await fetch(`/api/asset-sync/resource-usage/export?start=${range.start}&end=${range.end}`);
+  const query = byDay && day ? `as_of=${day}` : `start=${range.start}&end=${range.end}`;
+  const response = await fetch(`/api/asset-sync/resource-usage/export?${query}`);
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
     alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(data.error || 'HTTP ' + response.status)}</div>`;
@@ -1007,7 +1061,11 @@ async function exportMonthlyIntegrated() {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = `통합서버_자원사용현황_${range.start}_${range.end}.xlsx`;
+  const disposition = response.headers.get('Content-Disposition') || '';
+  // filename*=UTF-8'' 쪽이 한글 이름이다. filename= 는 한글이 빠진 대체 이름이라 뒤로 미룬다.
+  const named = disposition.match(/filename\*=UTF-8''([^;]+)/i) || disposition.match(/filename="?([^";]+)"?/i);
+  link.download = named ? decodeURIComponent(named[1])
+    : (byDay && day ? `통합서버_자원사용현황_${day}기준.xlsx` : `통합서버_자원사용현황_${range.start}_${range.end}.xlsx`);
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -1021,6 +1079,9 @@ async function loadMonthlyIntegrated(month) {
   const range = monthRange(month);
   const previousRange = previousMonthRange(range);
   alertEl.innerHTML = '<div class="alert alert-info"><span class="loading"></span> 통합서버 자원사용현황 집계 중...</div>';
+  if ((document.getElementById('monthly-integrated-mode') || {}).value === 'day') {
+    return loadIntegratedByDay(alertEl);
+  }
   try {
     const url = r => `/api/asset-sync/resource-usage?start=${r.start}&end=${r.end}`;
     // 전월이 없어도 당월은 보여야 한다.
@@ -1029,11 +1090,35 @@ async function loadMonthlyIntegrated(month) {
       apiFetch(url(previousRange)).catch(() => null),
     ]);
     alertEl.innerHTML = '';
+    document.getElementById('monthly-integrated-delta').innerHTML = '';
     renderMonthlyIntegrated(current, previous, range);
     renderMonthlyDatastoresAgain();
     renderMonthlyIntegratedMoves(current);
   } catch (error) {
     alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(error.message)}</div>`;
   }
+}
+
+// 기준일 비교: 두 날짜의 값을 '그날 하루' 로 받아 나란히 놓는다. 그날 수집이 없으면 그 전
+// 마지막 수집값을 쓰고 화면에 적는다. 그사이 VM 구성 변경은 두 날짜 사이 기간으로 받는다.
+async function loadIntegratedByDay(alertEl) {
+  const day = document.getElementById('monthly-integrated-day').value;
+  const compareDay = document.getElementById('monthly-integrated-compare-day').value;
+  if (!day || !compareDay) { alertEl.innerHTML = '<div class="alert alert-warning">기준일과 비교일을 고르세요.</div>'; return; }
+  const [early, late] = compareDay <= day ? [compareDay, day] : [day, compareDay];
+  const next = d => { const x = new Date(d); x.setDate(x.getDate() + 1); return x.toISOString().slice(0, 10); };
+  const [current, previous, between] = await Promise.all([
+    integrationFetch(`/api/asset-sync/resource-usage?as_of=${day}`),
+    integrationFetch(`/api/asset-sync/resource-usage?as_of=${compareDay}`),
+    early < late ? integrationFetch(`/api/asset-sync/resource-usage?start=${next(early)}&end=${late}`) : Promise.resolve(null),
+  ]);
+  if (current.error) { alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(current.error)}</div>`; return; }
+  alertEl.innerHTML = previous.error
+    ? `<div class="alert alert-warning">⚠️ 비교일: ${syncEscape(previous.error)} 기준일 값만 보여줍니다.</div>` : '';
+  const range = {start: day, end: day, day, compareDay,
+    actual: (current.as_of || {}).actual, compareActual: (previous.as_of || {}).actual};
+  renderMonthlyIntegrated(current, previous.error ? null : previous, range, {old: compareDay, now: day});
+  renderMonthlyDatastoresAgain();
+  renderMonthlyIntegratedMoves(between && !between.error ? {...current, changes: between.changes || []} : current);
 }
 </script>

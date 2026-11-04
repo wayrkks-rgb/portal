@@ -75,6 +75,19 @@
             줄은 <strong>ESXi 호스트 한 대</strong>가 하나입니다. 클러스터 합계 줄은 그 아래 호스트를 더한 값입니다.
           </div>
         </div>
+        <div class="flex gap-2 items-center mb-4" style="flex-wrap:wrap">
+          <select class="form-select" id="monthly-integrated-mode" style="width:200px" onchange="integratedModeChanged()">
+            <option value="month">월 집계 (전월 대비)</option>
+            <option value="day">기준일 비교 (날짜 ↔ 날짜)</option>
+          </select>
+          <span id="monthly-integrated-days" style="display:none" class="flex gap-2 items-center">
+            <label class="text-xs">기준일</label>
+            <input class="form-input" type="date" id="monthly-integrated-day" style="width:150px" onchange="reloadMonthlyIntegrated()">
+            <label class="text-xs">비교일</label>
+            <input class="form-input" type="date" id="monthly-integrated-compare-day" style="width:150px" onchange="reloadMonthlyIntegrated()">
+          </span>
+        </div>
+        <div id="monthly-integrated-delta" class="mb-4"></div>
         <div class="flex gap-2 items-center mb-4">
           <input class="form-input" id="monthly-integrated-search" style="width:240px"
                  placeholder="vCenter·클러스터·ESXi 검색" oninput="renderMonthlyIntegratedAgain()">
@@ -84,7 +97,7 @@
           </label>
           <label class="text-xs flex items-center gap-2">
             <input type="checkbox" id="monthly-integrated-changed" onchange="renderMonthlyIntegratedAgain()">
-            전월과 달라진 호스트만
+            비교 대상과 달라진 호스트만
           </label>
           <span class="text-xs text-muted" id="monthly-integrated-shown"></span>
         </div>

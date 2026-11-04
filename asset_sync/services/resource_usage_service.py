@@ -796,6 +796,17 @@ class VMResourceUsageExportService:
                 if vcenter:
                     row["vcenter_display_name"] = resolver.name("VCENTER", vcenter, vcenter)
 
+    def stat_date_on_or_before(self, day: str) -> str | None:
+        """그날(없으면 그 전 가장 가까운 날) 수집된 통합기 자원 값의 날짜.
+
+        '11월 1일 기준' 을 골랐는데 그날 배치가 안 돌았으면, 그 전 마지막 수집값이 그날의 모습이다.
+        어느 날 값을 썼는지는 화면 · 파일에 같이 적는다.
+        """
+        row = self.repo.conn.execute(
+            "SELECT MAX(stat_date) AS d FROM host_resource_usage_daily WHERE stat_date <= ?", (str(day)[:10],)
+        ).fetchone()
+        return str(row["d"]) if row and row["d"] else None
+
     def export_xlsx(self, start: str, end: str, target_dir: Path, **filters: Any) -> Path:
         data = self.summary(start, end, **filters)
         target_dir.mkdir(parents=True, exist_ok=True)

@@ -887,15 +887,34 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         end = request.args.get("end") or (date.today() - timedelta(days=1)).isoformat()
         try:
             with manager.connect() as conn:
-                result = VMResourceUsageExportService(cfg, AssetRepository(conn)).summary(
+                service = VMResourceUsageExportService(cfg, AssetRepository(conn))
+                as_of = _resource_as_of(service)
+                if as_of is not None:
+                    start = end = as_of["actual"]
+                result = service.summary(
                     start, end,
                     vcenter_id=request.args.get("vcenter_id") or None,
                     cluster_name=request.args.get("cluster_name") or None,
                     esxi_host=request.args.get("esxi_host") or None,
                 )
+                if as_of is not None:
+                    result["as_of"] = as_of
             return jsonify(result)
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
+        except LookupError as exc:
+            return jsonify({"error": str(exc), "status": "NO_DATA"}), 404
+
+    def _resource_as_of(service: Any) -> dict[str, str] | None:
+        """?as_of=YYYY-MM-DD 면 그날(또는 그 전 마지막 수집일) 하루만 본다. 없으면 None."""
+        requested = str(request.args.get("as_of") or "").strip()[:10]
+        if not requested:
+            return None
+        date.fromisoformat(requested)        # 형식이 틀리면 ValueError → 400
+        actual = service.stat_date_on_or_before(requested)
+        if actual is None:
+            raise LookupError(f"{requested} 이전에 수집된 통합기 자원 값이 없습니다.")
+        return {"requested": requested, "actual": actual}
 
     @bp.route("/api/asset-sync/resource-usage/export")
     @login_required
@@ -904,15 +923,25 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         end = request.args.get("end") or (date.today() - timedelta(days=1)).isoformat()
         try:
             with manager.connect() as conn:
-                path = VMResourceUsageExportService(cfg, AssetRepository(conn)).export_xlsx(
+                service = VMResourceUsageExportService(cfg, AssetRepository(conn))
+                as_of = _resource_as_of(service)
+                if as_of is not None:
+                    start = end = as_of["actual"]
+                path = service.export_xlsx(
                     start, end, cfg.resolve("data/export/resource_usage"),
                     vcenter_id=request.args.get("vcenter_id") or None,
                     cluster_name=request.args.get("cluster_name") or None,
                     esxi_host=request.args.get("esxi_host") or None,
                 )
-            return send_file(path, as_attachment=True, download_name=path.name)
+            name = path.name
+            if as_of is not None:
+                name = f"통합서버_자원사용현황_{as_of['requested']}기준" + (
+                    f"(수집 {as_of['actual']})" if as_of["actual"] != as_of["requested"] else "") + ".xlsx"
+            return send_file(path, as_attachment=True, download_name=name)
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
+        except LookupError as exc:
+            return jsonify({"error": str(exc), "status": "NO_DATA"}), 404
 
     @bp.route("/api/asset-sync/resource-usage/import", methods=["POST"])
     @admin_required

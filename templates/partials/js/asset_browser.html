@@ -207,7 +207,7 @@ async function exportAssetBrowser() {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   const disposition = response.headers.get('Content-Disposition') || '';
-  const match = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+  const match = disposition.match(/filename\*=UTF-8''([^;]+)/i) || disposition.match(/filename="?([^";]+)"?/i);
   link.href = url;
   link.download = match ? decodeURIComponent(match[1]) : '자산목록.xlsx';
   document.body.appendChild(link);
