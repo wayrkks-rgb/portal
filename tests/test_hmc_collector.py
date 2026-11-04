@@ -80,7 +80,7 @@ class FakeClient:
 
     calls: list[str] = []
 
-    def __init__(self, host, username, password, *, port=12443, verify_tls=False, timeout_seconds=30):
+    def __init__(self, host, username, password, *, port=12443, verify_tls=False, timeout_seconds=30, **_):
         self.host = host
         self.username = username
         self.password = password
@@ -223,3 +223,73 @@ def test_the_logon_token_is_read_from_the_response() -> None:
     with pytest.raises(HMCError) as excinfo:
         HMCClient._read_token(b"<html>not xml at all")
     assert excinfo.value.stage == "LOGON"
+
+
+# ── 방화벽 · 계정이 맞는데도 나던 오류들 ───────────────────────────────────
+import ssl as _ssl
+import urllib.request as _urlreq
+
+from asset_sync.collectors.hmc_client import HMCClient as _RealClient
+
+
+def test_the_windows_system_proxy_is_not_used_by_default(monkeypatch) -> None:
+    """urllib 은 시스템(IE) 프록시를 저절로 쓴다. HMC 요청이 프록시로 가면 403 · 시간 초과가 난다."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
+
+    def proxied(client) -> bool:
+        return any(isinstance(h, _urlreq.ProxyHandler) and h.proxies for h in client._opener.handlers)
+
+    assert not proxied(_RealClient("10.0.0.10", "u", "p"))
+    assert proxied(_RealClient("10.0.0.10", "u", "p", use_proxy=True))
+
+
+def test_tls_failures_are_not_reported_as_a_firewall_problem() -> None:
+    client = _RealClient("10.0.0.10", "u", "p")
+    message, stage = client._describe_connect_error(
+        _ssl.SSLError(1, "[SSL: UNSAFE_LEGACY_RENEGOTIATION_DISABLED] unsafe legacy renegotiation disabled"))
+    assert stage == "TLS" and "legacy_tls" in message and "방화벽" not in message
+    assert client._describe_connect_error(TimeoutError("timed out"))[1] == "TIMEOUT"
+    assert client._describe_connect_error(OSError("Tunnel connection failed: 403 Forbidden"))[1] == "PROXY"
+    assert client._describe_connect_error(ConnectionRefusedError(111, "Connection refused"))[1] == "CONNECT"
+
+
+def test_legacy_tls_is_opt_in() -> None:
+    plain = _RealClient("h", "u", "p").ssl_context()
+    legacy = _RealClient("h", "u", "p", legacy_tls=True).ssl_context()
+    flag = getattr(_ssl, "OP_LEGACY_SERVER_CONNECT", 0x4)
+    assert not plain.options & flag and legacy.options & flag
+
+
+class _Response:
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    def read(self) -> bytes:
+        return self.body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
+class _Opener:
+    def __init__(self, bodies: list[bytes]) -> None:
+        self.bodies, self.requests = list(bodies), []
+
+    def open(self, request, timeout=None):
+        self.requests.append(request)
+        return _Response(self.bodies.pop(0))
+
+
+def test_an_empty_204_reply_is_an_empty_list_and_logon_asks_for_the_response_type() -> None:
+    token = (b'<LogonResponse xmlns="http://www.ibm.com/xmlns/systems/power/firmware/web/mc/2012_10/">'
+             b'<X-API-Session>tok</X-API-Session></LogonResponse>')
+    opener = _Opener([token, b""])
+    client = _RealClient("10.0.0.10", "u", "p", opener=opener)
+    feed = client.get("/rest/api/uom/ManagedSystem/x/LogicalPartition")
+    assert list(feed) == []
+    logon = opener.requests[0]
+    assert logon.get_header("Accept").endswith("type=LogonResponse")
+    assert opener.requests[1].get_header("X-api-session") == "tok"

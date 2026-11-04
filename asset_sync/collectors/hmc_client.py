@@ -16,6 +16,7 @@ HMC 인증은 두 단계다.
 from __future__ import annotations
 
 import logging
+import socket
 import ssl
 import urllib.error
 import urllib.request
@@ -34,6 +35,8 @@ _LOGON_BODY = (
     ' schemaVersion="V1_0"><UserID>{user}</UserID><Password>{password}</Password></LogonRequest>'
 )
 _LOGON_TYPE = "application/vnd.ibm.powervm.web+xml; type=LogonRequest"
+#: 일부 HMC 버전은 Accept 의 type 까지 맞아야 406 대신 토큰을 준다.
+_LOGON_ACCEPT = "application/vnd.ibm.powervm.web+xml; type=LogonResponse"
 
 
 class HMCError(RuntimeError):
@@ -79,6 +82,8 @@ class HMCClient:
         verify_tls: bool = False,
         timeout_seconds: int = 30,
         opener: Any = None,
+        use_proxy: bool = False,
+        legacy_tls: bool = False,
     ) -> None:
         self.host = str(host or "").strip()
         self.username = str(username or "")
@@ -87,20 +92,35 @@ class HMCClient:
         self.verify_tls = bool(verify_tls)
         self.timeout = int(timeout_seconds or 30)
         self.token: str | None = None
+        self.use_proxy = bool(use_proxy)
+        self.legacy_tls = bool(legacy_tls)
         self._opener = opener or self._build_opener()
 
     @property
     def base_url(self) -> str:
         return f"https://{self.host}:{self.port}"
 
-    def _build_opener(self) -> Any:
+    def ssl_context(self) -> ssl.SSLContext:
         context = ssl.create_default_context()
         if not self.verify_tls:
             # HMC 는 보통 자체 서명 인증서를 쓴다. 사설 CA 를 신뢰 목록에 넣기
             # 전까지는 검증을 끄고 쓴다 -- 폐쇄망 안이고, 주소는 운영자가 직접 적는다.
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
-        return urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
+        if self.legacy_tls:
+            # 오래된 HMC 는 OpenSSL 3(파이썬 3.13)이 막는 재협상 · 약한 키를 쓴다.
+            # 'unsafe legacy renegotiation disabled' · 'dh key too small' 이 나면 켠다.
+            context.options |= getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x4)
+            context.set_ciphers("DEFAULT:@SECLEVEL=1")
+        return context
+
+    def _build_opener(self) -> Any:
+        handlers: list[Any] = [urllib.request.HTTPSHandler(context=self.ssl_context())]
+        if not self.use_proxy:
+            # urllib 은 Windows 의 인터넷 옵션(IE) 프록시를 저절로 쓴다. 방화벽이 열려 있어도
+            # HMC 요청이 프록시로 가서 403 · 시간 초과가 난다. 내부망 장비이므로 기본은 직접 연결.
+            handlers.append(urllib.request.ProxyHandler({}))
+        return urllib.request.build_opener(*handlers)
 
     def _open(self, request: Any, stage: str) -> Any:
         try:
@@ -112,14 +132,41 @@ class HMCClient:
             except Exception:  # pragma: no cover - 본문이 없을 수도 있다
                 pass
             if exc.code in (401, 403):
-                raise HMCError(f"인증에 실패했습니다(HTTP {exc.code}). 계정과 비밀번호를 확인하세요.", "AUTH") from exc
-            raise HMCError(f"HMC 가 HTTP {exc.code} 를 돌려주었습니다. {body}".strip(), stage) from exc
+                raise HMCError(
+                    f"인증에 실패했습니다(HTTP {exc.code}). 계정 · 비밀번호, 그리고 HMC 사용자 속성의"
+                    " 'Allow remote access via the web' 이 켜져 있는지 확인하세요.", "AUTH") from exc
+            hint = {
+                406: " Accept 헤더를 받아들이지 않았습니다(HMC 버전 차이).",
+                503: " HMC 웹 서비스가 준비되지 않았습니다(재기동 직후 · 세션 수 초과일 수 있음).",
+            }.get(exc.code, "")
+            raise HMCError(f"HMC 가 HTTP {exc.code} 를 돌려주었습니다.{hint} {body}".strip(), stage) from exc
         except urllib.error.URLError as exc:
-            raise HMCError(
-                f"{self.base_url} 에 연결하지 못했습니다: {exc.reason}."
-                f" 방화벽에서 TCP {self.port} 가 열려 있는지 확인하세요.",
-                "CONNECT",
-            ) from exc
+            raise HMCError(*self._describe_connect_error(exc.reason)) from exc
+        except (ssl.SSLError, socket.timeout, TimeoutError, ConnectionError) as exc:
+            raise HMCError(*self._describe_connect_error(exc)) from exc
+
+    def _describe_connect_error(self, reason: Any) -> tuple[str, str]:
+        """연결 실패를 원인별로 나눈다. 전부 '방화벽 확인' 으로 뭉뚱그리면 엉뚱한 곳을 본다."""
+        text = str(reason)
+        if isinstance(reason, ssl.SSLError) or "SSL" in text or "TLS" in text:
+            hint = ""
+            lowered = text.lower()
+            if "legacy" in lowered or "renegotiation" in lowered or "dh key too small" in lowered \
+                    or "sslv3" in lowered or "unsupported protocol" in lowered:
+                hint = " 오래된 HMC 의 TLS 설정입니다. 설정 hmc.legacy_tls: true 로 다시 시도하세요."
+            elif "certificate" in lowered:
+                hint = " 인증서 검증에 실패했습니다. 사설 CA 를 신뢰 목록에 넣거나 verify_tls 를 끄세요."
+            return f"TLS 연결 실패: {text}.{hint}", "TLS"
+        if isinstance(reason, (socket.timeout, TimeoutError)) or "timed out" in text.lower():
+            return (f"{self.base_url} 응답이 {self.timeout}초 안에 오지 않았습니다. HMC 가 바쁘거나(프레임 · LPAR 이"
+                    " 많음) 경로가 막혀 있습니다. timeout_seconds 를 늘려 보세요.", "TIMEOUT")
+        if "proxy" in text.lower() or "tunnel" in text.lower():
+            return (f"프록시를 거치다 실패했습니다: {text}. hmc.use_proxy 를 끄세요(기본 꺼짐).", "PROXY")
+        if isinstance(reason, ConnectionRefusedError) or "refused" in text.lower():
+            return (f"{self.host}:{self.port} 가 연결을 거부했습니다. HMC 의 REST(웹) 서비스가 켜져 있는지,"
+                    f" 포트가 {self.port} 가 맞는지 확인하세요.", "CONNECT")
+        return (f"{self.base_url} 에 연결하지 못했습니다: {text}. 방화벽에서 TCP {self.port} 가 열려 있는지"
+                " 확인하세요.", "CONNECT")
 
     def logon(self) -> str:
         if not self.host:
@@ -131,7 +178,7 @@ class HMCClient:
             f"{self.base_url}/rest/api/web/Logon",
             data=body.encode("utf-8"),
             method="PUT",
-            headers={"Content-Type": _LOGON_TYPE, "Accept": "application/vnd.ibm.powervm.web+xml"},
+            headers={"Content-Type": _LOGON_TYPE, "Accept": _LOGON_ACCEPT},
         )
         with self._open(request, "LOGON") as response:
             payload = response.read()
@@ -160,6 +207,9 @@ class HMCClient:
         )
         with self._open(request, "QUERY") as response:
             payload = response.read()
+        if not payload.strip():
+            # LPAR 이 하나도 없는 프레임 등은 HTTP 204(빈 본문)로 답한다. 빈 목록이지 오류가 아니다.
+            return ElementTree.Element("feed")
         try:
             return ElementTree.fromstring(payload)
         except ElementTree.ParseError as exc:

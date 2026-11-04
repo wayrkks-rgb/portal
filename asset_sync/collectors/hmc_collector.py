@@ -123,6 +123,8 @@ class HMCCollector:
             entry["host"], entry["username"], entry["password"],
             port=entry["port"], verify_tls=entry["verify_tls"],
             timeout_seconds=int(self.settings.get("timeout_seconds", 30) or 30),
+            use_proxy=bool(self.settings.get("use_proxy", False)),
+            legacy_tls=bool(entry.get("legacy_tls", self.settings.get("legacy_tls", False))),
         )
 
     # ── 수집 ────────────────────────────────────────────────────────────

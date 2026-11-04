@@ -293,6 +293,10 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             "port": 12443,
             "timeout_seconds": 30,
             "verify_tls": False,
+            # Windows 시스템 프록시를 HMC 요청에 쓰지 않는다(내부망 장비).
+            "use_proxy": False,
+            # 오래된 HMC 의 TLS(재협상 · 약한 키) 허용. 'legacy renegotiation' 오류가 날 때만 켠다.
+            "legacy_tls": False,
             "endpoints": [],
         },
         # 월간 점검의 서버 현황·EOSL 집계 기준. 대수가 ITSM 총 건수와 다를 때
