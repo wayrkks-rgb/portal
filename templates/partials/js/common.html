@@ -494,7 +494,8 @@ const MOVEMENT_STATE_HEADS = {
 
 function movementMatches(item, term, effect, transition) {
   const pending = item.source === 'VCENTER' && !item.itsm_reflection_ok;
-  if (!effectMatches(effect, Number(item.count_effect || 0), pending)) return false;
+  if (!effectMatches(effect, Number(item.count_effect || 0), pending,
+    {addRemove: item._section !== 'changed', vmKind: item.vcenter_kind || ''})) return false;
   if (transition && `${item._section}|${item.transition}` !== transition) return false;
   if (!term) return true;
   return [item.cm_id, item.hostname, item.primary_ip, item.service_name, item.os_family,
@@ -597,8 +598,10 @@ function renderAssetMovementGroups(holderId, movements, options) {
         <span class="${cls}" style="font-weight:700;font-size:15px">[${label}] 총 ${all.length.toLocaleString()}건</span>
         <span class="text-xs text-muted">${key === 'changed'
           ? '기간 중 바뀌었다가 처음 상태로 돌아온 서버(꺼짐→켜짐 등). 서버 상태는 그대로라 생성 · 삭제에 넣지 않습니다'
-          : `대수 반영 ${Number((movements[key] || {}).counted ?? all.length)}건
-          · vCenter 만 바뀜(대수 그대로) ${Number((movements[key] || {}).vcenter_only || 0)}건`}</span>
+          : `자산 영향(대수 반영) ${Number((movements[key] || {}).counted ?? all.length)}건
+          · 자산 영향 없음(대수 그대로) ${Number((movements[key] || {}).vcenter_only || 0)}건`
+            + ((movements[key] || {}).vcenter_power != null
+              ? ` (VM 전원 ${Number((movements[key] || {}).vcenter_power || 0)} · vCenter VM ${key === 'created' ? '생성' : '삭제'} ${Number((movements[key] || {}).vcenter_vm || 0)})` : '')}</span>
         ${(term || opts.effect || opts.transition) && items.length !== all.length ? `<span class="text-xs text-warning">조건에 맞는 ${items.length.toLocaleString()}건만 표시</span>` : ''}
       </div>
       ${items.length
@@ -688,19 +691,34 @@ function renderDigestPendingNotice(holderId, digest, options) {
 // 생성 300 · 삭제 200 처럼 길어지면 '실제로 대수를 움직인 것' 과 '반영이 안 된 것' 을 따로 봐야 한다.
 const EFFECT_FILTERS = [
   ['', '대수 반영: 전체'],
-  ['counted', '대수 반영된 것만 (+1 / −1)'],
-  ['not_counted', '대수 그대로인 것만'],
+  ['counted', '자산에 영향 준 것만 (대수 +1 / −1)'],
+  ['not_counted', '자산 영향 없는 추가 · 삭제만 (VM 전원 · vCenter 만)'],
+  ['power', '　└ VM 전원 켜짐 · 꺼짐만'],
+  ['vm_only', '　└ vCenter VM 생성 · 삭제만'],
   ['pending', 'ITSM 반영 필요만'],
 ];
+
+// vCenter 쪽 변화가 전원(켜짐 ↔ 꺼짐)인지 VM 자체의 생성 · 삭제인지. vm_step = [처음, 끝] (없음 0 < 꺼짐 1 < 켜짐 2)
+function vmChangeKind(step) {
+  if (!Array.isArray(step) || step.length < 2) return '';
+  const [first, last] = step.map(Number);
+  if (first === last) return '';
+  return first === 0 || last === 0 ? 'vm' : 'power';
+}
 
 function effectFilterOptions() {
   return EFFECT_FILTERS.map(([value, label]) => `<option value="${value}">${label}</option>`).join('');
 }
 
-function effectMatches(effect, countEffect, pending) {
+// extra.addRemove: 생성 · 삭제 칸에 있는 줄인가(변경 칸은 '추가 · 삭제' 가 아니다). extra.vmKind: 'power' | 'vm' | ''
+function effectMatches(effect, countEffect, pending, extra) {
+  const more = extra || {};
+  const addRemove = more.addRemove !== false;
   if (!effect) return true;
   if (effect === 'counted') return countEffect !== 0;
-  if (effect === 'not_counted') return countEffect === 0;
+  if (effect === 'not_counted') return countEffect === 0 && addRemove;
+  if (effect === 'power') return countEffect === 0 && addRemove && more.vmKind === 'power';
+  if (effect === 'vm_only') return countEffect === 0 && addRemove && more.vmKind === 'vm';
   if (effect === 'pending') return Boolean(pending);
   return true;
 }
@@ -723,7 +741,8 @@ function filterDigestRows(rows, filter) {
     if (want.pending && row.reflection !== 'NOT_REFLECTED') return false;
     // 대수를 움직인 것만 보기. 월간 대수와 맞대어 볼 때 쓴다.
     if (want.counting && !Number(row.count_effect || 0)) return false;
-    if (!effectMatches(want.effect, Number(row.count_effect || 0), row.reflection === 'NOT_REFLECTED')) return false;
+    if (!effectMatches(want.effect, Number(row.count_effect || 0), row.reflection === 'NOT_REFLECTED',
+      {addRemove: row.kind === 'CREATED' || row.kind === 'REMOVED', vmKind: vmChangeKind(row.vm_step)})) return false;
     if (!term) return true;
     const hay = [row.label, row.hostname, row.primary_ip, row.asset_key, row.vm_key,
                  row.vm_name, row.esxi_host, row.esxi_label, row.cluster_label,

@@ -305,6 +305,10 @@ class ServerStatusService:
                 if len(steps) > 1:
                     vm_text += f" · 기간 중 {len(steps)}번 바뀜"
             vm_day = next((r.get("day") for r in reversed(rows) if vm_step(r)), last.get("day"))
+            # 화면 필터용: 전원(켜짐 ↔ 꺼짐) 인가, VM 자체가 생기거나 없어졌나.
+            vcenter_kind = ""
+            if steps and steps[0][0] != steps[-1][1]:
+                vcenter_kind = "vm" if 0 in (steps[0][0], steps[-1][1]) else "power"
             if cm_id and cm_id in listed:
                 # ITSM 비교로 이미 [생성] · [삭제] 에 있다. 한 곳에만 두고 vCenter 사실만 덧붙인다.
                 twin = next(i for i in movements[listed[cm_id]]["items"] if str(i.get("cm_id") or "") == cm_id)
@@ -314,6 +318,7 @@ class ServerStatusService:
             reflected = last.get("reflection") == "REFLECTED"
             base = {
                 "source": "VCENTER" if steps and not effect else "ITSM",
+                "vcenter_kind": vcenter_kind,
                 "changed_on": last.get("day"),
                 "cm_id": cm_id or None,
                 "hostname": last.get("hostname") or last.get("vm_name"),
@@ -352,6 +357,13 @@ class ServerStatusService:
             items = block.get("items") or []
             block["counted"] = sum(1 for i in items if i.get("count_effect"))
             block["vcenter_only"] = sum(1 for i in items if not i.get("count_effect"))
+            # 대수 그대로인 것 중 전원(켜짐 ↔ 꺼짐) 과 VM 생성 · 삭제를 나눠 센다.
+            block["vcenter_power"] = sum(
+                1 for i in items if not i.get("count_effect") and i.get("vcenter_kind") == "power")
+            block["vcenter_vm"] = sum(
+                1 for i in items if not i.get("count_effect") and i.get("vcenter_kind") == "vm")
+            block["itsm_pending"] = sum(
+                1 for i in items if not i.get("count_effect") and not i.get("itsm_reflection_ok"))
             block["listed"] = len(items)
             items.sort(key=lambda i: (0 if i.get("count_effect") else 1, str(i.get("changed_on") or ""),
                                       str(i.get("hostname") or "")))

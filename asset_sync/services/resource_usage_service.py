@@ -16,6 +16,7 @@ from ..repositories import AssetRepository
 from .asset_scope import AssetScope, vcenter_key
 from .change_presenter import present
 from .display_name_service import DisplayNameService
+from .resource_asset_basis import REMOVE_PENDING, ResourceAssetBasis
 from ..utils.hashing import canonical_json
 
 #: 변경 유형을 화면 문구로. 코드를 그대로 두면 받은 사람이 읽을 수 없다.
@@ -479,9 +480,13 @@ class VMResourceUsageExportService:
         changes = self._vm_configuration_changes(start_day, end_day, vcenter_id, esxi_host)
         # 사용률과 별개로 할당률을 붙인다. 증설 판단은 할당률로 한다.
         self._apply_allocation(hosts, vms)
+        # VM 대수는 vCenter 만이 아니라 ITSM 까지 반영된 것으로 센다(마지막 날 기준).
+        # 할당량 · 사용률은 그대로 vCenter 에 있는 VM 의 실제 값이다.
+        basis = self._apply_asset_basis(
+            hosts, vms, host_rows, vcenter_id=vcenter_id, cluster_name=cluster_name, esxi_host=esxi_host)
         # 통합기의 VM 대수도 걸러낸 목록에서 다시 센다. 저장된 수를 그대로 쓰면
         # 표의 대수와 아래 VM 목록의 줄 수가 어긋난다.
-        self._recount_hosts(hosts, vms)
+        self._recount_hosts(hosts, vms, asset_basis=bool(basis.get("applied")))
         clusters = self._roll_up_clusters(hosts)
         # 데이터스토어의 VM 대수는 세지 않는 VM 을 뺀 목록에서 다시 센다.
         self._attach_datastore_vms(datastores, vm_rows)
@@ -500,8 +505,16 @@ class VMResourceUsageExportService:
             "filters": self._available_filters(),
             # 무엇을 왜 뺐는지. 대수가 vCenter 화면과 다를 때 따질 수 있어야 한다.
             "scope": dropped,
+            # VM 대수를 무엇으로 셌는지. ITSM 이 없으면 vCenter 목록 그대로다.
+            "asset_basis": basis,
             "summary": {
-                "host_count": len(hosts), "vm_count": len(vms), "cluster_count": len(clusters),
+                "host_count": len(hosts),
+                "vm_count": (sum(int(h.get("vm_count") or 0) for h in hosts) + int(basis.get("unplaced") or 0)
+                             if basis.get("applied") else len(vms)),
+                "vcenter_vm_count": sum(int(h.get("vcenter_vm_count") or 0) for h in hosts),
+                "vm_not_counted": sum(int(h.get("not_counted_count") or 0) for h in hosts),
+                "vm_pending_remove": sum(int(h.get("pending_remove_count") or 0) for h in hosts),
+                "cluster_count": len(clusters),
                 "datastore_count": len(datastores),
                 "disk_capacity_gb": disk.get("capacity_gb"),
                 "disk_used_pct": disk.get("used_pct"),
@@ -655,8 +668,76 @@ class VMResourceUsageExportService:
             "samples": dropped_names,
         }
 
+    def _apply_asset_basis(
+        self,
+        hosts: list[dict[str, Any]],
+        vms: list[dict[str, Any]],
+        host_rows: list[dict[str, Any]],
+        **filters: Any,
+    ) -> dict[str, Any]:
+        """VM 마다 '대수에 드는가' 를 붙인다. 판정은 기간 마지막 수집일 하루로 한다.
+
+        - vCenter 에 있고 ITSM 이 집계 상태 → 대수에 든다
+        - vCenter 에만 있음(ITSM 미등록 · 집계 밖 상태) → 목록엔 있지만 대수에서 뺀다
+        - vCenter 에서 지워졌는데 ITSM 은 아직 집계 상태 → 마지막 통합기에 '삭제 대기' 로 남긴다
+        """
+        basis = ResourceAssetBasis(self.config, self.repo, self.scope)
+        days = sorted({str(r.get("stat_date")) for r in host_rows if r.get("stat_date")})
+        if not days:
+            return basis.describe(False)
+        members, meta = basis.membership(days[-1])
+        result = {**basis.describe(bool(meta["applied"])), "day": days[-1], "itsm_as_of": meta.get("itsm_as_of")}
+        if not meta["applied"]:
+            return result
+        known = set()
+        for vm in vms:
+            ident = self.vm_identity(vm)
+            known.add(ident)
+            entry = members.get(ident)
+            if entry is None:
+                # 마지막 날 판정에 없는 VM: 기간 중에 지워졌고 되살릴 근거도 없다.
+                entry = {"present": False, "counted": False, "state": "GONE", "state_label": "삭제됨"}
+            vm.update({
+                "asset_present": bool(entry["present"]),
+                "asset_counted": bool(entry["counted"]),
+                "asset_state": entry["state"],
+                "asset_state_label": entry["state_label"],
+                "cm_id": entry.get("cm_id"),
+                "itsm_status_label": entry.get("itsm_status_label"),
+                "itsm_service_name": entry.get("service_name"),
+            })
+        host_keys = {self.host_identity(h): h for h in hosts}
+        unplaced = 0
+        for ident, entry in members.items():
+            if ident in known or entry["state"] != REMOVE_PENDING:
+                continue
+            if any(value and str(entry.get(field) or "") != str(value) for field, value in filters.items()):
+                continue
+            host = host_keys.get((str(entry.get("vcenter_id") or ""), str(entry.get("esxi_host") or "")))
+            if host is None:
+                unplaced += 1      # 그 통합기가 그날 목록에 없다(통합기 철수 등)
+                continue
+            vms.append({
+                "vcenter_id": entry.get("vcenter_id"), "service_name": host.get("service_name"),
+                "cluster_name": entry.get("cluster_name"), "esxi_host": entry.get("esxi_host"),
+                "vm_uuid": entry.get("vm_uuid"), "vm_name": entry.get("vm_name"), "asset_key": entry.get("asset_key"),
+                "power_state": None,
+                "allocated_cpu_cores": entry.get("allocated_cpu_cores"),
+                "allocated_memory_mb": entry.get("allocated_memory_mb"),
+                "allocated_memory_gb": self._mb_to_gb(entry.get("allocated_memory_mb")),
+                # 할당량 · 디스크 합에는 넣지 않는다. vCenter 에는 이미 없다.
+                "inventory_status": "REMOVED_PENDING",
+                "latest_stat_date": entry.get("last_seen"), "sample_count": 0, "day_count": 0,
+                "asset_present": False, "asset_counted": True,
+                "asset_state": entry["state"], "asset_state_label": entry["state_label"],
+                "cm_id": entry.get("cm_id"), "itsm_status_label": entry.get("itsm_status_label"),
+                "itsm_service_name": entry.get("service_name"),
+            })
+        result["unplaced"] = unplaced
+        return result
+
     @staticmethod
-    def _recount_hosts(hosts: list[dict[str, Any]], vms: list[dict[str, Any]]) -> None:
+    def _recount_hosts(hosts: list[dict[str, Any]], vms: list[dict[str, Any]], *, asset_basis: bool = False) -> None:
         """통합기의 VM 대수를 **지금 걸러낸 목록에서** 다시 센다.
 
         저장된 수는 수집 당시의 수다. 그 뒤에 VM 을 자산에서 빼면 목록은 줄지만
@@ -668,14 +749,33 @@ class VMResourceUsageExportService:
         수를 ``stored_vm_count`` 로 남겨, 수집 자체가 비었을 때 따져볼 수 있게 한다.
         """
         counted: dict[tuple[str, str], int] = defaultdict(int)
+        present: dict[tuple[str, str], int] = defaultdict(int)
+        not_counted: dict[tuple[str, str], int] = defaultdict(int)
+        pending_remove: dict[tuple[str, str], int] = defaultdict(int)
         for vm in vms:
-            if str(vm.get("inventory_status") or "CURRENT") != "CURRENT":
+            key = (str(vm.get("vcenter_id") or ""), str(vm.get("esxi_host") or ""))
+            current = str(vm.get("inventory_status") or "CURRENT") == "CURRENT"
+            if not asset_basis:
+                if current:
+                    counted[key] += 1
+                    present[key] += 1
                 continue
-            counted[(str(vm.get("vcenter_id") or ""), str(vm.get("esxi_host") or ""))] += 1
+            # ITSM 까지 본 대수. vCenter 에 있는 수는 따로 들고 있어 vCenter 화면과 견줄 수 있다.
+            if vm.get("asset_counted"):
+                counted[key] += 1
+            if current and vm.get("asset_present"):
+                present[key] += 1
+                if not vm.get("asset_counted"):
+                    not_counted[key] += 1
+            if vm.get("asset_state") == REMOVE_PENDING:
+                pending_remove[key] += 1
         for row in hosts:
             key = (str(row.get("vcenter_id") or ""), str(row.get("esxi_host") or ""))
             row["stored_vm_count"] = row.get("vm_count")
             row["vm_count"] = counted.get(key, 0)
+            row["vcenter_vm_count"] = present.get(key, 0)
+            row["not_counted_count"] = not_counted.get(key, 0)
+            row["pending_remove_count"] = pending_remove.get(key, 0)
 
     def _apply_allocation(self, hosts: list[dict[str, Any]], vms: list[dict[str, Any]]) -> None:
         """통합기별 VM 할당량과 할당률을 붙인다.
@@ -752,6 +852,9 @@ class VMResourceUsageExportService:
                 "cluster_name": cluster_name or None,
                 "host_count": len(members),
                 "vm_count": sum(int(m.get("vm_count") or 0) for m in members),
+                "vcenter_vm_count": sum(int(m.get("vcenter_vm_count") or 0) for m in members),
+                "not_counted_count": sum(int(m.get("not_counted_count") or 0) for m in members),
+                "pending_remove_count": sum(int(m.get("pending_remove_count") or 0) for m in members),
                 "allocated_cpu_cores": capacity_cpu,
                 "allocated_memory_mb": capacity_mem,
                 "allocated_memory_gb": self._mb_to_gb(capacity_mem),
@@ -816,7 +919,9 @@ class VMResourceUsageExportService:
         ws_host.title = "HostResourceUsage"
         self._write_sheet(ws_host, [
             ("서비스명", "service_name"), ("vCenter", "vcenter_id"), ("Cluster", "cluster_name"),
-            ("통합기", "esxi_host"), ("VM 대수", "vm_count"), ("실제 CPU Core", "allocated_cpu_cores"),
+            ("통합기", "esxi_host"), ("VM 대수(자산 기준)", "vm_count"), ("vCenter VM 수", "vcenter_vm_count"),
+            ("vCenter 에만 있음(대수 제외)", "not_counted_count"), ("삭제 대기(ITSM 미반영)", "pending_remove_count"),
+            ("실제 CPU Core", "allocated_cpu_cores"),
             ("실제 Memory GB", "allocated_memory_gb"),
             ("VM 할당 CPU Core", "assigned_cpu_cores"), ("VM 할당 Memory GB", "assigned_memory_gb"),
             ("CPU 할당률 %", "cpu_alloc_pct"), ("MEM 할당률 %", "mem_alloc_pct"),
@@ -828,7 +933,7 @@ class VMResourceUsageExportService:
         ws_cluster = wb.create_sheet("ClusterResourceUsage")
         self._write_sheet(ws_cluster, [
             ("서비스명", "service_name"), ("vCenter", "vcenter_id"), ("통합기(Cluster)", "cluster_name"),
-            ("ESXi 대수", "host_count"), ("VM 대수", "vm_count"),
+            ("ESXi 대수", "host_count"), ("VM 대수(자산 기준)", "vm_count"), ("vCenter VM 수", "vcenter_vm_count"),
             ("실제 CPU Core", "allocated_cpu_cores"), ("실제 Memory GB", "allocated_memory_gb"),
             ("VM 할당 CPU Core", "assigned_cpu_cores"), ("VM 할당 Memory GB", "assigned_memory_gb"),
             ("CPU 할당률 %", "cpu_alloc_pct"), ("MEM 할당률 %", "mem_alloc_pct"),
@@ -851,6 +956,8 @@ class VMResourceUsageExportService:
         self._write_sheet(ws_vm, [
             ("서비스명", "service_name"), ("vCenter", "vcenter_id"), ("Cluster", "cluster_name"),
             ("통합기", "esxi_host"), ("VM UUID", "vm_uuid"), ("VM명", "vm_name"),
+            ("자산 판정", "asset_state_label"), ("자산번호", "cm_id"), ("ITSM 상태", "itsm_status_label"),
+            ("ITSM 업무명", "itsm_service_name"),
             ("전원상태", "power_state"), ("실제 CPU Core", "allocated_cpu_cores"),
             ("실제 Memory GB", "allocated_memory_gb"),
             ("할당 Disk GB", "provisioned_disk_gb"), ("사용 Disk GB", "used_disk_gb"),
@@ -868,6 +975,63 @@ class VMResourceUsageExportService:
         wb.save(target)
         wb.close()
         return target
+
+    # ── 두 날 사이 VM 추가 · 삭제 · 이동 ──────────────────────────────────
+    def moves(self, from_day: str, to_day: str) -> dict[str, Any]:
+        """두 날(그날 수집이 없으면 그 전 마지막 수집일) 사이 VM 대수를 움직인 것.
+
+        '10/1 → 11/1 에 VM 이 7대 늘었다' 의 7대가 어느 VM 인지 답한다. 추가 - 삭제 = 대수 변화이고,
+        ITSM 이 아직 안 바뀐 것은 '반영 대기' 로 따로 둔다(대수에는 들지 않는다).
+        """
+        requested = sorted([str(from_day)[:10], str(to_day)[:10]])
+        for day in requested:
+            date.fromisoformat(day)
+        actual = [self.stat_date_on_or_before(day) for day in requested]
+        if actual[1] is None:
+            raise LookupError(f"{requested[1]} 이전에 수집된 통합기 자원 값이 없습니다.")
+        if actual[0] is None:
+            raise LookupError(f"{requested[0]} 이전에 수집된 통합기 자원 값이 없습니다.")
+        result = ResourceAssetBasis(self.config, self.repo, self.scope).moves(actual[0], actual[1])
+        result["from"] = {"requested": requested[0], "actual": actual[0]}
+        result["to"] = {"requested": requested[1], "actual": actual[1]}
+        resolver = DisplayNameService(self.repo).resolver(self.config)
+        for row in result["rows"]:
+            vc = row.get("vcenter_id") or ""
+            for side in ("before", "after"):
+                cluster, esxi = row.get(f"cluster_{side}"), row.get(f"esxi_{side}")
+                row[f"cluster_{side}_label"] = resolver.name("CLUSTER", cluster, vc) if cluster else None
+                row[f"esxi_{side}_label"] = resolver.name("ESXI", esxi, vc) if esxi else None
+                row[f"host_{side}_text"] = " / ".join(
+                    str(v) for v in (row[f"cluster_{side}_label"] or cluster, row[f"esxi_{side}_label"] or esxi) if v
+                ) or "-"
+            row["vcenter_label"] = resolver.name("VCENTER", vc, vc) if vc else None
+        self._apply_display_names(result["by_host"])
+        return result
+
+    def export_moves_xlsx(self, from_day: str, to_day: str, target_dir: Path) -> tuple[Path, dict[str, Any]]:
+        data = self.moves(from_day, to_day)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / f"통합서버_VM추가삭제_{data['from']['requested']}_{data['to']['requested']}.xlsx"
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "VM추가삭제"
+        self._write_sheet(ws, [
+            ("구분", "change_label"), ("대수", "count_effect"), ("VM명", "vm_name"), ("호스트명", "hostname"),
+            ("IP", "primary_ip"), ("자산번호", "cm_id"), ("업무명(ITSM)", "service_name"), ("OS", "os"),
+            ("CPU", "allocated_cpu_cores"), ("MEM GB", "allocated_memory_gb"), ("vCenter", "vcenter_id"),
+            ("이전 통합기", "host_before_text"), ("이후 통합기", "host_after_text"),
+            ("이전 vCenter", "vcenter_before"), ("이후 vCenter", "vcenter_after"),
+            ("이전 ITSM", "itsm_before"), ("이후 ITSM", "itsm_after"), ("사유", "reason"),
+        ], data["rows"])
+        ws_host = wb.create_sheet("통합기별")
+        self._write_sheet(ws_host, [
+            ("vCenter", "vcenter_id"), ("통합기(Cluster)", "cluster_display_name"), ("ESXi", "esxi_host"),
+            ("추가", "added"), ("삭제", "removed"), ("이동 들어옴", "moved_in"), ("이동 나감", "moved_out"),
+            ("순증감", "net"), ("추가 대기", "pending_add"), ("삭제 대기", "pending_remove"),
+        ], data["by_host"])
+        wb.save(target)
+        wb.close()
+        return target, data
 
     def import_file(self, file_path: Path, stat_date: str | None = None) -> dict[str, Any]:
         """Compatibility import for previously exported JSON/CSV/XLSX files."""

@@ -153,6 +153,85 @@ function renderMovementItems() {
   }
 }
 
+// ── 월별 추가 · 삭제 통계 ──────────────────────────────────────────────
+// 달마다 변동 내역과 같은 계산으로 숫자만 모은다. 자산에 영향 준 것과 영향 없이 추가 · 삭제된 것을 나눈다.
+let movementStats = null;
+
+async function loadMovementStats() {
+  const table = document.getElementById('monthly-stats-table');
+  if (!table) return;
+  const month = document.getElementById('monthly-month').value || new Date().toISOString().slice(0, 7);
+  const months = (document.getElementById('monthly-stats-months') || {}).value || 6;
+  table.innerHTML = '<tbody><tr><td class="text-muted"><span class="loading"></span> 달마다 다시 계산하는 중...</td></tr></tbody>';
+  const data = await integrationFetch(`/api/asset-sync/server-status/movement-stats?month=${month}&months=${months}`);
+  movementStats = data && !data.error ? data : {error: (data && data.error) || '불러오지 못했습니다.'};
+  renderMovementStats();
+}
+
+function renderMovementStats() {
+  const table = document.getElementById('monthly-stats-table');
+  if (!table || !movementStats) return;
+  if (movementStats.error) {
+    table.innerHTML = `<tbody><tr><td class="text-error">❌ ${syncEscape(movementStats.error)}</td></tr></tbody>`;
+    return;
+  }
+  const view = (document.getElementById('monthly-stats-view') || {}).value || '';
+  const showCounted = view !== 'not_counted';
+  const showOther = view !== 'counted';
+  const link = (month, effect, n, cls) => Number(n || 0)
+    ? `<a href="javascript:void(0)" class="${cls || ''}" onclick="openMonthMovements('${month}','${effect}')"><strong>${Number(n).toLocaleString()}</strong></a>`
+    : '<span class="text-muted">0</span>';
+  const head = `<tr><th rowspan="2">월</th><th rowspan="2">월말 자산 대수</th>
+      ${showCounted ? '<th colspan="3">자산에 영향 (대수 반영)</th>' : ''}
+      ${showOther ? '<th colspan="4">자산 영향 없음 (대수 그대로)</th><th rowspan="2">변경<div class="text-xs text-muted">되돌아옴</div></th>' : ''}</tr>
+    <tr>${showCounted ? '<th>추가</th><th>삭제</th><th>순증감</th>' : ''}
+      ${showOther ? '<th>추가<div class="text-xs text-muted">전원 켜짐 / VM 생성</div></th><th>삭제<div class="text-xs text-muted">전원 꺼짐 / VM 삭제</div></th><th>ITSM 반영 필요</th><th>합계</th>' : ''}</tr>`;
+  const sum = {cc: 0, rc: 0, cn: 0, rn: 0};
+  const body = (movementStats.months || []).map(item => {
+    if (item.status !== 'SUCCESS') {
+      return `<tr><td class="mono">${syncEscape(item.month)}</td><td colspan="9" class="text-muted">비교할 ITSM 스냅샷이 없습니다</td></tr>`;
+    }
+    const c = item.created || {}, r = item.removed || {};
+    sum.cc += c.counted || 0; sum.rc += r.counted || 0; sum.cn += c.not_counted || 0; sum.rn += r.not_counted || 0;
+    const net = Number(c.counted || 0) - Number(r.counted || 0);
+    return `<tr>
+      <td class="mono"><a href="javascript:void(0)" onclick="openMonthMovements('${item.month}','')">${syncEscape(item.month)}</a></td>
+      <td>${Number(item.after_total || 0).toLocaleString()}</td>
+      ${showCounted ? `<td>${link(item.month, 'counted', c.counted, 'text-success')}</td>
+        <td>${link(item.month, 'counted', r.counted, 'text-error')}</td>
+        <td><strong>${net > 0 ? '+' : ''}${net}</strong></td>` : ''}
+      ${showOther ? `<td>${link(item.month, 'not_counted', c.not_counted)}
+          <div class="text-xs text-muted">${link(item.month, 'power', c.power)} / ${link(item.month, 'vm_only', c.vm)}</div></td>
+        <td>${link(item.month, 'not_counted', r.not_counted)}
+          <div class="text-xs text-muted">${link(item.month, 'power', r.power)} / ${link(item.month, 'vm_only', r.vm)}</div></td>
+        <td>${link(item.month, 'pending', Number(c.itsm_pending || 0) + Number(r.itsm_pending || 0), 'text-warning')}</td>
+        <td>${Number(c.not_counted || 0) + Number(r.not_counted || 0)}</td>
+        <td class="text-muted">${Number(item.changed || 0)}</td>` : ''}
+    </tr>`;
+  }).join('');
+  const total = `<tr class="row-total"><td><strong>합계</strong></td><td></td>
+    ${showCounted ? `<td class="text-success"><strong>${sum.cc}</strong></td><td class="text-error"><strong>${sum.rc}</strong></td>
+      <td><strong>${sum.cc - sum.rc > 0 ? '+' : ''}${sum.cc - sum.rc}</strong></td>` : ''}
+    ${showOther ? `<td><strong>${sum.cn}</strong></td><td><strong>${sum.rn}</strong></td><td></td><td><strong>${sum.cn + sum.rn}</strong></td><td></td>` : ''}</tr>`;
+  table.className = 'table-sticky';
+  table.innerHTML = `<thead>${head}</thead><tbody>${body}${total}</tbody>`;
+}
+
+// 통계의 숫자를 누르면 그 달로 옮겨 변동 내역을 그 조건으로 거른다.
+async function openMonthMovements(month, effect) {
+  const monthInput = document.getElementById('monthly-month');
+  const changed = monthInput && monthInput.value !== month;
+  if (changed) {
+    monthInput.value = month;
+    await loadMonthlyCheck();
+  }
+  const select = document.getElementById('monthly-movement-effect');
+  if (select) select.value = effect || '';
+  renderMovementItems();
+  const card = document.getElementById('monthly-movement-card');
+  if (card) card.scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
 // 증감 숫자를 눌렀을 때 그 칸의 신규·삭제 서버만 본다. 목록 팝업에는 검색·엑셀·
 // 일괄 제외가 이미 있으므로 그걸 그대로 쓴다.
 function openMovementBrowser(change, extra, title) {
@@ -650,6 +729,9 @@ function monthlyFold(rows) {
   const assignedMemory = sum('assigned_memory_mb');
   return {
     vm_count: sum('vm_count'),
+    vcenter_vm_count: sum('vcenter_vm_count'),
+    not_counted_count: sum('not_counted_count'),
+    pending_remove_count: sum('pending_remove_count'),
     allocated_cpu_cores: cpu, allocated_memory_mb: memory,
     assigned_cpu_cores: assignedCpu, assigned_memory_mb: assignedMemory,
     cpu_alloc_pct: cpu ? Math.round(assignedCpu / cpu * 1000) / 10 : null,
@@ -714,12 +796,23 @@ function monthlyIntegratedMatches(text, ...values) {
 }
 
 // 줄 하나를 그린다. 이름 칸만 다르고 나머지 열은 클러스터 합계·ESXi·총계가 같다.
-function monthlyIntegratedRow(nameCell, vcenter, service, now, old, rowClass) {
+function monthlyIntegratedRow(nameCell, vcenter, service, now, old, rowClass, target) {
   const value = (row, key) => (row && row[key] != null) ? row[key] : null;
   const pct = v => v == null ? '-' : `${Number(v).toLocaleString()}%`;
   const vmNow = value(now, 'vm_count');
   const vmOld = value(old, 'vm_count');
   const delta = (vmNow != null && vmOld != null) ? Number(vmNow) - Number(vmOld) : 0;
+  // 증감 숫자를 누르면 아래 'VM 추가 · 삭제 내역' 에서 이 통합기 것만 본다.
+  const deltaCell = !delta ? '' : (target
+    ? `<a href="javascript:void(0)" title="추가 · 삭제된 VM 보기" onclick="focusIntegratedMoves('${syncEscape(target)}')">${deltaText(delta)}</a>`
+    : deltaText(delta));
+  // vCenter 에는 있지만 ITSM 이 안 따라와 대수에서 뺀 것 · vCenter 에서 지웠지만 ITSM 이 그대로라 남긴 것.
+  const vcNow = value(now, 'vcenter_vm_count');
+  const notes = [];
+  if (vcNow != null && Number(vcNow) !== Number(vmNow || 0)) notes.push(`vCenter ${Number(vcNow).toLocaleString()}`);
+  if (Number(value(now, 'not_counted_count') || 0)) notes.push(`대수 제외 ${Number(value(now, 'not_counted_count'))}`);
+  if (Number(value(now, 'pending_remove_count') || 0)) notes.push(`삭제 대기 ${Number(value(now, 'pending_remove_count'))}`);
+  const vmNote = notes.length ? `<div class="text-xs text-muted" style="white-space:nowrap">${notes.join(' · ')}</div>` : '';
   return `<tr class="${rowClass}">
     <td>${nameCell}</td>
     <td class="text-xs mono">${syncEscape(vcenter || '-')}</td>
@@ -727,7 +820,7 @@ function monthlyIntegratedRow(nameCell, vcenter, service, now, old, rowClass) {
     <td class="text-muted">${vmOld == null ? '-' : Number(vmOld).toLocaleString()}</td>
     <td>${vmNow == null
       ? '<span class="text-error">없음</span>'
-      : `<strong>${Number(vmNow).toLocaleString()}</strong>${delta ? deltaText(delta) : ''}`}</td>
+      : `<strong>${Number(vmNow).toLocaleString()}</strong>${deltaCell}${vmNote}`}</td>
     <td>${now ? resourcePair(value(now, 'allocated_cpu_cores'), value(now, 'allocated_memory_mb')) : '-'}</td>
     <td class="text-muted">${old ? resourcePair(value(old, 'assigned_cpu_cores'), value(old, 'assigned_memory_mb')) : '-'}</td>
     <td>${now ? `<strong>${resourcePair(value(now, 'assigned_cpu_cores'), value(now, 'assigned_memory_mb'))}</strong>` : '-'}</td>
@@ -794,12 +887,14 @@ function renderMonthlyIntegratedAgain() {
       + `<div class="text-xs text-muted">ESXi ${pairs.length.toLocaleString()}대`
       + (partial ? ` / 전체 ${group.rows.length.toLocaleString()}대` : '') + '</div>';
     body.push(monthlyIntegratedRow(
-      header, group.vcenter_id, group.service_name, nowTotal, oldTotal, 'row-group'));
+      header, group.vcenter_id, group.service_name, nowTotal, oldTotal, 'row-group',
+      `cluster|${group.vcenter_id || ''}|${group.cluster_name || ''}`));
     if (!foldOnly) {
       pairs.forEach(pair => {
         const row = pair.now || pair.old;
         body.push(monthlyIntegratedRow(
-          hostLabel(row), row.vcenter_id, row.service_name, pair.now, pair.old, 'row-child'));
+          hostLabel(row), row.vcenter_id, row.service_name, pair.now, pair.old, 'row-child',
+          `esxi|${row.vcenter_id || ''}|${row.esxi_host || ''}`));
       });
     }
     shownHosts += pairs.length;
@@ -812,7 +907,7 @@ function renderMonthlyIntegratedAgain() {
   if (grand && body.length) {
     body.push(monthlyIntegratedRow(
       `<strong>합계</strong><div class="text-xs text-muted">ESXi ${shownHosts.toLocaleString()}대</div>`,
-      '', '', grand, grandOld, 'row-total'));
+      '', '', grand, grandOld, 'row-total', 'all'));
   }
   renderIntegratedDelta(shownNow, shownOld, labels);
 
@@ -844,12 +939,16 @@ function renderMonthlyIntegratedAgain() {
       : '';
   }
   const previousHosts = ((previous && previous.hosts) || []).length;
+  const assetBasis = (current && current.asset_basis) || {};
+  const vmBasis = assetBasis.applied
+    ? ` · VM 대수 = vCenter + ITSM ${assetBasis.label || ''}`
+    : ' · VM 대수 = vCenter 목록(ITSM 스냅샷 없음)';
   document.getElementById('monthly-integrated-basis').textContent = range.day
     ? `${labels.now} 기준${range.actual && range.actual !== range.day ? `(그날 수집이 없어 ${range.actual} 값)` : ''}`
       + ` ↔ ${labels.old}${range.compareActual && range.compareActual !== range.compareDay ? `(${range.compareActual} 값)` : ''}`
-      + ` · 클러스터 ${groups.length.toLocaleString()}개 · ESXi ${hostCount.toLocaleString()}대`
+      + ` · 클러스터 ${groups.length.toLocaleString()}개 · ESXi ${hostCount.toLocaleString()}대` + vmBasis
     : `${range.start} ~ ${range.end} 집계 · 클러스터 ${groups.length.toLocaleString()}개 · ESXi ${hostCount.toLocaleString()}대`
-      + (previousHosts ? ` · 전월 ESXi ${previousHosts.toLocaleString()}대와 비교` : ' · 비교할 전월 없음');
+      + (previousHosts ? ` · 전월 ESXi ${previousHosts.toLocaleString()}대와 비교` : ' · 비교할 전월 없음') + vmBasis;
 }
 
 // ── 데이터스토어 디스크 현황 ───────────────────────────────────────────
@@ -967,35 +1066,172 @@ function renderMonthlyDatastoresAgain() {
   }
 }
 
-function renderMonthlyIntegratedMoves(current) {
-  const body = document.getElementById('monthly-integrated-moves');
-  // 변경 이력은 ESXi 이름만 갖고 있다. 통합기(클러스터) 이름은 통합기 표에서 찾는다.
-  const clusterOf = new Map((current.hosts || []).map(h => [
-    `${h.vcenter_id || ''}|${h.esxi_host || ''}`,
-    h.cluster_display_name || h.cluster_name || h.esxi_host || '-',
-  ]));
-  const moves = new Map();
-  (current.changes || []).forEach(change => {
-    if (change.event_type !== 'RV_NEW' && change.event_type !== 'RV_REMOVED') return;
-    const name = clusterOf.get(`${change.vcenter_id || ''}|${change.esxi_host || ''}`)
-      || change.esxi_host || '(통합기 미상)';
-    if (!moves.has(name)) moves.set(name, {created: [], removed: []});
-    moves.get(name)[change.event_type === 'RV_NEW' ? 'created' : 'removed'].push(change.vm_name || change.asset_key);
-  });
+// ── VM 추가 · 삭제 내역 ────────────────────────────────────────────────
+// 두 날(전월 말 ↔ 당월 말, 또는 비교일 ↔ 기준일) 사이 VM 대수를 움직인 VM. 추가 − 삭제 = VM 증감이다.
+let integratedMoves = null;
+let integratedMovesTarget = '';   // 'esxi|vc|host' · 'cluster|vc|name' · 'all' · ''
+const MOVE_CLASS = {ADDED: 'text-success', REMOVED: 'text-error', MOVED: '', PENDING_ADD: 'text-warning', PENDING_REMOVE: 'text-warning'};
 
-  const rows = [...moves.entries()].sort((a, b) =>
-    (b[1].created.length + b[1].removed.length) - (a[1].created.length + a[1].removed.length));
-  body.innerHTML = rows.length ? rows.map(([name, item]) => {
-    const net = item.created.length - item.removed.length;
-    const names = [...item.created.map(n => `+${n}`), ...item.removed.map(n => `-${n}`)];
-    return `<tr>
-      <td><strong>${syncEscape(name)}</strong></td>
-      <td class="text-success">${item.created.length.toLocaleString()}</td>
-      <td class="text-error">${item.removed.length.toLocaleString()}</td>
-      <td><strong>${net > 0 ? '+' : ''}${net.toLocaleString()}</strong></td>
-      <td class="text-xs">${syncEscape(names.slice(0, 20).join(', '))}${names.length > 20 ? ` 외 ${names.length - 20}건` : ''}</td>
-    </tr>`;
-  }).join('') : '<tr><td colspan="5" style="text-align:center" class="text-muted">이 달에 생성·삭제된 VM 이 없습니다.</td></tr>';
+async function loadIntegratedMoves(from, to) {
+  const holder = document.getElementById('monthly-moves-table');
+  if (!holder) return;
+  integratedMoves = null;
+  holder.innerHTML = '<tbody><tr><td class="text-muted"><span class="loading"></span> VM 추가 · 삭제를 견주는 중...</td></tr></tbody>';
+  const data = await integrationFetch(`/api/asset-sync/resource-usage/moves?from=${from}&to=${to}`);
+  integratedMoves = data && !data.error ? data : {error: (data && data.error) || '불러오지 못했습니다.'};
+  renderIntegratedMoves();
+}
+
+function integratedMovesButtons() {
+  const data = integratedMoves;
+  if (!data || data.error || !data.applied) return '';
+  const c = data.counts || {};
+  const button = (kind, label, n, cls) => `<a href="javascript:void(0)" class="${cls}" style="margin-right:14px"
+      onclick="pickIntegratedMoves('${kind}')"><strong>${label} ${Number(n || 0).toLocaleString()}</strong></a>`;
+  return `VM 대수 변화 = ${button('ADDED', '추가 +', c.ADDED, 'text-success')}${button('REMOVED', '삭제 −', c.REMOVED, 'text-error')}`
+    + `<span class="text-muted" style="margin-right:14px">(순 ${data.net > 0 ? '+' : ''}${Number(data.net || 0).toLocaleString()})</span>`
+    + button('MOVED', '이동(vMotion)', c.MOVED, '')
+    + button('pending', 'ITSM 반영 대기', Number(c.PENDING_ADD || 0) + Number(c.PENDING_REMOVE || 0), 'text-warning')
+    + '<span class="text-xs text-muted">숫자를 누르면 아래 내역에서 그것만 봅니다</span>';
+}
+
+function pickIntegratedMoves(kind) {
+  const select = document.getElementById('monthly-moves-kind');
+  if (select) select.value = kind;
+  integratedMovesTarget = '';
+  renderIntegratedMoves();
+  const card = document.getElementById('monthly-moves-card');
+  if (card) card.scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
+// 표의 VM 증감 숫자를 눌렀을 때. 그 통합기(또는 ESXi) 의 추가 · 삭제 · 이동만 남긴다.
+function focusIntegratedMoves(target) {
+  integratedMovesTarget = target === 'all' ? '' : target;
+  const select = document.getElementById('monthly-moves-kind');
+  if (select) select.value = '';
+  renderIntegratedMoves();
+  const card = document.getElementById('monthly-moves-card');
+  if (card) card.scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
+function integratedMoveTargetHit(row) {
+  if (!integratedMovesTarget) return true;
+  const [type, vc, name] = integratedMovesTarget.split('|');
+  if (String(row.vcenter_id || '') !== vc) return false;
+  return type === 'esxi'
+    ? [row.esxi_before, row.esxi_after].includes(name)
+    : [row.cluster_before, row.cluster_after].includes(name);
+}
+
+function renderIntegratedMoves() {
+  const table = document.getElementById('monthly-moves-table');
+  const summary = document.getElementById('monthly-moves-summary');
+  const basis = document.getElementById('monthly-moves-basis');
+  const deltaMoves = document.getElementById('monthly-integrated-delta-moves');
+  if (deltaMoves) deltaMoves.innerHTML = integratedMovesButtons();
+  if (!table) return;
+  const data = integratedMoves;
+  if (!data) { table.innerHTML = ''; return; }
+  if (data.error) {
+    table.innerHTML = `<tbody><tr><td class="text-muted">${syncEscape(data.error)}</td></tr></tbody>`;
+    summary.innerHTML = '';
+    return;
+  }
+  const fallback = side => side.actual && side.actual !== side.requested ? `(${side.actual} 값)` : '';
+  basis.textContent = `${data.from.requested}${fallback(data.from)} → ${data.to.requested}${fallback(data.to)}`;
+  const statuses = document.getElementById('monthly-moves-statuses');
+  if (statuses && data.basis && data.basis.label) statuses.textContent = data.basis.label;
+  if (!data.applied) {
+    summary.innerHTML = '<div class="alert alert-warning" style="margin-bottom:0">⚠️ 두 날 중 ITSM 스냅샷이 없는 날이 있어 ITSM 과 견줄 수 없습니다. VM 대수는 vCenter 목록 그대로입니다.</div>';
+    table.innerHTML = '';
+    return;
+  }
+  const c = data.counts || {};
+  summary.innerHTML = `<div class="flex gap-2" style="flex-wrap:wrap">${[
+    ['ADDED', '추가', c.ADDED, 'text-success', '대수 +'],
+    ['REMOVED', '삭제', c.REMOVED, 'text-error', '대수 −'],
+    ['MOVED', '이동(vMotion)', c.MOVED, '', '통합기만 바뀜'],
+    ['PENDING_ADD', '추가 대기', c.PENDING_ADD, 'text-warning', 'vCenter 생성 · ITSM 미반영'],
+    ['PENDING_REMOVE', '삭제 대기', c.PENDING_REMOVE, 'text-warning', 'vCenter 삭제 · ITSM 미반영'],
+  ].map(([kind, label, n, cls, note]) => `<div class="stat-card" style="cursor:pointer;min-width:130px" onclick="pickIntegratedMoves('${kind}')">
+      <div class="stat-value ${cls}">${Number(n || 0).toLocaleString()}</div><div class="stat-label">${label}</div>
+      <div class="stat-delta">${note}</div></div>`).join('')}</div>`
+    + (data.unknown ? `<div class="text-xs text-warning" style="margin-top:6px">한쪽 날에 그 vCenter 수집이 없어 견주지 못한 VM ${data.unknown}대는 뺐습니다.</div>` : '');
+
+  const kind = (document.getElementById('monthly-moves-kind') || {}).value || '';
+  const term = ((document.getElementById('monthly-moves-search') || {}).value || '').trim().toLowerCase();
+  const rows = (data.rows || []).filter(row => {
+    if (kind === 'counted' && !Number(row.count_effect || 0)) return false;
+    if (kind === 'pending' && !String(row.change).startsWith('PENDING')) return false;
+    if (kind && !['counted', 'pending'].includes(kind) && row.change !== kind) return false;
+    if (!integratedMoveTargetHit(row)) return false;
+    if (!term) return true;
+    return [row.vm_name, row.hostname, row.primary_ip, row.service_name, row.cm_id, row.host_before_text,
+      row.host_after_text, row.reason].some(v => String(v || '').toLowerCase().includes(term));
+  });
+  const target = document.getElementById('monthly-moves-target');
+  if (target) {
+    target.innerHTML = integratedMovesTarget
+      ? `<span class="badge badge-blue">${syncEscape(integratedMovesTarget.split('|')[2] || '')} 만
+          <a href="javascript:void(0)" onclick="focusIntegratedMoves('all')">✕</a></span>` : '';
+  }
+  const shown = document.getElementById('monthly-moves-shown');
+  if (shown) shown.textContent = `${rows.length.toLocaleString()} / ${(data.rows || []).length.toLocaleString()}건 표시`;
+  table.className = 'table-sticky';
+  table.innerHTML = `<thead><tr><th>구분</th><th>VM 명</th><th>호스트명</th><th>IP</th><th>자산번호</th><th>업무명(ITSM)</th>
+      <th>CPU / MEM</th><th>통합기 (이전 → 이후)</th><th>vCenter (이전 → 이후)</th><th>ITSM (이전 → 이후)</th><th>사유</th></tr></thead>
+    <tbody>${rows.length ? rows.map(row => `<tr>
+      <td style="white-space:nowrap"><strong class="${MOVE_CLASS[row.change] || ''}">${syncEscape(row.change_label)}</strong></td>
+      <td><strong>${syncEscape(row.vm_name || '-')}</strong></td>
+      <td>${syncEscape(row.hostname || '-')}</td>
+      <td class="text-xs mono">${syncEscape(row.primary_ip || '-')}</td>
+      <td class="text-xs mono">${syncEscape(row.cm_id || '-')}</td>
+      <td>${syncEscape(row.service_name || '-')}</td>
+      <td class="text-xs" style="white-space:nowrap">${row.allocated_cpu_cores == null ? '-' : `${row.allocated_cpu_cores}C`} / ${row.allocated_memory_gb == null ? '-' : `${row.allocated_memory_gb}G`}</td>
+      <td class="text-xs">${syncEscape(row.host_before_text || '-')}${row.change === 'MOVED' || row.host_before_text !== row.host_after_text ? ` → <strong>${syncEscape(row.host_after_text || '-')}</strong>` : ''}</td>
+      <td class="text-xs">${syncEscape(row.vcenter_before)} → <strong>${syncEscape(row.vcenter_after)}</strong></td>
+      <td class="text-xs">${syncEscape(row.itsm_before)} → <strong>${syncEscape(row.itsm_after)}</strong></td>
+      <td class="text-xs" style="min-width:220px">${syncEscape(row.reason || '')}</td>
+    </tr>`).join('') : `<tr><td colspan="11" style="text-align:center" class="text-muted">${
+      (data.rows || []).length ? '조건에 맞는 VM 이 없습니다.' : '두 날 사이 VM 대수를 움직인 VM 이 없습니다.'}</td></tr>`}</tbody>`;
+
+  const hostTable = document.getElementById('monthly-moves-hosts');
+  if (hostTable) {
+    const hosts = data.by_host || [];
+    hostTable.className = 'table-sticky';
+    hostTable.innerHTML = `<thead><tr><th>통합기</th><th>ESXi</th><th>추가</th><th>삭제</th><th>이동 들어옴</th><th>이동 나감</th>
+        <th>순증감</th><th>추가 대기</th><th>삭제 대기</th></tr></thead><tbody>${hosts.map(h => `<tr>
+        <td>${syncEscape(h.cluster_display_name || h.cluster_name || '-')}</td>
+        <td><a href="javascript:void(0)" onclick="focusIntegratedMoves('esxi|${syncEscape(h.vcenter_id || '')}|${syncEscape(h.esxi_host || '')}')">${syncEscape(h.esxi_display_name || h.esxi_host || '-')}</a></td>
+        <td class="text-success">${h.added || ''}</td><td class="text-error">${h.removed || ''}</td>
+        <td>${h.moved_in || ''}</td><td>${h.moved_out || ''}</td>
+        <td><strong>${h.net > 0 ? '+' : ''}${h.net || 0}</strong></td>
+        <td class="text-warning">${h.pending_add || ''}</td><td class="text-warning">${h.pending_remove || ''}</td>
+      </tr>`).join('') || '<tr><td colspan="9" class="text-muted" style="text-align:center">없음</td></tr>'}</tbody>`;
+  }
+}
+
+async function exportIntegratedMoves() {
+  const data = integratedMoves;
+  const alertEl = document.getElementById('monthly-integrated-alert');
+  if (!data || data.error || !data.from) { alertEl.innerHTML = '<div class="alert alert-warning">먼저 내역을 불러오세요.</div>'; return; }
+  const response = await fetch(`/api/asset-sync/resource-usage/moves/export?from=${data.from.requested}&to=${data.to.requested}`);
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(body.error || 'HTTP ' + response.status)}</div>`;
+    return;
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const named = disposition.match(/filename\*=UTF-8''([^;]+)/i) || disposition.match(/filename="?([^";]+)"?/i);
+  link.href = url;
+  link.download = named ? decodeURIComponent(named[1]) : `통합서버_VM추가삭제_${data.from.requested}_${data.to.requested}.xlsx`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 // 통합서버 자원사용현황은 vCenter 자료다. ITSM 자산 목록과 출처가 달라
@@ -1018,6 +1254,7 @@ function renderIntegratedDelta(nowRows, oldRows, labels) {
     <div class="text-sm">${item('ESXi', nowRows.length, oldRows.length, '대')}${item('VM', now.vm_count, old.vm_count, '대')}
       ${item('실제 CPU', now.allocated_cpu_cores, old.allocated_cpu_cores, 'C')}${item('실제 MEM', now.allocated_memory_mb, old.allocated_memory_mb, 'G', 1024)}
       ${item('할당 CPU', now.assigned_cpu_cores, old.assigned_cpu_cores, 'C')}${item('할당 MEM', now.assigned_memory_mb, old.assigned_memory_mb, 'G', 1024)}</div>
+    <div class="text-sm" id="monthly-integrated-delta-moves" style="margin-top:6px">${integratedMovesButtons()}</div>
   </div>`;
 }
 
@@ -1093,7 +1330,8 @@ async function loadMonthlyIntegrated(month) {
     document.getElementById('monthly-integrated-delta').innerHTML = '';
     renderMonthlyIntegrated(current, previous, range);
     renderMonthlyDatastoresAgain();
-    renderMonthlyIntegratedMoves(current);
+    // 전월 말 ↔ 당월 말. 위 표의 VM 증감이 어느 VM 때문인지 푼다.
+    loadIntegratedMoves(previousRange.end, range.end);
   } catch (error) {
     alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(error.message)}</div>`;
   }
@@ -1106,11 +1344,9 @@ async function loadIntegratedByDay(alertEl) {
   const compareDay = document.getElementById('monthly-integrated-compare-day').value;
   if (!day || !compareDay) { alertEl.innerHTML = '<div class="alert alert-warning">기준일과 비교일을 고르세요.</div>'; return; }
   const [early, late] = compareDay <= day ? [compareDay, day] : [day, compareDay];
-  const next = d => { const x = new Date(d); x.setDate(x.getDate() + 1); return x.toISOString().slice(0, 10); };
-  const [current, previous, between] = await Promise.all([
+  const [current, previous] = await Promise.all([
     integrationFetch(`/api/asset-sync/resource-usage?as_of=${day}`),
     integrationFetch(`/api/asset-sync/resource-usage?as_of=${compareDay}`),
-    early < late ? integrationFetch(`/api/asset-sync/resource-usage?start=${next(early)}&end=${late}`) : Promise.resolve(null),
   ]);
   if (current.error) { alertEl.innerHTML = `<div class="alert alert-error">❌ ${syncEscape(current.error)}</div>`; return; }
   alertEl.innerHTML = previous.error
@@ -1119,6 +1355,6 @@ async function loadIntegratedByDay(alertEl) {
     actual: (current.as_of || {}).actual, compareActual: (previous.as_of || {}).actual};
   renderMonthlyIntegrated(current, previous.error ? null : previous, range, {old: compareDay, now: day});
   renderMonthlyDatastoresAgain();
-  renderMonthlyIntegratedMoves(between && !between.error ? {...current, changes: between.changes || []} : current);
+  loadIntegratedMoves(early, late);
 }
 </script>

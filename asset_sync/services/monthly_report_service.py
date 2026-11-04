@@ -294,7 +294,34 @@ class MonthlyReportService:
             else:
                 by_host[key] = (row.get("cluster_display_name") or row.get("cluster_name")
                                 or row.get("esxi_host"))
-        result: dict[str, dict[str, list[str]]] = defaultdict(lambda: {"created": [], "removed": []})
+        result: dict[str, dict[str, list[str]]] = defaultdict(
+            lambda: {"created": [], "removed": [], "moved_in": [], "moved_out": []})
+        # VM 대수를 ITSM 까지 보고 셌으면, 증감도 같은 판정(전월 말 ↔ 기준일)으로 적는다.
+        # 그래야 첫 표의 VM 증감과 이 표의 생성 - 삭제(+ 이동)가 맞는다.
+        if (usage.get("asset_basis") or {}).get("applied"):
+            try:
+                moves = self.usage_service.moves(
+                    (_month_start(base_day) - timedelta(days=1)).isoformat(), base_day.isoformat())
+            except (LookupError, ValueError):
+                moves = None
+            if moves and moves.get("applied"):
+                for row in moves["rows"]:
+                    vc = row.get("vcenter_id") or ""
+                    before = by_host.get(f"{vc}|{row.get('esxi_before') or ''}") or row.get("esxi_before")
+                    after = by_host.get(f"{vc}|{row.get('esxi_after') or ''}") or row.get("esxi_after")
+                    name = str(row.get("vm_name") or "")
+                    if row["change"] == "ADDED":
+                        result[str(after or "(통합기 미상)")]["created"].append(name)
+                    elif row["change"] == "REMOVED":
+                        result[str(before or "(통합기 미상)")]["removed"].append(name)
+                    elif row["change"] == "MOVED" and before != after:
+                        # 통합기를 옮긴 vMotion. 전체 대수는 그대로지만 두 통합기의 대수는 바뀐다.
+                        result[str(before)]["moved_out"].append(name)
+                        result[str(after)]["moved_in"].append(name)
+                for block in result.values():
+                    for key in block:
+                        block[key].sort()
+                return dict(result)
         for change in usage.get("changes") or []:
             kind = {"RV_NEW": "created", "RV_REMOVED": "removed"}.get(str(change.get("event_type")))
             if not kind:
@@ -305,8 +332,8 @@ class MonthlyReportService:
                 str(change.get("vm_name") or change.get("asset_key") or "")
             )
         for block in result.values():
-            block["created"].sort()
-            block["removed"].sort()
+            for key in block:
+                block[key].sort()
         return dict(result)
 
     def _trend(self, base_day: date, months: int = 3) -> list[dict[str, Any]]:
@@ -673,21 +700,28 @@ class MonthlyReportService:
         extra = sorted(name for name in changes if name not in order)
         line = head + 1
         created_total = removed_total = 0
+        moved_total = 0
         for name in order + extra:
             block = changes.get(name)
-            if not block or not (block["created"] or block["removed"]):
+            moved_in = len((block or {}).get("moved_in") or [])
+            moved_out = len((block or {}).get("moved_out") or [])
+            if not block or not (block["created"] or block["removed"] or moved_in or moved_out):
                 continue
             created, removed = len(block["created"]), len(block["removed"])
             created_total += created
             removed_total += removed
+            moved_total += moved_in - moved_out
             _body(sheet.cell(line, 3), name).alignment = LEFT
             _body(sheet.cell(line, 4), created)
             _body(sheet.cell(line, 5), removed)
-            _body(sheet.cell(line, 6), created - removed, bold=True)
+            # 순증감 = 생성 - 삭제 + 이동(vMotion) 들어옴 - 나감. 첫 표의 VM 증감과 같다.
+            _body(sheet.cell(line, 6), created - removed + moved_in - moved_out, bold=True)
             note = " , ".join(
                 part for part in (
                     f"생성 : {created}" if created else "",
                     f"삭제 : {removed}" if removed else "",
+                    f"이동(vMotion) 들어옴 : {moved_in}" if moved_in else "",
+                    f"이동(vMotion) 나감 : {moved_out}" if moved_out else "",
                 ) if part
             )
             _body(sheet.cell(line, 7), note).alignment = LEFT
@@ -699,7 +733,7 @@ class MonthlyReportService:
             _body(sheet.cell(line, 3), "총 계", bold=True, fill=HEAD_FILL)
             _body(sheet.cell(line, 4), created_total, bold=True, fill=HEAD_FILL)
             _body(sheet.cell(line, 5), removed_total, bold=True, fill=HEAD_FILL)
-            _body(sheet.cell(line, 6), created_total - removed_total, bold=True, fill=HEAD_FILL)
+            _body(sheet.cell(line, 6), created_total - removed_total + moved_total, bold=True, fill=HEAD_FILL)
             note = " , ".join(
                 part for part in (
                     f"생성 : {created_total}" if created_total else "",
@@ -721,8 +755,9 @@ class MonthlyReportService:
             block = changes.get(name)
             if not block:
                 continue
-            for kind, label in (("created", "생성"), ("removed", "삭제")):
-                for vm_name in block[kind]:
+            for kind, label in (("created", "생성"), ("removed", "삭제"),
+                                ("moved_in", "이동(들어옴)"), ("moved_out", "이동(나감)")):
+                for vm_name in block.get(kind) or []:
                     _body(sheet.cell(line, 3), name).alignment = LEFT
                     _body(sheet.cell(line, 4), label)
                     _body(sheet.cell(line, 5), vm_name).alignment = LEFT

@@ -137,12 +137,40 @@
         <div class="table-wrap" style="max-height:520px;overflow:auto"><table id="monthly-datastore-table"></table></div>
       </div>
 
-      <div class="card">
-        <div class="card-title"><span class="icon">🔀</span> 통합기별 VM 생성 · 삭제</div>
-        <div class="table-wrap" style="max-height:360px;overflow:auto">
-          <table><thead><tr><th>통합기</th><th>생성</th><th>삭제</th><th>순증감</th><th>VM 명</th></tr></thead>
-          <tbody id="monthly-integrated-moves"></tbody></table>
+      <div class="card" id="monthly-moves-card">
+        <div class="flex justify-between items-center mb-4">
+          <div class="card-title" style="margin-bottom:0"><span class="icon">🔀</span> VM 추가 · 삭제 내역</div>
+          <div class="flex gap-2 items-center">
+            <span class="text-xs text-muted" id="monthly-moves-basis"></span>
+            <button class="btn btn-secondary btn-sm" onclick="exportIntegratedMoves()">Excel</button>
+          </div>
         </div>
+        <div class="text-xs text-muted mb-4">
+          VM 대수는 <strong>vCenter 와 ITSM 이 함께 바뀌어야</strong> 움직입니다. vCenter 에 VM 이 있고 ITSM 이
+          <strong id="monthly-moves-statuses">운영 · 대기</strong> 가 된 날 <strong>추가</strong>, ITSM 이 미사용 · 매각/폐기가 된 날
+          <strong>삭제</strong>입니다. vCenter 에서만 만들거나 지운 VM 은 <strong>반영 대기</strong>(대수 그대로)로 따로 두고,
+          <strong>vMotion</strong> 은 통합기별 대수에 늘 반영합니다(전체 대수 그대로). 위 표의 VM 증감 숫자를 누르면 그 통합기 것만 봅니다.
+        </div>
+        <div id="monthly-moves-summary" class="mb-4"></div>
+        <div class="flex gap-2 items-center mb-4" style="flex-wrap:wrap">
+          <select class="form-select" id="monthly-moves-kind" style="width:230px" onchange="renderIntegratedMoves()">
+            <option value="counted">대수 반영된 것 (추가 · 삭제)</option>
+            <option value="">전체</option>
+            <option value="ADDED">추가만</option>
+            <option value="REMOVED">삭제만</option>
+            <option value="MOVED">이동(vMotion)만</option>
+            <option value="pending">ITSM 반영 대기만 (대수 그대로)</option>
+          </select>
+          <input class="form-input" id="monthly-moves-search" style="width:260px"
+                 placeholder="VM · 호스트명 · IP · 업무명 · 통합기" oninput="renderIntegratedMoves()">
+          <span id="monthly-moves-target"></span>
+          <span class="text-xs text-muted" id="monthly-moves-shown"></span>
+        </div>
+        <div class="table-wrap" style="max-height:480px;overflow:auto"><table id="monthly-moves-table"></table></div>
+        <details style="margin-top:12px">
+          <summary class="text-sm" style="cursor:pointer"><strong>통합기별 증감</strong></summary>
+          <div class="table-wrap" style="max-height:360px;overflow:auto;margin-top:8px"><table id="monthly-moves-hosts"></table></div>
+        </details>
       </div>
     </div>
 
@@ -200,7 +228,31 @@
         <div class="table-wrap"><table id="monthly-server-all"></table></div>
       </div>
 
-      <div class="card">
+      <div class="card" id="monthly-stats-card">
+        <div class="flex justify-between items-center mb-4" style="flex-wrap:wrap;gap:8px">
+          <div class="card-title" style="margin-bottom:0"><span class="icon">📊</span> 월별 추가 · 삭제 통계</div>
+          <div class="flex gap-2 items-center">
+            <select class="form-select" id="monthly-stats-months" style="width:110px">
+              <option value="3">최근 3개월</option><option value="6" selected>최근 6개월</option><option value="12">최근 12개월</option>
+            </select>
+            <select class="form-select" id="monthly-stats-view" style="width:250px" onchange="renderMovementStats()">
+              <option value="">전체 (자산 영향 + 영향 없음)</option>
+              <option value="counted">자산에 영향 준 것만 (대수 +1 / −1)</option>
+              <option value="not_counted">자산 영향 없는 추가 · 삭제만 (VM 전원 등)</option>
+            </select>
+            <button class="btn btn-secondary btn-sm" onclick="loadMovementStats()">불러오기</button>
+          </div>
+        </div>
+        <div class="text-xs text-muted mb-4">
+          달마다 아래 <strong>자산 현황 변동 내역</strong>과 같은 계산(전월 말 ↔ 그달 말)으로 추가 · 삭제만 셉니다.
+          <strong>자산에 영향</strong> = ITSM 기준 대수가 +1 / −1 된 서버, <strong>영향 없음</strong> = 대수는 그대로인데
+          추가 · 삭제로 보인 서버(VM 전원 켜짐 · 꺼짐, vCenter 에서만 만들거나 지운 VM). 숫자를 누르면 그 달 · 그 조건의
+          서버 목록으로 갑니다. 여러 달을 다시 계산하므로 몇 초 걸릴 수 있습니다.
+        </div>
+        <div class="table-wrap"><table id="monthly-stats-table"></table></div>
+      </div>
+
+      <div class="card" id="monthly-movement-card">
         <div class="flex justify-between items-center mb-4">
           <div class="card-title" style="margin-bottom:0"><span class="icon">📋</span> 자산 현황 변동 내역</div>
           <button class="btn btn-secondary btn-sm" onclick="exportMonthly('movements')">Excel</button>

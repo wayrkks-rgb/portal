@@ -417,6 +417,22 @@ def test_the_api_compares_against_last_month(portal):
     assert body["eosl"]["all"]["total"] == body["all"]["table"]["rows"]["계"]["소계"]
 
 
+def test_monthly_stats_count_only_adds_and_removes_per_month(portal):
+    """월별 통계: 달마다 변동 내역과 같은 계산. 이번 달 = 추가 1 · 삭제 1, 스냅샷이 없는 달은 그렇다고 적는다."""
+    app, manager = portal
+    seed_snapshot(manager, datetime.now() - timedelta(days=40), [
+        asset("CM001"), asset("CM002", os_family="WINDOWS", physical=True),
+    ])
+    seed_snapshot(manager, datetime.now(), [asset("CM001"), asset("CM003", os_family="CentOS")])
+    body = admin(app).get("/api/asset-sync/server-status/movement-stats?months=3").get_json()
+    months = body["months"]
+    assert [m["month"] for m in months] == sorted(m["month"] for m in months) and len(months) == 3
+    last = months[-1]
+    assert last["status"] == "SUCCESS"
+    assert (last["created"]["counted"], last["removed"]["counted"], last["net"]) == (1, 1, 0)
+    assert months[0]["status"] == "NO_SNAPSHOT"
+
+
 def test_a_bad_month_is_refused(portal):
     app, _ = portal
     response = admin(app).get("/api/asset-sync/server-status?month=2026-13-99")

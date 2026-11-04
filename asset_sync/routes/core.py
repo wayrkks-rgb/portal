@@ -226,6 +226,58 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
             "basis": service.scope.basis(),
         })
 
+    @bp.route("/api/asset-sync/server-status/movement-stats")
+    @login_required
+    def movement_stats() -> Any:
+        """월별 추가 · 삭제 통계. 달마다 월간 '변동 내역' 과 **같은 계산**을 돌려 숫자만 모은다.
+
+        자산에 영향을 준 것(ITSM 기준 대수 +1 / -1)과 영향 없이 추가 · 삭제된 것(VM 전원 켜짐 · 꺼짐,
+        vCenter 에서만 생기거나 지운 VM)을 나눠 센다. ?month=YYYY-MM(마지막 달)&months=6
+        """
+        try:
+            last = _month_end(request.args.get("month"))
+            months = max(1, min(int(request.args.get("months") or 6), 12))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        result = []
+        with manager.connect() as conn:
+            repo = AssetRepository(conn)
+            service = ServerStatusService(cfg, repo, include_all=_include_all())
+            first = last.replace(day=1)
+            for _ in range(months):
+                month = first.strftime("%Y-%m")
+                base_day = _month_end(month)
+                current = repo.snapshot_on_or_before("ITSM", base_day.isoformat())
+                previous = repo.snapshot_on_or_before("ITSM", (first - timedelta(days=1)).isoformat())
+                if not current or not previous:
+                    result.append({"month": month, "status": "NO_SNAPSHOT"})
+                else:
+                    movements = service.movements(int(current["id"]), int(previous["id"]))
+                    _annotate(conn, movements, first, base_day)
+
+                    def side(key: str) -> dict[str, int]:
+                        block = movements.get(key) or {}
+                        items = block.get("items") or []
+                        return {
+                            "counted": int(block.get("counted", len(items)) or 0),
+                            "not_counted": int(block.get("vcenter_only", 0) or 0),
+                            "power": int(block.get("vcenter_power", 0) or 0),
+                            "vm": int(block.get("vcenter_vm", 0) or 0),
+                            "itsm_pending": int(block.get("itsm_pending", 0) or 0),
+                        }
+
+                    result.append({
+                        "month": month, "status": "SUCCESS",
+                        "as_of": current["snapshot_date"], "previous_as_of": previous["snapshot_date"],
+                        "before_total": movements.get("before_total"), "after_total": movements.get("after_total"),
+                        "net": movements.get("net"),
+                        "created": side("created"), "removed": side("removed"),
+                        "changed": len((movements.get("changed") or {}).get("items") or []),
+                    })
+                first = (first - timedelta(days=1)).replace(day=1)
+        result.reverse()
+        return jsonify({"status": "SUCCESS", "months": result, "basis": service.scope.basis()})
+
     @bp.route("/api/asset-sync/asset-trace")
     @login_required
     def asset_trace() -> Any:
@@ -940,6 +992,34 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
             return send_file(path, as_attachment=True, download_name=name)
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
+        except LookupError as exc:
+            return jsonify({"error": str(exc), "status": "NO_DATA"}), 404
+
+    @bp.route("/api/asset-sync/resource-usage/moves")
+    @login_required
+    def resource_usage_moves() -> Any:
+        """두 날 사이 VM 추가 · 삭제 · 이동. ?from=YYYY-MM-DD&to=YYYY-MM-DD"""
+        try:
+            with manager.connect() as conn:
+                service = VMResourceUsageExportService(cfg, AssetRepository(conn))
+                return jsonify(service.moves(request.args.get("from") or "", request.args.get("to") or ""))
+        except ValueError as exc:
+            return jsonify({"error": f"날짜를 YYYY-MM-DD 로 주세요 ({exc})"}), 400
+        except LookupError as exc:
+            return jsonify({"error": str(exc), "status": "NO_DATA"}), 404
+
+    @bp.route("/api/asset-sync/resource-usage/moves/export")
+    @login_required
+    def resource_usage_moves_export() -> Any:
+        try:
+            with manager.connect() as conn:
+                service = VMResourceUsageExportService(cfg, AssetRepository(conn))
+                path, _ = service.export_moves_xlsx(
+                    request.args.get("from") or "", request.args.get("to") or "",
+                    cfg.resolve("data/export/resource_usage"))
+            return send_file(path, as_attachment=True, download_name=path.name)
+        except ValueError as exc:
+            return jsonify({"error": f"날짜를 YYYY-MM-DD 로 주세요 ({exc})"}), 400
         except LookupError as exc:
             return jsonify({"error": str(exc), "status": "NO_DATA"}), 404
 

@@ -454,6 +454,9 @@ def test_weekly_and_monthly_list_power_changes_and_net_out_toggles(portal) -> No
     item = moves["removed"]["items"][0]
     assert item["count_effect"] == 0 and item["itsm_reflection"] == "ITSM 미반영"
     assert moves["removed"]["counted"] == 0 and moves["removed"]["vcenter_only"] == 1
+    # 자산 영향 없는 삭제 중 '전원 꺼짐' 으로 나눠 센다(월별 통계 · 화면 필터가 쓴다)
+    assert item["vcenter_kind"] == "power"
+    assert (moves["removed"]["vcenter_power"], moves["removed"]["vcenter_vm"]) == (1, 0)
 
 
 def test_power_off_and_itsm_unused_become_one_counted_row(portal) -> None:

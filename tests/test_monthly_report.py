@@ -54,7 +54,9 @@ def asset(cm_id: str, *, physical: bool = False, place: str = "CMPLACE010",
 def portal(tmp_path: Path):
     config = AppConfig(
         root_dir=tmp_path, sqlite_path=Path("data/report.db"),
-        rvtools={"resource_usage": {"enabled": False}, "vcenters": []},
+        # 이 파일은 보고서 모양을 본다. 시험 VM 은 ITSM 자산과 짝이 없으므로 VM 대수는
+        # vCenter 목록 그대로 센다(ITSM 까지 보는 판정은 test_resource_usage_asset_basis).
+        rvtools={"resource_usage": {"enabled": False, "asset_basis": False}, "vcenters": []},
     )
     manager = create_manager(config)
     manager.initialize()

@@ -125,6 +125,13 @@ vcenter:
     timeout_seconds: 3600
     output_dir: data/archive/vcenter_resource
     source_format: JSON
+    # 통합서버 자원사용현황의 VM 대수. vCenter 생성 · 삭제에 ITSM 상태까지 반영돼야 움직인다.
+    #   추가 = vCenter 에 VM 이 있고 ITSM 이 아래 상태가 된 날, 삭제 = ITSM 이 그 밖(미사용 · 매각/폐기)이 된 날.
+    #   vCenter 에서만 지운 VM 은 ITSM 이 바뀔 때까지 마지막 통합기에 '삭제 대기' 로 남는다. vMotion 은 늘 반영.
+    #   false 로 두면 예전처럼 vCenter VM 목록 그대로 센다.
+    asset_basis: true
+    asset_status: [CMSTA010, CMSTA050]   # 운영 · 대기
+    pending_removal_days: 180             # '삭제 대기' 를 찾아볼 기간(일)
 matching:
   use_identity_map_first: true
   auto_remember_exact_match: true
