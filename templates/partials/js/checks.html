@@ -91,7 +91,7 @@ function renderDailyDigest() {
   }
   const rows = (dailyDigest && dailyDigest.rows) || [];
   const bucket = (document.getElementById('daily-digest-filter') || {}).value || 'all';
-  const kind = {created: 'CREATED', removed: 'REMOVED', changed: 'CHANGED'}[bucket] || 'all';
+  const kind = {created: 'CREATED', removed: 'REMOVED', changed: 'CHANGED', excluded: 'EXCLUDED'}[bucket] || 'all';
   const shown = filterDigestRows(rows, {
     kind,
     source: (document.getElementById('daily-digest-source') || {}).value,
@@ -99,7 +99,9 @@ function renderDailyDigest() {
     pending: (document.getElementById('daily-digest-pending') || {}).checked,
     effect: (document.getElementById('daily-digest-effect') || {}).value,
   });
-  renderChangeDigestGroups('daily-digest-groups', shown, {kind, empty: '없음'});
+  const excludedRows = filterDigestRows((dailyDigest && dailyDigest.excluded_rows) || [],
+    {q: (document.getElementById('daily-digest-search') || {}).value});
+  renderChangeDigestGroups('daily-digest-groups', shown, {kind, empty: '없음', excluded: excludedRows});
   renderDailyPowerBox(rows);
   renderDigestPendingNotice('daily-digest-pending-notice', dailyDigest,
     {onShow: 'showDailyPending()', onExport: 'exportDailyPending()'});
@@ -473,7 +475,7 @@ function renderWeeklyDetail() {
   if (!table) return;
   const rows = (weeklyDigest && weeklyDigest.rows) || [];
   const bucket = document.getElementById('weekly-detail-filter').value;
-  const kind = {created: 'CREATED', removed: 'REMOVED', changed: 'CHANGED'}[bucket] || 'all';
+  const kind = {created: 'CREATED', removed: 'REMOVED', changed: 'CHANGED', excluded: 'EXCLUDED'}[bucket] || 'all';
   const shown = filterDigestRows(rows, {
     kind,
     source: document.getElementById('weekly-detail-source').value,
@@ -481,7 +483,9 @@ function renderWeeklyDetail() {
     pending: (document.getElementById('weekly-detail-pending') || {}).checked,
     effect: (document.getElementById('weekly-detail-effect') || {}).value,
   });
-  renderChangeDigestGroups('weekly-digest-groups', shown, {kind, empty: '없음'});
+  const excludedRows = filterDigestRows((weeklyDigest && weeklyDigest.excluded_rows) || [],
+    {q: document.getElementById('weekly-detail-search').value});
+  renderChangeDigestGroups('weekly-digest-groups', shown, {kind, empty: '없음', excluded: excludedRows});
   renderDigestPendingNotice('weekly-digest-pending-notice', weeklyDigest,
     {onShow: 'showWeeklyPending()', onExport: 'exportWeeklyPending()'});
 

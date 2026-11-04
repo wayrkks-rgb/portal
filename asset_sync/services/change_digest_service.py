@@ -108,12 +108,14 @@ REFLECTED = "REFLECTED"
 NOT_REFLECTED = "NOT_REFLECTED"
 NO_ASSET = "NO_ASSET"
 NOT_CHECKED = "NOT_CHECKED"
+EXCLUDED = "EXCLUDED"
 
 REFLECTION_LABELS = {
     REFLECTED: "반영됨",
     NOT_REFLECTED: "ITSM 미반영",
     NO_ASSET: "ITSM 자산 못 찾음",
     NOT_CHECKED: "대상 아님",
+    EXCLUDED: "제외 대상 · 반영 불필요",
 }
 
 def _is_empty(value: Any) -> bool:
@@ -188,16 +190,25 @@ class ChangeDigestService:
         events = self.repo.changes(source, 100000, start, end)
         context = _Context(self, start)
         rows = self._fold(events, context, include_trivial=include_trivial)
+        excluded: list[dict[str, Any]] = []
+        kept: list[dict[str, Any]] = []
         for row in rows:
             self._attach_identity(row, context)
             self._attach_reflection(row, context)
             self._attach_count_effect(row, context)
+            # vCLS · 템플릿 · 수동 제외한 VM 은 자산이 아니다. vCenter 쪽만 바뀐 줄이면
+            # 생성 · 삭제 · 'ITSM 등록 필요' 에 넣지 않고 [제외] 로 따로 둔다.
+            (excluded if self._mark_excluded(row) else kept).append(row)
             for internal in ("_itsm_record", "_vm_record", "_payloads", "_itsm_changes", "_seen", "_vm_seq"):
                 row.pop(internal, None)
+        rows = kept
         if fold == "period":
             # 주간처럼 여러 날을 볼 때는 서버 1대 = 1줄. 같은 서버가 [삭제](월) 와 [생성](화) 에
             # 둘 다 나오면 안 된다 -- 기간의 처음과 끝을 견주어 한 곳에만 둔다.
             rows = self.fold_period(rows)
+            excluded = self.fold_period(excluded)
+            for row in excluded:
+                row["excluded"] = True
         counts: dict[str, int] = defaultdict(int)
         for row in rows:
             counts[row["kind"]] += 1
@@ -208,6 +219,8 @@ class ChangeDigestService:
             # 무엇을 자산으로 셌는지. 생성·삭제 판정이 이 기준을 따른다.
             "basis": self.scope.basis(),
             "rows": rows,
+            # 자산이 아니라 뺀 VM(vCLS · 템플릿 · 수동 제외). 대수 · ITSM 반영과 무관하다.
+            "excluded_rows": excluded,
             "counts": {
                 kind: {"count": int(counts.get(kind, 0)), "label": label}
                 for kind, label in KIND_LABELS.items()
@@ -218,6 +231,7 @@ class ChangeDigestService:
                 "trivial_hidden": sum(int(r.get("trivial_count") or 0) for r in rows),
                 "itsm_pending": len(pending),
                 "missing_required": sum(1 for r in rows if r.get("missing")),
+                "excluded": len(excluded),
                 # 일간에서 본 증감이 월간 대수에 얼마나 반영되는지. 세 숫자가
                 # 일·주·월을 한 몸으로 읽게 해 준다.
                 "count_added": sum(1 for value in effects if value > 0),
@@ -226,6 +240,33 @@ class ChangeDigestService:
                 "count_net": sum(effects),
             },
         }
+
+    def _mark_excluded(self, row: dict[str, Any]) -> bool:
+        """vCenter 쪽만 바뀐 줄인데 그 VM 이 제외 대상이면 표시하고 참을 돌려준다."""
+        if row.get("sources") != ["RVTOOLS"]:
+            return False        # ITSM 쪽 변화가 섞이면 ITSM 기준 대수 판정을 그대로 따른다
+        record = dict(row.get("_vm_record") or {})
+        if not record.get("asset_key"):
+            record["asset_key"] = row.get("vm_key")
+        decision = self.scope.decide_vcenter(record)
+        if not decision.reason:
+            return False
+        label = self.scope.reason_label(decision.reason)
+        if decision.note:
+            label = f"{label}: {decision.note}"
+        row.update({
+            "excluded": True,
+            "exclude_reason": decision.reason,
+            "exclude_label": label,
+            "reflection": EXCLUDED,
+            "reflection_label": REFLECTION_LABELS[EXCLUDED],
+            "reflection_note": label,
+            "itsm_action": "",
+            "count_effect": 0,
+            "count_effect_label": "대수 무관",
+            "count_note": f"자산에서 뺀 VM 이라 대수 · ITSM 반영과 무관합니다({label}).",
+        })
+        return True
 
     def pending_itsm(self, start: str, end: str) -> list[dict[str, Any]]:
         """ITSM 에 아직 반영되지 않은 것만. 담당자에게 넘길 목록이다."""

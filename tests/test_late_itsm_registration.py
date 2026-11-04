@@ -606,3 +606,31 @@ def test_movements_show_status_before_and_after(portal) -> None:
     removed = {i["cm_id"]: i["transition"] for i in moves["removed"]["items"]}
     assert created == {"CM001": "대기 → 운영", "CM004": "ITSM 에 없음 → 운영"}
     assert removed == {"CM002": "운영 → 대기", "CM003": "운영 → ITSM 에서 삭제"}
+
+
+def test_vcls_and_manually_excluded_vms_are_not_waiting_for_itsm(portal) -> None:
+    """vCenter 에만 생긴 vCLS · 수동 제외 VM 은 'ITSM 에 자산 등록' 대상이 아니다. [제외] 로 따로 둔다."""
+    config, manager = portal
+    put_itsm(config, manager, PREV_END, BASE_ASSETS)
+    put_vcenter(config, manager, PREV_END, BASE_VMS)
+    vcls = dict(vm("u-vcls", "vcls-host", "10.0.0.200"), vm_name="vCLS-abc123")
+    manual = vm("u-man", "testvm", "10.0.0.201")
+    with manager.connect() as conn:
+        conn.execute("INSERT INTO asset_exclusion(source, asset_key, mode, reason, updated_at)"
+                     " VALUES('RVTOOLS','u-man','EXCLUDE','시험용','2026-10-01')")
+        conn.commit()
+    put_itsm(config, manager, DAY_VM, BASE_ASSETS)
+    put_vcenter(config, manager, DAY_VM, BASE_VMS + [vcls, manual, NEW_VM])
+    digest = day_digest(config, manager, DAY_VM)
+    assert [r["vm_name"] for r in digest["rows"]] == ["NEWSRV"]            # 진짜 새 VM 만 등록 대기
+    assert digest["summary"]["itsm_pending"] == 1 and digest["summary"]["excluded"] == 2
+    labels = {r["vm_name"]: r["exclude_label"] for r in digest["excluded_rows"]}
+    assert "vSphere" in labels["vCLS-abc123"] and "시험용" in labels["TESTVM"]
+
+    from asset_sync.services.server_status_service import ServerStatusService as S
+    moves = {"created": {"total": 0, "items": []}, "removed": {"total": 0, "items": []}, "net": 0}
+    S.merge_vcenter_movements(moves, digest["rows"])
+    S.attach_excluded(moves, digest["excluded_rows"])
+    assert [i["hostname"] for i in moves["created"]["items"]] == ["newsrv"]
+    assert moves["excluded"]["total"] == 2
+    assert {i["change"] for i in moves["excluded"]["items"]} == {"vCenter VM 생성"}

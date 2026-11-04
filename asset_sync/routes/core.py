@@ -136,14 +136,17 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
         """
 
         try:
-            rows = ChangeDigestService(cfg, AssetRepository(conn), scope_for(conn)).digest(
+            digest = ChangeDigestService(cfg, AssetRepository(conn), scope_for(conn)).digest(
                 f"{start.isoformat()}T00:00:00", f"{end.isoformat()}T23:59:59",
-            )["rows"]
+            )
         except Exception:  # 날짜 · 사유는 덧붙이는 정보다. 대수 화면을 막지 않는다.
             LOGGER.exception("변동 내역에 날짜 · 사유를 붙이지 못했습니다")
             return
+        rows = digest["rows"]
         ServerStatusService.annotate_movements(movements, rows)
         ServerStatusService.merge_vcenter_movements(movements, rows)
+        # vCLS · 템플릿 · 수동 제외 VM 은 [생성] · [삭제] 가 아니라 [제외] 칸에 둔다.
+        ServerStatusService.attach_excluded(movements, digest.get("excluded_rows") or [])
 
     def _monthly_status(conn: Any, base_day: date) -> tuple[dict[str, Any] | None, Any]:
         """월간 점검 결과 한 벌. 화면과 엑셀이 **같은 계산**을 쓰도록 여기서만 만든다.
@@ -273,6 +276,7 @@ def create_core_blueprint(cfg: AppConfig, manager: DatabaseManager) -> Blueprint
                         "net": movements.get("net"),
                         "created": side("created"), "removed": side("removed"),
                         "changed": len((movements.get("changed") or {}).get("items") or []),
+                        "excluded": int((movements.get("excluded") or {}).get("total") or 0),
                     })
                 first = (first - timedelta(days=1)).replace(day=1)
         result.reverse()

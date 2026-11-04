@@ -455,12 +455,38 @@ function renderChangeDigest(tableId, rows, options) {
 // 분류돼 온다 -- 화면은 서버가 정한 kind 를 그대로 묶기만 한다.
 const DIGEST_SECTIONS = [['CREATED', '생성'], ['CHANGED', '변경'], ['REMOVED', '삭제']];
 
+// ── [제외] 칸 (일 · 주 · 월 공용) ──
+// vCLS · 템플릿 · 수동 제외한 VM 은 ITSM 에 등록할 대상이 아니다. 생성 · 삭제 · 'ITSM 반영 필요' 에
+// 넣지 않고 여기에 모은다. 무엇이 왜 빠졌는지는 보여야 하므로 숨기지는 않는다.
+function excludedSection(items, options) {
+  const opts = options || {};
+  const list = items || [];
+  const body = list.map(item => `<tr>
+      <td class="mono text-xs" style="white-space:nowrap">${syncEscape(String(item.changed_on || item.day || item.detected_at || '-').slice(0, 10))}</td>
+      <td><strong>${syncEscape(item.vm_name || item.hostname || '-')}</strong></td>
+      <td>${syncEscape(item.hostname || '-')}</td>
+      <td class="text-xs mono">${syncEscape(item.primary_ip || '-')}</td>
+      <td class="text-xs">${syncEscape([item.cluster_label, item.esxi_label].filter(Boolean).join(' / ') || '-')}</td>
+      <td class="text-xs">${syncEscape(item.change || item.summary || item.kind_label || '-')}</td>
+      <td class="text-xs"><strong>${syncEscape(item.exclude_label || '-')}</strong></td>
+    </tr>`).join('');
+  return `<details style="margin-bottom:18px" ${opts.open ? 'open' : ''}>
+    <summary style="cursor:pointer"><span class="text-muted" style="font-weight:700;font-size:15px">[제외] 총 ${list.length.toLocaleString()}건</span>
+      <span class="text-xs text-muted">vCLS · 템플릿 · 수동 제외한 VM. 자산이 아니므로 대수 · ITSM 반영과 무관합니다(ITSM 등록 대기 아님)</span></summary>
+    ${list.length ? `<div class="table-wrap" style="max-height:320px;overflow:auto;margin-top:6px"><table class="table-sticky">
+      <thead><tr><th>날짜</th><th>VM 명</th><th>호스트명</th><th>IP</th><th>통합기</th><th>vCenter 변화</th><th>제외 사유</th></tr></thead>
+      <tbody>${body}</tbody></table></div>` : '<div class="text-xs text-muted" style="padding:6px 2px">없음</div>'}
+  </details>`;
+}
+
 function renderChangeDigestGroups(holderId, rows, options) {
   const holder = document.getElementById(holderId);
   if (!holder) return;
   const opts = options || {};
   const only = opts.kind && opts.kind !== 'all' ? opts.kind : null;
-  holder.innerHTML = DIGEST_SECTIONS.filter(([kind]) => !only || kind === only).map(([kind, label]) => {
+  const excluded = opts.excluded && (!only || only === 'EXCLUDED')
+    ? excludedSection(opts.excluded, {open: only === 'EXCLUDED'}) : '';
+  holder.innerHTML = excluded && only === 'EXCLUDED' ? excluded : DIGEST_SECTIONS.filter(([kind]) => !only || kind === only).map(([kind, label]) => {
     const items = (rows || []).filter(row => row.kind === kind);
     const net = items.reduce((sum, row) => sum + Number(row.count_effect || 0), 0);
     const pending = items.filter(row => row.reflection === 'NOT_REFLECTED').length;
@@ -477,7 +503,7 @@ function renderChangeDigestGroups(holderId, rows, options) {
             digestTableInner(items, {withKind: false})}</table></div>`
         : `<div class="text-xs text-muted" style="padding:6px 2px">${syncEscape(opts.empty || '없음')}</div>`}
     </div>`;
-  }).join('');
+  }).join('') + excluded;
 }
 
 // ── 자산 생성 · 삭제 내역 (주간 · 월간 공용) ──
@@ -609,12 +635,15 @@ function renderAssetMovementGroups(holderId, movements, options) {
         : `<div class="text-xs text-muted" style="padding:6px 2px">${all.length ? '조건에 맞는 것이 없습니다.' : '없음'}</div>`}
     </div>`;
   }).join('');
+  const excludedItems = (((movements || {}).excluded || {}).items || [])
+    .filter(item => !term || [item.vm_name, item.hostname, item.primary_ip, item.exclude_label]
+      .some(v => String(v || '').toLowerCase().includes(term)));
   holder.innerHTML = movementEquation(movements, opts.previousLabel)
     + `<div class="text-xs text-muted" style="margin:-6px 0 12px">서버 대수는 <strong>ITSM 기준</strong>입니다. vCenter 에서만 생기거나
        사라진 서버(전원 켜짐 · 꺼짐 포함)도 [생성] · [삭제] 에 넣되 대수는 그대로이고, <strong>ITSM 반영</strong> 칸에
        볼 때마다 지금 ITSM 과 다시 견준 결과를 적습니다. <strong>서버 1대는 생성 · 변경 · 삭제 중 한 곳에만</strong> 나옵니다
-       (기간의 처음과 끝을 견줌).</div>`
-    + sections;
+       (기간의 처음과 끝을 견줌). vCLS · 템플릿 · 수동 제외 VM 은 <strong>[제외]</strong> 에 따로 둡니다.</div>`
+    + sections + excludedSection(excludedItems);
   return {shown: shownCount, total: totalCount};
 }
 

@@ -166,3 +166,34 @@ def test_the_monthly_report_change_block_uses_the_same_moves(client) -> None:
     removed = sorted(n for b in data.values() for n in b["removed"])
     assert created == ["late-reg", "new-ok"] and removed == ["del-ok", "itsm-retire"]
     assert data["esxi-b"]["moved_in"] == ["vmo"] and data["esxi-a"]["moved_out"] == ["vmo"]
+
+
+def add_vm(conn, day: str, name: str, host: str = "esxi-b") -> None:
+    run = int(conn.execute("SELECT MAX(id) AS n FROM resource_usage_run WHERE period_start=?", (day,)).fetchone()["n"])
+    conn.execute(
+        "INSERT INTO vm_resource_usage_daily(run_id, stat_date, vcenter_snapshot_id, asset_key, vcenter_id,"
+        " service_name, cluster_name, esxi_host, vm_uuid, vm_name, power_state, allocated_cpu_cores,"
+        " allocated_memory_mb, sample_count, inventory_status, collection_status, raw_json, created_at)"
+        " VALUES(?,?,NULL,?,'VC1','업무A','CL1',?,?,?,'poweredOn',1,1024,12,'CURRENT','SUCCESS','{}',?)",
+        (run, day, f"VC1|{name}", host, f"uuid-{name}", name, day))
+
+
+def test_vcls_and_manual_exclusions_go_to_their_own_column(client) -> None:
+    """vCLS · 수동 제외 VM 은 ITSM 에 없어도 '추가 대기' 가 아니라 [제외] 다. 대수에도 대기에도 안 든다."""
+    from application.db import database_manager
+
+    with database_manager().connect() as conn:
+        add_vm(conn, "2026-11-01", "vCLS-1a2b3c")
+        add_vm(conn, "2026-11-01", "test-tmp")
+        conn.execute("INSERT INTO asset_exclusion(source, asset_key, mode, reason, updated_at)"
+                     " VALUES('RVTOOLS','VC1|test-tmp','EXCLUDE','시험용','2026-11-01')")
+        conn.commit()
+    body = client.get("/api/asset-sync/resource-usage?as_of=2026-11-01").get_json()
+    assert body["summary"]["vm_count"] == 5 and body["summary"]["vm_not_counted"] == 2   # 그대로
+    assert body["summary"]["vm_excluded"] == 2 and hosts(body)["esxi-b"]["excluded_count"] == 2
+    moves = client.get("/api/asset-sync/resource-usage/moves?from=2026-10-01&to=2026-11-01").get_json()
+    pending = {r["vm_name"] for r in moves["rows"] if r["change"] == "PENDING_ADD"}
+    excluded = {r["vm_name"]: r["exclude_label"] for r in moves["rows"] if r["change"] == "EXCLUDED"}
+    assert pending == {"new-wait"}
+    assert set(excluded) == {"vCLS-1a2b3c", "test-tmp"} and "시험용" in excluded["test-tmp"]
+    assert moves["excluded_total"] == 2

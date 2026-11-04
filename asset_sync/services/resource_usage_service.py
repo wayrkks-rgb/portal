@@ -514,6 +514,7 @@ class VMResourceUsageExportService:
                 "vcenter_vm_count": sum(int(h.get("vcenter_vm_count") or 0) for h in hosts),
                 "vm_not_counted": sum(int(h.get("not_counted_count") or 0) for h in hosts),
                 "vm_pending_remove": sum(int(h.get("pending_remove_count") or 0) for h in hosts),
+                "vm_excluded": sum(int(h.get("excluded_count") or 0) for h in hosts),
                 "cluster_count": len(clusters),
                 "datastore_count": len(datastores),
                 "disk_capacity_gb": disk.get("capacity_gb"),
@@ -707,6 +708,18 @@ class VMResourceUsageExportService:
                 "itsm_service_name": entry.get("service_name"),
             })
         host_keys = {self.host_identity(h): h for h in hosts}
+        # 자산에서 뺀 VM(vCLS · 템플릿 · 수동 제외). 대수에도 '대수 제외(ITSM 미반영)' 에도 넣지 않고 따로 센다.
+        excluded_by_host: dict[tuple[str, str], int] = defaultdict(int)
+        by_reason: dict[str, int] = defaultdict(int)
+        for item in meta.get("excluded", {}).values():
+            if any(value and str(item.get(field) or "") != str(value) for field, value in filters.items()):
+                continue
+            excluded_by_host[(str(item.get("vcenter_id") or ""), str(item.get("esxi_host") or ""))] += 1
+            by_reason[str(item.get("exclude_label") or "")] += 1
+        for key, host in host_keys.items():
+            host["excluded_count"] = excluded_by_host.get(key, 0)
+        result["excluded"] = sum(excluded_by_host.values())
+        result["excluded_by_reason"] = dict(by_reason)
         unplaced = 0
         for ident, entry in members.items():
             if ident in known or entry["state"] != REMOVE_PENDING:
@@ -855,6 +868,7 @@ class VMResourceUsageExportService:
                 "vcenter_vm_count": sum(int(m.get("vcenter_vm_count") or 0) for m in members),
                 "not_counted_count": sum(int(m.get("not_counted_count") or 0) for m in members),
                 "pending_remove_count": sum(int(m.get("pending_remove_count") or 0) for m in members),
+                "excluded_count": sum(int(m.get("excluded_count") or 0) for m in members),
                 "allocated_cpu_cores": capacity_cpu,
                 "allocated_memory_mb": capacity_mem,
                 "allocated_memory_gb": self._mb_to_gb(capacity_mem),
@@ -921,6 +935,7 @@ class VMResourceUsageExportService:
             ("서비스명", "service_name"), ("vCenter", "vcenter_id"), ("Cluster", "cluster_name"),
             ("통합기", "esxi_host"), ("VM 대수(자산 기준)", "vm_count"), ("vCenter VM 수", "vcenter_vm_count"),
             ("vCenter 에만 있음(대수 제외)", "not_counted_count"), ("삭제 대기(ITSM 미반영)", "pending_remove_count"),
+            ("제외(vCLS · 수동 제외)", "excluded_count"),
             ("실제 CPU Core", "allocated_cpu_cores"),
             ("실제 Memory GB", "allocated_memory_gb"),
             ("VM 할당 CPU Core", "assigned_cpu_cores"), ("VM 할당 Memory GB", "assigned_memory_gb"),
@@ -1028,6 +1043,7 @@ class VMResourceUsageExportService:
             ("vCenter", "vcenter_id"), ("통합기(Cluster)", "cluster_display_name"), ("ESXi", "esxi_host"),
             ("추가", "added"), ("삭제", "removed"), ("이동 들어옴", "moved_in"), ("이동 나감", "moved_out"),
             ("순증감", "net"), ("추가 대기", "pending_add"), ("삭제 대기", "pending_remove"),
+            ("제외(새로 생긴 vCLS · 수동 제외)", "excluded"),
         ], data["by_host"])
         wb.save(target)
         wb.close()

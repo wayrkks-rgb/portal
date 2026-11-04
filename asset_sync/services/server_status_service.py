@@ -371,6 +371,49 @@ class ServerStatusService:
         movements["vcenter_toggled"] = len(changed_items)
 
     @staticmethod
+    def attach_excluded(movements: dict[str, Any] | None, excluded_rows: list[dict[str, Any]]) -> None:
+        """자산에서 뺀 VM(vCLS · 템플릿 · 수동 제외)의 vCenter 변화. 서버 1대 = 1줄.
+
+        이 VM 들은 ITSM 에 등록할 대상이 아니므로 [생성] · [삭제] 와 'ITSM 반영 필요' 에 넣지 않는다.
+        그래도 무엇이 빠졌는지는 보여야 하므로 따로 모은다.
+        """
+        from .change_digest_service import VM_RANK_NAMES, vm_step
+
+        if movements is None:
+            return
+        per_server: dict[str, list[dict[str, Any]]] = {}
+        for row in sorted(excluded_rows or [], key=lambda r: str(r.get("day") or "")):
+            per_server.setdefault(str(row.get("server_key")), []).append(row)
+        items = []
+        for rows in per_server.values():
+            last = rows[-1]
+            steps = [step for step in (vm_step(r) for r in rows) if step]
+            change = last.get("summary") or last.get("kind_label") or ""
+            if steps:
+                first, end = steps[0][0], steps[-1][1]
+                change = ("vCenter VM 생성" if first == 0 and end > 0 else
+                          "vCenter VM 삭제" if end == 0 and first > 0 else
+                          f"vCenter {VM_RANK_NAMES[first]} → {VM_RANK_NAMES[end]}")
+            items.append({
+                "changed_on": last.get("day"),
+                "vm_name": last.get("vm_name"),
+                "hostname": last.get("hostname") or last.get("vm_name"),
+                "primary_ip": last.get("primary_ip"),
+                "vcenter_label": last.get("vcenter_label") or last.get("vcenter_id"),
+                "cluster_label": last.get("cluster_label") or last.get("cluster_name"),
+                "esxi_label": last.get("esxi_label") or last.get("esxi_host"),
+                "change": change,
+                "exclude_reason": last.get("exclude_reason"),
+                "exclude_label": last.get("exclude_label"),
+                "vm_key": last.get("vm_key"),
+            })
+        items.sort(key=lambda i: (str(i.get("exclude_reason") or ""), str(i.get("hostname") or "")))
+        by_reason: dict[str, int] = {}
+        for item in items:
+            by_reason[str(item.get("exclude_reason") or "")] = by_reason.get(str(item.get("exclude_reason") or ""), 0) + 1
+        movements["excluded"] = {"items": items, "total": len(items), "by_reason": by_reason}
+
+    @staticmethod
     def _movement_reason(row: dict[str, Any]) -> str:
         types = set(row.get("event_types") or [])
         if "ITSM_ASSET_CREATED" in types:

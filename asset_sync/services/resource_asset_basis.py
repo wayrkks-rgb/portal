@@ -43,14 +43,16 @@ STATE_LABELS = {
 
 ADDED, REMOVED, MOVED = "ADDED", "REMOVED", "MOVED"
 PENDING_ADD, PENDING_REMOVE = "PENDING_ADD", "PENDING_REMOVE"
+EXCLUDED = "EXCLUDED"
 MOVE_LABELS = {
     ADDED: "추가",
     REMOVED: "삭제",
     MOVED: "이동(vMotion)",
     PENDING_ADD: "추가 대기(ITSM 미반영)",
     PENDING_REMOVE: "삭제 대기(ITSM 미반영)",
+    EXCLUDED: "제외(vCLS · 수동 제외 등)",
 }
-MOVE_ORDER = {ADDED: 0, REMOVED: 1, MOVED: 2, PENDING_ADD: 3, PENDING_REMOVE: 4}
+MOVE_ORDER = {ADDED: 0, REMOVED: 1, MOVED: 2, PENDING_ADD: 3, PENDING_REMOVE: 4, EXCLUDED: 5}
 
 
 def vm_identity(row: Mapping[str, Any]) -> tuple[str, str]:
@@ -207,7 +209,9 @@ class ResourceAssetBasis:
         vcenters = {str(r["vcenter_id"] or "") for r in conn.execute(
             "SELECT DISTINCT vcenter_id FROM host_resource_usage_daily WHERE stat_date=?", (day,)).fetchall()}
         meta = {"day": day, "applied": itsm is not None, "vcenters": vcenters,
-                "itsm_as_of": (itsm or {}).get("snapshot", {}).get("snapshot_date") if itsm else None}
+                "itsm_as_of": (itsm or {}).get("snapshot", {}).get("snapshot_date") if itsm else None,
+                # 그날 vCenter 에 있지만 자산에서 뺀 VM(vCLS · 템플릿 · 수동 제외). 대수 · 반영 대기와 무관.
+                "excluded": {}}
         entries: dict[tuple[str, str], dict[str, Any]] = {}
         if itsm is None:
             self._members[day] = (entries, meta)
@@ -215,7 +219,19 @@ class ResourceAssetBasis:
         rows = [dict(r) for r in conn.execute(
             "SELECT * FROM vm_resource_usage_daily WHERE stat_date=? AND inventory_status='CURRENT'", (day,)).fetchall()]
         for row in rows:
-            if not self.scope.decide_vcenter(row).included:
+            decision = self.scope.decide_vcenter(row)
+            if not decision.included or decision.reason:
+                label = self.scope.reason_label(decision.reason)
+                meta["excluded"][vm_identity(row)] = {
+                    "identity": vm_identity(row), "vcenter_id": row.get("vcenter_id"),
+                    "cluster_name": row.get("cluster_name"), "esxi_host": row.get("esxi_host"),
+                    "vm_name": row.get("vm_name"), "vm_uuid": row.get("vm_uuid"), "asset_key": row.get("asset_key"),
+                    "power_state": row.get("power_state"), "allocated_cpu_cores": row.get("allocated_cpu_cores"),
+                    "allocated_memory_mb": row.get("allocated_memory_mb"), "last_seen": row.get("stat_date"),
+                    "present": True, "counted": False, "state": "EXCLUDED",
+                    "exclude_reason": decision.reason,
+                    "exclude_label": f"{label}: {decision.note}" if decision.note else label,
+                }
                 continue
             entries[vm_identity(row)] = self._entry(row, itsm, True, True)
 
@@ -228,7 +244,7 @@ class ResourceAssetBasis:
             " GROUP BY vcenter_id, vm_uuid, asset_key, vm_name", (since, day)).fetchall():
             cand = dict(cand)
             ident = vm_identity(cand)
-            if ident in entries or str(cand.get("vcenter_id") or "") not in vcenters:
+            if ident in entries or ident in meta["excluded"] or str(cand.get("vcenter_id") or "") not in vcenters:
                 continue   # 그날 있거나, 그날 그 vCenter 수집이 없어 사라졌는지 알 수 없다
             if ident not in last or str(cand["last_day"]) > str(last[ident]["last_day"]):
                 last[ident] = cand
@@ -264,9 +280,19 @@ class ResourceAssetBasis:
                 kind = self._kind(e0, e1)
                 if kind:
                     rows.append(self._move_row(kind, e0, e1))
+            # 두 날 사이 vCenter 에 새로 생긴 제외 대상(vCLS 등). 추가 대기로 두지 않고 [제외] 로 보인다.
+            for ident, item in meta1["excluded"].items():
+                if ident in m0 or ident in meta0["excluded"]:
+                    continue
+                if str(item["vcenter_id"] or "") not in meta0["vcenters"]:
+                    continue
+                rows.append(self._excluded_row(item))
         rows.sort(key=lambda r: (MOVE_ORDER[r["change"]], str(r.get("cluster_after") or r.get("cluster_before") or ""),
                                  str(r.get("vm_name") or "")))
         counts = {k: sum(1 for r in rows if r["change"] == k) for k in MOVE_LABELS}
+        excluded_now: dict[str, int] = {}
+        for item in meta1["excluded"].values():
+            excluded_now[item["exclude_label"]] = excluded_now.get(item["exclude_label"], 0) + 1
         return {
             "applied": applied,
             "basis": self.describe(applied),
@@ -275,7 +301,28 @@ class ResourceAssetBasis:
             "counts": counts,
             "net": counts[ADDED] - counts[REMOVED],
             "unknown": unknown,
+            # 기준일에 vCenter 에 있지만 자산에서 뺀 VM 수(사유별). 새로 생긴 것만 rows 에 [제외] 로 들어간다.
+            "excluded_total": len(meta1["excluded"]),
+            "excluded_by_reason": excluded_now,
             "by_host": self._by_host(rows),
+        }
+
+    @staticmethod
+    def _excluded_row(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "change": EXCLUDED, "change_label": MOVE_LABELS[EXCLUDED], "count_effect": 0,
+            "reason": f"vCenter 생성 · 자산에서 뺀 VM({item['exclude_label']}) — 대수 · ITSM 등록과 무관",
+            "exclude_reason": item.get("exclude_reason"), "exclude_label": item.get("exclude_label"),
+            "vm_name": item.get("vm_name"), "vm_uuid": item.get("vm_uuid"), "hostname": None, "primary_ip": None,
+            "cm_id": None, "service_name": None, "os": None, "power_state": item.get("power_state"),
+            "allocated_cpu_cores": item.get("allocated_cpu_cores"),
+            "allocated_memory_gb": (round(int(item["allocated_memory_mb"]) / 1024, 1)
+                                    if item.get("allocated_memory_mb") is not None else None),
+            "vcenter_id": item.get("vcenter_id"),
+            "cluster_before": None, "esxi_before": None,
+            "cluster_after": item.get("cluster_name"), "esxi_after": item.get("esxi_host"),
+            "vcenter_before": "없음", "vcenter_after": "있음 · 제외 대상",
+            "itsm_before": "-", "itsm_after": "-", "last_seen": item.get("last_seen"),
         }
 
     @staticmethod
@@ -366,12 +413,15 @@ class ResourceAssetBasis:
             key = (str(vc or ""), str(esxi or ""))
             if key not in table:
                 table[key] = {"vcenter_id": vc, "cluster_name": cluster, "esxi_host": esxi, "added": 0,
-                              "removed": 0, "moved_in": 0, "moved_out": 0, "pending_add": 0, "pending_remove": 0}
+                              "removed": 0, "moved_in": 0, "moved_out": 0, "pending_add": 0, "pending_remove": 0,
+                              "excluded": 0}
             return table[key]
 
         for row in rows:
             vc = row.get("vcenter_id")
-            if row["change"] in (ADDED, PENDING_ADD):
+            if row["change"] == EXCLUDED:
+                bucket(vc, row["cluster_after"], row["esxi_after"])["excluded"] += 1
+            elif row["change"] in (ADDED, PENDING_ADD):
                 bucket(vc, row["cluster_after"], row["esxi_after"])["added" if row["change"] == ADDED else "pending_add"] += 1
             elif row["change"] in (REMOVED, PENDING_REMOVE):
                 side = ("cluster_before", "esxi_before") if row["change"] == REMOVED or row["esxi_before"] else ("cluster_after", "esxi_after")
